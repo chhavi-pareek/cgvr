@@ -8,8 +8,8 @@ _KEYS = {
 
 
 class CameraPath:
-    def __init__(self, scene, frames):
-        k = np.asarray(_KEYS[scene], np.float64)
+    def __init__(self, scene, frames, keys=None):
+        k = np.asarray(_KEYS[scene] if keys is None else keys, np.float64)
         self._t = k[:, 0] * max(frames - 1, 1)
         self._k = k
 
