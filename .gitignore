@@ -1,3 +1,4 @@
 bench/logs/
 __pycache__/
 .pytest_cache/
+latent/cache/
