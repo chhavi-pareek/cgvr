@@ -8,7 +8,7 @@ from latent.corpus import ANIMATION, BEHAVIOUR, DATA
 from latent.train import D, get_data, head_err, head_var, load_model
 
 KS = list(range(D, 3, -1))  # 16 .. 4
-SEEDS = range(3)
+SEEDS = range(10)
 TOL = 1e-3  # allowed non-monotone wobble, in normalised-MSE units
 CLIFF = 0.35  # no single k-step may carry more than this share of the total 16->4 degradation
 TABLE_KS = [16, 12, 10, 8, 6, 5, 4]
