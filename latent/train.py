@@ -85,7 +85,7 @@ def load_model(seed, nested):
 if __name__ == "__main__":
     x, y, tr, te = get_data()
     for nested in (True, False):
-        for seed in range(3):
+        for seed in range(10):
             m, order, fill = train(seed, nested)
             with torch.no_grad():
                 pred = m.decode(m.enc(x[te]))
