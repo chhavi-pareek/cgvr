@@ -229,7 +229,7 @@ def phase7_table(e_sur, nav_err=False):
 
 class Run:
     def __init__(self, scene, n, condition, seed=0, cam=None, calib=None, budget_frac=0.25, cap=None,
-                 cap_scale=1.0):
+                 cap_scale=1.0, alloc_cls=SerialAllocator, quality=None):
         self.scene, self.n, self.cond, self.seed = scene, n, condition, seed
         self.rng = np.random.default_rng(seed)
         self.brng = np.random.default_rng(seed + 7)  # behaviour randomness, separate stream
@@ -273,13 +273,15 @@ class Run:
             e_sur = float(self.sur.e_rate @ self.sur.ctx_freq)
             e_max = float(self.sur.e_rate[self.sur.ctx_freq > 0.01].max())
             self.table = phase7_table(e_max)
+            if quality is not None:  # ablation of invariant 2: authored per-axis quality
+                self.table.quality = np.asarray(quality, np.float64)
             # only the behaviour axis executes in phase 7, so only its measured cost enters the
             # budget; the budget is a fraction of the allocatable range above the all-surrogate floor
             th = np.zeros((4, 4))
             th[0, :3] = np.maximum(self.theta_beh[:3] - self.theta_beh[3], 0.0)
             self.cost = row_costs_from_theta(self.table, CORE_US + self.theta_beh[3], th) * 1e-3
             self.budget = n * (self.cost.min() + budget_frac * (self.cost.max() - self.cost.min()))
-            self.alloc = SerialAllocator(self.table)
+            self.alloc = alloc_cls(self.table)
             self.e_sur = e_sur
             self.cap = cap if cap is not None else cap_scale * 300.0 * e_sur
             self.ledger = ErrorLedger(n, self.cap, self.rng)
