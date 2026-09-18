@@ -23,6 +23,10 @@
   - Plain: monotone on the mean curve. Per seed, monotone fails on 1 of 10 behaviour and 2 of 10 animation seeds.
   - At k=4 the nested animation head keeps only about a quarter of the variance (error 0.75), the behaviour head about 55% (error 0.45). Degradation is smooth, but the animation head is close to unusable at 4 dims.
 
+- Phase 3: `alloc/config.py` (4 axes x 4 tiers, 256 -> 180 rows after coupling; behaviour and animation quality = 1 - phase 2 nested truncation nMSE at k=16/8/4, core/none = 0), `alloc/costmodel.py` (RLS, forgetting 0.98, 13 features: per-agent core + 12 incremental axis-tier counts, tier 3 is the zero reference), `bench/telemetry.py` (stand-in numpy per-tier workloads timed with perf_counter, per-group ground truth + total; RLS fits from total only), `alloc/serial.py` (Lagrangian bisection, warm-started lambda, greedy fill of the integrality gap), `alloc/oracle.py` (brute force N<=8; exact DP over integer-tick costs at N=200), `tests/test_alloc.py`.
+- Phase 3 acceptance (N=200, m=180, 6 seeds x 3 budgets, exact DP oracle on quantised costs): utility gap max 0.019% with fill, 0.057% without (bound: 2%). Budget sweep 0 -> 1.2 T(0) in 60 steps, all returned costs <= budget. Cold start 22 Lagrangian evaluations mean (max 28); warm start fewer, tested. Serial allocate ~2 ms at N=200. `pytest -q` 26 passed (7 phase 1 + 19 phase 3).
+- Telemetry (N=200, 300 random-histogram frames, `python -m bench.telemetry`): last-50 relative RMS error of predicted total 6%. Geometry (250/62/16 us per agent) and animation (22/20 us) recovered to within a few us; navigation (9/2 us) is below the noise floor of geometry and is misattributed between tiers.
+
 ## IN PROGRESS
 - Nothing.
 
@@ -38,6 +42,11 @@
 - Phase 2 gate criteria were fixed before running: monotone within 1e-3 at every k from 16 to 4, and no single step above 35% of the total rise. Not retuned after the 3-seed result; the 10-seed rerun used the same criteria plus a pre-set accept rule (see DONE).
 - Hub queue is a scripted service window (front agent released every 45 frames, queuers rejoin at the tail). Corridor door is a hard clamp on a 1.6 m gap at x=30.
 
+- Phase 3 cost model: `frame_ms = theta_core * N + sum theta[axis,tier<3] * n[axis,tier]`. Tier 3 of each axis is the zero-cost reference so the fit is identifiable; `theta_core` absorbs the invariant-core fixed cost plus lowest-tier costs. RLS recursion is unclamped (clamping inside the recursion diverged); costs read out are clamped >= 0. P-trace cap at 1e4 per feature guards against blow-up under forgetting.
+- Allocator: rows sorted (cost asc, quality desc) so argmax tie-break prefers the cheaper row. lambda_lo = 0, lambda_hi = max U / min positive cost gap (every agent at min cost). Stop when hi-lo <= 1e-4 hi or budget slack <= 1e-3 budget, max 64 steps. Returned assignment is always the evaluated feasible end `hi`, then greedy fill by utility-gain/cost ratio while upgrades fit. If min-cost assignment exceeds the budget, return it with `infeasible=True`; never violate the error headroom mask.
+- Config quality q(c) = unweighted mean of four per-axis fidelities in [0,1]. Error rate e(c) = behaviour nMSE + navigation deviation (visual axes contribute zero divergence). Couplings: impostor geometry excludes IK animation; field/core navigation excludes gesture-bearing behaviour (latent16, latent8). Dominance pruning is a runtime helper (`prune_dominated`), not applied by default.
+- Oracle: brute force validates the DP at N=6 (5-row subtables); the DP is the N=200 oracle. Tests quantise costs to integer ticks and hand the same quantised costs to both solvers, so the comparison is exact.
+
 ## OPEN QUESTIONS
 - Should MassLOD sim tiers throttle tick rate or freeze agents in the baseline? Currently they do not. This decides how "behavioural error" is measured against the baseline in phase 3.
 - At N=2000 the sim histogram sits on the caps (80/400/1200/320) in the plaza. Cap sizes are placeholders; tune before treating the baseline as a fair opponent.
@@ -45,5 +54,9 @@
 - The phase spec says Phase 2 runs on the T4; this was run on CPU. Rerun `python -m latent.train && python -m latent.truncation` on the T4 before treating the numbers as final (you asked for a T4 reminder after all phases).
 - Stray directory in repo root with a multi-line garbled name (from a failed setup script paste). Empty, untracked by git, not touched.
 
+- Navigation and geometry per-axis fidelities in `alloc/config.py` are authored placeholders (1/0.9/0.6/0.3 and 1/0.75/0.5/0.25) and so is the navigation error rate. They are not in the latent, so invariant 2 covers only behaviour and animation. Replace with measured trajectory deviation (nav) and screen-space geometric error (geometry) once tiers execute.
+- Telemetry times stand-in numpy kernels, not the simulator (phase 1 records tiers without executing tiered work). RLS fits genuine measured time, but the cost figures are not the crowd's. Navigation costs are unidentifiable under geometry noise at N=200; expect the same on the T4 unless nav work is real.
+- Budget means predicted cost under the RLS model. `resid_var` is tracked; subtracting a k-sigma safety margin from the budget is not yet done.
+
 ## NEXT
-- Phase 3: cost model and serial allocator. Latent dimension for the decoder is 16; the truncation curve above says how much fidelity each retained-dim count costs.
+- Phase 4: parallel allocator (threaded, then CUDA/OpenACC standalone). The serial `SerialAllocator.allocate` is the correctness oracle; the per-lambda selection is an embarrassingly parallel argmax over N x m, the reduction is a sum. Warm-start bracketing reduces to ~2-4 evaluations per frame once lambda tracks.
