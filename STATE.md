@@ -51,6 +51,21 @@
   Intermediate w: WEE falls monotonically from w=0 to w=1 (sparse 0.877 -> 0.864 -> 0.820 -> 0.725 -> ... -> 0.521), bytes barely move until w >= 0.6. WEE loss at w=1 is body mixing (tier bodies are up to 576 instructions, gather ~32 per lane), the residual loss at w=0 is gather divergence.
 - Phase 5 acceptance: **Pareto criterion NOT met as stated; adaptive criterion met.** (a) In (bytes, WEE), w=0 and w=1 are each Pareto-optimal at all three densities; no intermediate w dominates either. w=0 is the WEE maximiser and keeps spatial compactness inside each state group, so nothing beats it on both axes; w=1 is the bytes minimiser by construction. Only the blind state ordering is dominated (everywhere, by w=0). In modelled time each extreme does lose somewhere: w=1 loses 13% at dense, w=0 loses 2-4% at sparse/mixed. (b) Adaptive policy calibrated on the N=50k seed-0 sweep, evaluated on a held-out sweep (seed 1, N=16k and 32k, `bench/logs/order_sweep_test.csv`): equals the hindsight-best fixed w at all 6 density/size groups (PASS, tolerance 0.1%). It chooses only w in {0, 1}; that is the honest outcome of the front above.
 
+- Phase 6 (local; the INT8 GEMM ran on the NumPy INT32 path, no tensor cores yet): `alloc/cuda/score_int8.py` (per-agent utility u_ic = phi_i . b_c + kappa_c with phi the retained-energy profile of the nested latent, b_c the tier masks, kappa_c the nav/geo table term; symmetric per-row / per-column INT8, INT32 accumulator via `torch._int_mm` on CUDA or NumPy otherwise; fp32 epilogue; derived per-candidate and pairwise error intervals; FP64 re-rank of the overlapping set only, same sequential dot order and comparator as the reference), `bench/quant.py`, `tests/test_quant.py` (12 tests). `pytest -q tests/` 63 passed.
+- Phase 6 numbers, N = 2000, m = 180, nested-AE seed 0 latents, `bench/logs/quant.csv`. lambda from serial allocations at 0.3 / 0.5 / 0.7 of T(0) plus 0. "provable" = fraction of agents whose INT8 top-1 is certified without any FP32 work; "int8=ref" = empirical match of the raw INT8 argmax; re-ranked decisions matched the FP64 reference in every case (asserted). cand/agent = mean size of the overlap set; bound = worst no-re-rank regret bound in score units (mean salience 1.34):
+
+  | d | interval | provable, lambda = 13.9 / 8.45 / 5.07 | provable, lambda = 0 | int8=ref (min over lambda) | cand/agent | bound max | observed regret max |
+  |---|---|---|---|---|---|---|---|
+  | 16 | pairwise | 0.976 / 0.954 / 0.941 | 0.000 | 0.9955 | 1.03-1.07 | 0.027 | 0.0068 |
+  | 16 | candidate | 0.767 / 0.574 / 0.363 | 0.000 | 0.9955 | 1.4-2.5 | 0.131 | 0.0068 |
+  | 8 | pairwise | 0.979 / 0.978 / 0.979 | 0.000 | 0.9965 | 1.02 | 0.024 | 0.0026 |
+  | 8 | candidate | 0.806 / 0.656 / 0.454 | 0.000 | 0.9965 | 1.25-1.8 | 0.081 | 0.0026 |
+  | 4 | pairwise | 0.984 / 0.985 / 0.988 | 0.000 | 0.9945 | 1.01-1.02 | 0.004 | 0.0045 |
+  | 4 | candidate | 0.888 / 0.796 / 0.667 | 0.000 | 0.9945 | 1.1-1.4 | 0.049 | 0.0045 |
+
+  At lambda = 0 nothing is provable at any d (about 7 candidates per agent): without cost pressure the rows that drop the latent tail differ from the winner by 1/4 of the tail energy, which for nested latents is below INT8 resolution of the row (the first dim carries most of the energy and sets the row scale). The raw INT8 argmax was nevertheless right for 99.5-100% of agents there. Re-ranking touches 0.1-1% of the N x m matrix at lambda > 0 and 4% at lambda = 0.
+- Phase 6 acceptance: interval derived (shown before implementation, confirmed; refined during implementation as recorded under DECISIONS); exact-match fraction reported at d = 16, 8, 4. Met, with the lambda = 0 caveat above.
+
 ## IN PROGRESS
 - Nothing.
 
@@ -88,7 +103,14 @@
 - Phase 5 densities are tiled: the N=2000 simulator snapshot is replicated k x k (agents shuffled so the id tie-break carries no spatial information). 2000 agents is 63 warps, far too few to occupy 40 SMs, so per-w differences at N=2000 were within launch overhead in the model and would be latency-bound on the T4.
 - The tier field in the key is the previous frame's tier (invariant 5). The study takes it from the phase 1 threshold assigner because the allocator needs telemetry costs; the hook for the allocated condition is the `assign` readback in `CudaAllocator.allocate`, and the key is agnostic to the source.
 
+- Phase 6 scoring definition: the phase 3 table quality is agent-independent, so a GEMM needs a per-agent utility. The retained-energy profile phi_i = z_i^2 / |z_i|^2 makes behaviour and animation quality the fraction of the agent's own latent energy the tier keeps (linear in phi, hence a GEMM); nav and geo stay table constants (kappa_c). For a flat profile the structure matches the table, but the values differ (energy share k/d vs 1 - nMSE). Whether the allocator adopts the per-agent utility is a phase 7/8 decision; phase 6 compares INT8 against FP64 on the same utility.
+- Phase 6 deviations from the confirmed derivation, all refinements of the same expansion: (1) the constant feature moved out of the GEMM into the epilogue, because a constant 1 set every row scale to 1/127 while energy shares are well below 1 (provable fraction at d = 16, lambda = 8.7 went from 0.19 to 0.54 at N = 300); the fp32 rounding count rises to 10u and the fp64 reference term to 5 2^-53. (2) Column scale max/126 instead of max/127 so the basis entries {0, 1/4, 1/2} quantise exactly (fbar_c = 0), and measured per-row residual caps ebar_i instead of Delta_i/2. (3) A pairwise interval on the score difference against the INT8 winner, eps_i(c, c*) = ebar_i |b_c - b_c*|_1 (+ the fbar terms, zero here), which is zero for rows sharing the winner's behaviour and animation tiers; it is the default and lifts the provable fraction from 0.36-0.89 to 0.94-0.99 at lambda > 0. The per-candidate interval remains available (`pairwise=False`) and is reported alongside.
+- Phase 6 GEMM backend: Numba-CUDA has no WMMA/mma intrinsic, so the tensor-core path is `torch._int_mm` (cuBLASLt IMMA on sm_75), with K padded to 32 and m to a multiple of 8. Torch was already a dependency. The NumPy INT32 matmul is the oracle; on the T4 `gemm_bitexact` in the CSV must be True for every row since both are exact integer arithmetic.
+- Reference and re-rank both use one njit sequential-order fp64 dot product, so the re-rank reproduces the reference's rounding exactly; a BLAS matmul could differ in the last bit and flip a knife-edge tie.
+
 ## OPEN QUESTIONS
+- Phase 6 T4 run: `python -m bench.quant` to fill `gemm_us` / `fp32_us` (INT8 IMMA vs fp32 matmul, CUDA events) and confirm `gemm_bitexact`. At N = 2000, K = 32, m = 184 the GEMM is ~12 MFLOP; expect it launch-bound, so the tensor-core speedup claim needs N >= 50k to mean anything.
+- INT8 row resolution is set by the dominant first latent dim. A per-row two-scale split (head dim separately) or INT8 on log-energy would tighten the intervals; not done, since the pairwise interval already certifies 94-99% at lambda > 0.
 - Phase 5: the Pareto acceptance ("w=0 and w=1 each dominated somewhere") fails in the two-objective sense with this key family (see DONE). If the criterion should be read in kernel time, it holds in the model with thin margins (2-4% sparse/mixed, 13% dense) and needs the T4 to confirm. Decide whether to (i) accept the time reading, (ii) add a coherence-only or memory-only axis that intermediate w can win, or (iii) change the kernel so gather work is a larger share (then spatial compactness inside warps pays more and intermediate w may enter the front).
 - Phase 5 T4 run: `python -m order.sweep --agents 2000 --tile 5 --frames 3` then `--seed 1 --tile 4 --agents 2000 1000 --out bench/logs/order_sweep_test.csv`, then `python -m order.adaptive`. Check `wee_meas == wee` in the CSV (the sweep raises on a counter mismatch) and whether the issued-instruction weights are close: compare event time against `t_model_us` at w=0 vs w=1.
 - Behaviour classes 2 and 3 (arriving, idle) are almost empty in these scenes: agents walk until arrival and are teleported. geff is 3 at sparse/mixed, so the coherence side is mostly the three tiers.
@@ -107,6 +129,6 @@
 - CUDA float-cost totals are summed in a different order from the oracle (see DECISIONS); if the T4 shows a mismatch on float costs at a knife edge, quantise costs to ticks inside `prepare()` for all implementations including the serial.
 
 ## NEXT
-- Phase 6: INT8 tensor-core scoring with error bounds.
+- Phase 7: error ledger, reconciliation, invariant core.
 - Phase 5 follow-up depends on the open question above (time reading vs a kernel change).
 - First T4 session: run the phase 4 GPU checks listed under OPEN QUESTIONS before the phase 8 reminder.
