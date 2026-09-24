@@ -4,3 +4,4 @@ __pycache__/
 latent/cache/
 *.so
 *.dylib
+.venv/
