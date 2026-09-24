@@ -73,6 +73,16 @@ def main():
         print("openacc unavailable:", ex)
 
     rows = []
+
+    def flush():
+        """Write after every size, so a crash on a later N keeps the earlier rows."""
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["n", "impl", "threads", "ms", "evals", "fill", "match"])
+            w.writeheader()
+            for r in rows:
+                w.writerow({**{"match": ""}, **r})
+
     rng = np.random.default_rng(args.seed + 1)
     for n in args.sizes:
         s, cost = instance(args.seed, n, table)
@@ -101,13 +111,9 @@ def main():
         print(f"N={n:>7} allocator share of {FRAME_MS:.2f} ms frame: serial {100 * p:5.1f}%  "
               f"best {100 * best / FRAME_MS:5.1f}%  frame speedup bound 1/((1-p)+p/S) = "
               f"{1 / ((1 - p) + p / S):5.2f}")
+        flush()
 
-    os.makedirs(os.path.dirname(LOG), exist_ok=True)
-    with open(LOG, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["n", "impl", "threads", "ms", "evals", "fill", "match"])
-        w.writeheader()
-        for r in rows:
-            w.writerow({**{"match": ""}, **r})
+    flush()
     print("wrote", LOG)
 
 

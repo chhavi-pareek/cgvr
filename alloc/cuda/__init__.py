@@ -15,6 +15,9 @@ if "NUMBA_ENABLE_CUDASIM" not in os.environ:
             import numba
             numba.config.reload_config()
 
-from alloc.cuda.allocator import CudaAllocator, SIMULATED, occupancy_report  # noqa: E402
+from alloc.cuda.allocator import CudaAllocator, SIMULATED, cuda, occupancy_report  # noqa: E402
 
-__all__ = ["CudaAllocator", "SIMULATED", "occupancy_report"]
+# `cuda` is re-exported so callers can synchronise against whichever numba CUDA module is
+# live (real driver or simulator) without importing numba themselves; bench/speedup.py
+# relies on it, and on the Mac that path is unreachable because SIMULATED short-circuits it.
+__all__ = ["CudaAllocator", "SIMULATED", "cuda", "occupancy_report"]
