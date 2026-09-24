@@ -384,7 +384,7 @@ def fig4():
         return
 
     fig = plt.figure(figsize=(7.0, 2.8))
-    gs = fig.add_gridspec(1, 2, wspace=0.3)
+    gs = fig.add_gridspec(1, 2, wspace=0.55)  # room for (a)'s colourbar label
     ax = fig.add_subplot(gs[0])
     if order is not None:
         sel = [r for r in order if int(r["n"]) == 50000 and int(r["seed"]) == 0]
