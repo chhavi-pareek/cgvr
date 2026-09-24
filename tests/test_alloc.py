@@ -4,6 +4,7 @@ import pytest
 from alloc.config import N_AXES, N_TIERS, build_table
 from alloc.costmodel import RLSCostModel, row_costs_from_theta
 from alloc.oracle import brute_force, dp_exact
+from alloc.sequential import SequentialAllocator
 from alloc.serial import SerialAllocator
 from bench.telemetry import Workloads, random_counts
 
@@ -149,3 +150,80 @@ def test_rls_predicts_measured_frame_time():
         errs.append((model.predict(h) - total) / total)
     assert np.sqrt(np.mean(np.square(errs))) < 0.3
     assert np.all(model.row_costs(TABLE) >= 0)
+
+
+# -- sequential (two-stage) ablation of the joint dual-budget solve --------------------
+
+
+def test_sequential_budget_never_exceeded_any_setting():
+    n = 120
+    s, ticks = _instance(11, n)
+    cost = ticks.astype(np.float64)
+    alloc = SequentialAllocator(TABLE)
+    t0 = SerialAllocator(TABLE).allocate(s, cost, np.inf).cost
+    for B in np.linspace(0.0, 1.2 * t0, 24):
+        r = alloc.allocate(s, cost, B)
+        assert not r.infeasible
+        assert float(cost[r.assign].sum()) <= B
+        assert r.cost == float(cost[r.assign].sum())
+
+
+def test_sequential_budget_never_exceeded_under_headroom():
+    n = 120
+    rng = np.random.default_rng(21)
+    s, ticks = _instance(13, n)
+    cost = ticks.astype(np.float64)
+    headroom = rng.uniform(0.15, 1.5, n)
+    alloc = SequentialAllocator(TABLE)
+    t0 = SerialAllocator(TABLE).allocate(s, cost, np.inf, headroom=headroom).cost
+    for B in np.linspace(0.0, 1.2 * t0, 24):
+        r = alloc.allocate(s, cost, B, headroom=headroom)
+        assert np.all(TABLE.err[r.assign] <= headroom)  # stage 1 mask holds even when infeasible
+        if not r.infeasible:
+            assert float(cost[r.assign].sum()) <= B
+
+
+def test_sequential_error_headroom_mask_respected():
+    n = 120
+    rng = np.random.default_rng(5)
+    s, ticks = _instance(7, n)
+    cost = ticks.astype(np.float64)
+    headroom = rng.uniform(0.15, 1.5, n)
+    B = 0.4 * cost.max() * n
+    r = SequentialAllocator(TABLE).allocate(s, cost, B, headroom=headroom)
+    assert not r.infeasible
+    assert r.cost <= B
+    assert np.all(TABLE.err[r.assign] <= headroom)
+
+
+def test_sequential_below_floor_is_flagged_like_serial():
+    n = 50
+    s, ticks = _instance(3, n, core=5.0)
+    cost = ticks.astype(np.float64)
+    floor = cost.min() * n
+    r = SequentialAllocator(TABLE).allocate(s, cost, floor * 0.5)
+    assert r.infeasible
+    assert r.cost == pytest.approx(floor)
+    r = SequentialAllocator(TABLE).allocate(s, cost, floor)
+    assert not r.infeasible and r.cost <= floor
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("frac", [0.15, 0.4, 0.7])
+def test_sequential_utility_never_above_joint(seed, frac):
+    """The two-stage solve searches the same feasible set with a weaker procedure, so its
+    utility must be <= the joint Lagrangian's. Measured: on this table it is *equal*, not
+    worse -- the joint formulation buys allocator time, not utility. If this assertion ever
+    fires with sequential strictly ahead, that is a real result, not a flaky test."""
+    n = 120
+    rng = np.random.default_rng(100 + seed)
+    s, ticks = _instance(seed, n)
+    cost = ticks.astype(np.float64)
+    headroom = rng.uniform(0.15, 1.5, n)
+    B = float(cost.min() * n + frac * (cost.max() - cost.min()) * n)
+    seq = SequentialAllocator(TABLE).allocate(s, cost, B, headroom=headroom)
+    joint = SerialAllocator(TABLE).allocate(s, cost, B, headroom=headroom)
+    assert np.all(TABLE.err[seq.assign] <= headroom)
+    if not seq.infeasible:
+        assert seq.cost <= B
+    assert seq.utility <= joint.utility * (1 + 1e-9) + 1e-9

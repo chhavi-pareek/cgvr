@@ -1,4 +1,4 @@
-"""Phase 8 sweep: 5 conditions x 3 scenes x 6 agent counts (plus a camera-path sub-sweep).
+"""Phase 8 sweep: 6 conditions x 3 scenes x 6 agent counts (plus a camera-path sub-sweep).
 
 Only on an explicit RUN SWEEP. Development: --scenes hub --agents 200 --frames 300 --limit 2.
 
@@ -13,6 +13,9 @@ Conditions
   parity_nocap      ablation of invariant 3: cap = inf, restoration is never forced
   parity_authored   ablation of invariant 2: hand-weighted per-axis quality ramps instead of the
                     latent-derived table (only the quality column changes; costs and rates do not)
+  parity_sequential ablation of the joint dual-budget solve: the error cap is discharged per agent
+                    first (cheapest feasible row), then the leftover time budget is spent greedily;
+                    same table, costs, budget, cap and calibration as parity
 
 Outputs (bench/logs/, gitignored), one row appended per finished cell so the sweep resumes:
   sweep_cells{tag}.csv   one row per (scene, cond, n, cam, seed): frame-time stats, KL end state,
@@ -38,7 +41,7 @@ LOGS = os.path.join(os.path.dirname(__file__), "logs")
 
 SCENES = ("plaza", "hub", "corridor")
 AGENTS = (100, 200, 500, 1000, 2000, 5000)
-CONDITIONS = ("reference", "baseline", "parity", "parity_nocap", "parity_authored")
+CONDITIONS = ("reference", "baseline", "parity", "parity_nocap", "parity_authored", "parity_sequential")
 
 # invariant-2 ablation: authored per-axis ramps and hand weights (behaviour, nav, anim, geo)
 AUTHORED_RAMP = np.array([1.0, 0.75, 0.5, 0.0])
@@ -75,6 +78,10 @@ def make_run(scene, n, cond, seed, cam, cal, allocator="serial"):
         r = Run(scene, n, "parity", alloc_cls=alloc_cls, **kw)
         r.table.quality = _authored_quality(r.table)
         return r
+    if cond == "parity_sequential":
+        from alloc.sequential import SequentialAllocator
+
+        return Run(scene, n, "parity", alloc_cls=SequentialAllocator, **kw)
     raise ValueError(cond)
 
 
