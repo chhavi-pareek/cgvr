@@ -233,6 +233,29 @@
 - **The mechanisms hold together, now tested jointly** (`tests/test_ensemble.py`, 7 tests). Coupled reconciliation, priority aging and the band ablation each change something the others depend on, and every bound had only ever been verified in isolation. All four combinations of {coupling, aging} satisfy the ledger cap, the core band, the demotion snap bound, bounded continuous degradation and the frame budget simultaneously; aging still removes starvation with coupling on, and coupling still shrinks the snap with aging on.
 - **A regression guard on invariant 1's *completeness*** (`bench/costaudit.py`, `tests/test_costaudit.py`). The reconciliation omission was invisible because nothing checked that the cost model accounts for every cost -- only that the costs it knows about are measured. The general form is a model whose residual correlates with an observable it does not track, so the audit regresses measured crowd time on the model's prediction and correlates the residual against ignored counts. Result: slope **2.106** (the model predicts less than half the real crowd cost) and residual correlation **0.538** with the reconciliation count. The first version of this audit timed only `_fine_core` and reported a clean bill -- `promote()` runs inside `_allocate`, so it instrumented a region that excludes the very cost it was looking for. `test_cost_model_is_complete` is a **strict xfail** that becomes an XPASS the moment the `R * e / cap` term lands.
 
+- **Hull allocator: the per-frame work is a sort, not a table scan** (`alloc/hull.py`, `tests/test_hull.py`, 9 tests). Every agent chooses from the same menu at the same prices, so `argmax_j [s_i q_j - lam c_j] = argmax_j [q_j - (lam/s_i) c_j]` and the choice turns on one scalar `theta_i = lam/s_i`. As theta grows the argmax walks the **upper concave hull** of the (cost, quality) points, so sorting agents by salience makes the assignment a step function: block boundaries by one binary search per hull edge, total cost by prefix sums, **O(K log n) per lambda instead of O(n m)**. The pruned 180-row table has **8 hull vertices**; everything else is chosen by no agent at any lambda.
+
+  | N | serial ms | hull ms | speedup |
+  |---|---|---|---|
+  | 200 | 0.92 | 0.67 | 1.4x |
+  | 1000 | 6.68 | 0.70 | 9.6x |
+  | 2000 | 20.1 | 0.76 | **26.7x** |
+  | 10000 | 347 | 1.84 | **188.7x** |
+
+  Utility within **0.005%** of the Lagrangian-plus-fill (worst case over the test grid 0.26%, which is the integrality gap: the hull is the exact LP optimum, the greedy fill rounds slightly better), budget and error mask respected everywhere. Prior art is Sinha & Zoltners 1979 / Dudzinski & Walukiewicz 1987 for the hull solution of MCKP and Funkhouser & Sequin 1993 for LOD-as-knapsack; what is specific here is that a *shared* menu collapses the search to a sort by salience. **Caveat, load-bearing:** this requires quality to be agent-independent. It is today; phase 6's per-agent INT8 scoring would break it and the fallback is `alloc/serial.py`.
+  - A first version grouped agents by **headroom value** rather than by **feasible set**, which with continuous headroom builds one hull and one sort per agent and made the allocator **25x slower** than the one it replaces. The error column has two levels, so there are at most two groups however many headroom values appear. `test_groups_by_feasible_set_not_by_headroom_value` pins it.
+- **A neutral metric both policies can be scored on: Crowd Fidelity Deviation** (`bench/cfd.py`, `tests/test_cfd.py`, 6 tests). Every comparison in this repo until now was open to a fair objection -- utility is PARITY's *objective* and divergence is computed from PARITY's *own surrogate model*, so MassLOD is being graded on someone else's exam. CFD scores both against the `reference` condition (full fidelity, no LOD), which is what both approximate, using only positions and velocities. It is **distributional**, because per-trajectory error is useless in a chaotic simulation, and it is reported **as a multiple of a noise floor** obtained by running the reference against itself with different behaviour randomness -- so 1.00 means indistinguishable at this sample size.
+
+  | observable | floor | MassLOD | PARITY | MassLOD/floor | PARITY/floor |
+  |---|---|---|---|---|---|
+  | density | 0.1094 | 0.2262 | 0.1379 | 2.07 | **1.26** |
+  | speed | 0.0915 | 0.1439 | 0.2085 | **1.57** | 2.28 |
+  | spacing | 0.1892 | 0.1964 | 0.1956 | 1.04 | 1.03 |
+  | ALL | 0.1300 | 0.1888 | 0.1807 | 1.45 | **1.39** |
+
+  PARITY wins overall but the result is **nuanced, not a sweep**: much better on spatial density, **worse on the speed distribution**, and both at the noise floor on spacing. This is the first comparison in the project that MassLOD's authors would accept.
+- **The metric found a defect on its first run.** `sim/tiered.py:341` gives surrogate agents `core.mbar[ctx]` -- a per-context **mean** speed multiplier -- instead of their decoded `speed_scale(dec)`, so every surrogate agent in a context moves at the same multiple of its nominal speed. Measured speed std: reference 0.2931, baseline 0.2767, PARITY 0.2308, and within PARITY, surrogate agents **0.2082** against live agents 0.2670. **The Metropolis-Hastings correction makes region occupancy exact but leaves the speed marginal unconstrained**, so it collapses toward a conditional mean. That is exactly the kind of thing a per-agent quality NMSE cannot see and an aggregate metric can. Fix is to sample a speed scale consistent with the region's reference distribution rather than average it; not applied, because it changes the core simulation.
+
 ## DECISIONS
 - Repo root is `cgvr/`; `sim/`, `bench/`, `tests/` sit at root.
 - Tier index: 0=HIGH, 1=MED, 2=LOW, 3=OFF.
