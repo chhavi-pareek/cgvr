@@ -25,7 +25,7 @@ public static class ParitySmoke
             Log($"table rows m = {table.M} (expected 180)");
             if (table.M != 180) { Err($"table has {table.M} rows, not 180"); failures++; }
 
-            var size = new Vector2(120f, 120f);
+            var size = SceneSpec.Get(SceneKind.Plaza);
             double floor;
             CrowdWorld.CalibrateAxes(size, table, 400, out floor);
             var theta = CrowdWorld.CalibratedTheta;
@@ -106,6 +106,10 @@ public static class ParitySmoke
                 failures++;
             }
             bas.Dispose(); par.Dispose();
+
+            // long enough to cross: up to 77 m of hall, or 28 m past the door, at ~1.3 m/s
+            failures += Scene(SceneKind.Hub, 800, 3600);
+            failures += Scene(SceneKind.Corridor, 260, 3600);
         }
         catch (Exception ex)
         {
@@ -114,6 +118,72 @@ public static class ParitySmoke
         }
         Log(failures == 0 ? "SMOKE PASS" : $"SMOKE FAIL ({failures} problems)");
         if (Application.isBatchMode) UnityEditor.EditorApplication.Exit(failures == 0 ? 0 : 1);
+    }
+
+    /// <summary>The concourse and the corridor: the same invariants, plus the scene's own
+    /// geometry -- nobody inside the partition, nobody outside the hall, and the crowd actually
+    /// flowing (served at the window, through the door and out).</summary>
+    static int Scene(SceneKind kind, int n, int frames)
+    {
+        var spec = SceneSpec.Get(kind);
+        int failures = 0;
+        var table = ParityTable.Build(spec.EMax);
+        double floor, baseFloor;
+        CrowdWorld.CalibrateAxes(spec, table, 200, out floor);
+        var baseTheta = CrowdWorld.MeasureAxes(spec, table, 200, Policy.Baseline, out baseFloor);
+        int kept;
+        var alloc = CrowdWorld.PricedAndPruned(table, floor, CrowdWorld.CalibratedTheta, out kept);
+        var worlds = new[] { new CrowdWorld(Policy.Baseline, n, spec, 1u, alloc), new CrowdWorld(Policy.Parity, n, spec, 1u, alloc) };
+        // cost-matched, as the demo runs by default: PARITY gets exactly the baseline's spend
+        worlds[0].ApplyCalibration(baseFloor, baseTheta);
+        worlds[1].ApplyCalibration(floor, CrowdWorld.CalibratedTheta);
+        int wall = 0, outside = 0, nan = 0, maskViol = 0, overBudget = 0;
+        var exits = new int[2];
+        float r = 0.45f * Mathf.Min(spec.Size.x, spec.Size.y);
+        for (int f = 0; f < frames; f++)
+        {
+            float ang = (f / 2400f) * Mathf.PI * 2f;
+            var cam = spec.Focus + new Vector2(r * Mathf.Cos(ang), r * Mathf.Sin(ang));
+            float yaw = Mathf.Atan2(spec.Focus.y - cam.y, spec.Focus.x - cam.x);
+            for (int k = 0; k < 2; k++)
+            {
+                var w = worlds[k];
+                if (k == 1) w.MatchBudgetMs = worlds[0].PredictedSpendMs();
+                w.Step(cam, yaw, w.StepMs);
+                for (int i = 0; i < w.N; i++)
+                {
+                    var p = w.Pos[i];
+                    if (float.IsNaN(p.x) || float.IsNaN(p.y)) nan++;
+                    if (p.x < -1e-3f || p.y < -1e-3f || p.x > spec.Size.x + 1e-3f || p.y > spec.Size.y + 1e-3f) outside++;
+                    if (w.PrevPos[i].x - p.x > 20f) exits[k]++;
+                }
+                if (kind == SceneKind.Corridor) wall += CorridorScene.WallViolations(w);
+                if (w.Mode == Policy.Parity)
+                {
+                    if (!w.Last.Infeasible && w.Last.Cost > w.BudgetMs * 1.0001f) overBudget++;
+                    for (int i = 0; i < w.N; i++)
+                        if (alloc.Err[w.Row[i]] > w.Ledger.Headroom[i] + 1e-4f) { maskViol++; break; }
+                }
+            }
+        }
+        var par = worlds[1];
+        int queued = 0;
+        for (int i = 0; i < par.N; i++) if (par.Slot[i] >= 0) queued++;
+        Log($"{spec.Name}: N = {n}, {frames} frames, cap {par.Cap:F2}, pruned to {kept} rows");
+        Log($"  baseline  worst divergence {worlds[0].MaxDivergence():F2}   left the scene {exits[0]}");
+        Log($"  PARITY    worst divergence {par.MaxDivergence():F2}   left the scene {exits[1]}" +
+            $"   restorations {par.Ledger.Restorations}" + (kind == SceneKind.Hub ? $"   queue {queued}" : ""));
+        failures += Check($"{spec.Name} NaN positions", nan, 0);
+        failures += Check($"{spec.Name} agents outside the walkable area", outside, 0);
+        failures += Check($"{spec.Name} agents inside the partition", wall, 0);
+        failures += Check($"{spec.Name} budget overruns", overBudget, 0);
+        failures += Check($"{spec.Name} error-mask violations", maskViol, 0);
+        failures += Check($"{spec.Name} cap breaches (invariant 3)", par.CapBreaches, 0);
+        if (par.MaxDivergence() > par.Cap + 1e-3f) { Err($"{spec.Name} PARITY exceeded its cap"); failures++; }
+        if (exits[0] == 0 || exits[1] == 0) { Err($"{spec.Name}: nobody left the scene, the crowd is stuck"); failures++; }
+        if (kind == SceneKind.Hub && queued == 0) { Err("hub: the ticket queue emptied and never refilled"); failures++; }
+        foreach (var w in worlds) w.Dispose();
+        return failures;
     }
 
     static int Check(string what, int got, int want)

@@ -63,8 +63,18 @@ namespace Parity
 
             Box(new Rect(half - 1, 0, 2, h), new Color(0, 0, 0, 0.55f));
             Panels(d, half);
-            Controls(new Rect(12, h - 196, Mathf.Min(360, half - 24), 186), d);
+            float ch = 8 * line + 3 * 26 + 2 * pad + 52;
+            float cw = Mathf.Min(380, half - 24);
+            Controls(new Rect(12, h - ch - 10, cw, ch), d);
             Trace(new Rect(w - TraceW - 34, h - 196, TraceW + 22, 186), d);
+            float x0 = Mathf.Max(half - 270, 12 + cw + 10), x1 = Mathf.Min(half + 270, w - TraceW - 44);
+            if (x1 - x0 > 220)
+            {
+                var t = new Rect(x0, h - 30, x1 - x0, 24);
+                Box(t, Panel);
+                GUI.Label(new Rect(t.x + pad, t.y + 3, t.width - 2 * pad, line + 2),
+                          $"{d.Spec.Title}   |   {d.Agents} agents per side   |   same seed, camera and set", small);
+            }
         }
 
         void Panels(Director d, float half)
@@ -76,7 +86,7 @@ namespace Parity
             Box(r, Panel);
             Title(r, "MassLOD baseline", ColBase);
             int i = 0;
-            Row(r, i++, $"crowd step {b.StepMs,7:F2} ms      no allocator");
+            Row(r, i++, $"crowd step {b.StepMs,7:F2} ms      tier work {d.BaseSpendMs,6:F2} ms (predicted)");
             Row(r, i++, "distance bands, frustum, per-level caps");
             Row(r, i++, "one LOD level per agent, every axis at once");
             Row(r, i++, "ticks at 1 / 3 / 10 frames: skipped frames ARE the divergence");
@@ -147,7 +157,12 @@ namespace Parity
             if (n != d.Agents) d.PendingAgents = n;
             y += line + 6;
 
-            if (d.AbsoluteBudget)
+            if (d.Budget == BudgetMode.Matched)
+            {
+                GUI.Label(new Rect(x, y, w, line), $"budget  = MassLOD's spend  {d.Par.BudgetMs:F2} ms", mono); y += line;
+                GUI.Label(new Rect(x, y, w, line), "same milliseconds, each priced by its own measured costs", small);
+            }
+            else if (d.Budget == BudgetMode.Absolute)
             {
                 GUI.Label(new Rect(x, y, w, line), $"budget  {d.TargetMs:F1} ms absolute", mono); y += line;
                 d.TargetMs = GUI.HorizontalSlider(new Rect(x, y + 3, w, 14), d.TargetMs, 0.5f, 40f);
@@ -167,15 +182,52 @@ namespace Parity
             float bw2 = (w - 18) / 4f;
             if (GUI.Button(new Rect(x, y, bw2, 22), d.Paused ? "resume" : "pause")) d.Paused = !d.Paused;
             if (GUI.Button(new Rect(x + bw2 + 6, y, bw2, 22), d.Orbit ? "hold cam" : "orbit")) d.Orbit = !d.Orbit;
-            if (GUI.Button(new Rect(x + 2 * (bw2 + 6), y, bw2, 22), d.ColourByDivergence ? "col: err" : "col: tier"))
-                d.ColourByDivergence = !d.ColourByDivergence;
-            if (GUI.Button(new Rect(x + 3 * (bw2 + 6), y, bw2, 22), d.AbsoluteBudget ? "bud: ms" : "bud: %"))
-                d.AbsoluteBudget = !d.AbsoluteBudget;
+            if (GUI.Button(new Rect(x + 2 * (bw2 + 6), y, bw2, 22), LookName(d.Look)))
+                d.Look = (Look)(((int)d.Look + 1) % 3);
+            string[] bud = { "bud: match", "bud: %", "bud: ms" };
+            if (GUI.Button(new Rect(x + 3 * (bw2 + 6), y, bw2, 22), bud[(int)d.Budget]))
+                d.Budget = (BudgetMode)(((int)d.Budget + 1) % 3);
             y += 26;
+            float bw3 = (w - 12) / 3f;
+            string[] sets = { "plaza", "concourse", "corridor" };
+            for (int k = 0; k < 3; k++)
+            {
+                bool cur = (int)d.Kind == k;
+                if (GUI.Button(new Rect(x + k * (bw3 + 6), y, bw3, 22), cur ? $"[ {sets[k]} ]" : sets[k]) && !cur)
+                    d.PendingScene = k;
+            }
+            y += 26;
+            if (GUI.Button(new Rect(x, y, bw3, 22), d.Shadows ? "shadows on" : "shadows off"))
+            {
+                d.Shadows = !d.Shadows;
+                d.PendingRestage = true;
+            }
+            if (GUI.Button(new Rect(x + bw3 + 6, y, bw3, 22), d.Post ? "bloom + tone on" : "bloom + tone off"))
+                d.Post = !d.Post;
+            if (d.GeoMs != null)
+                GUI.Label(new Rect(x + 2 * (bw3 + 6), y + 3, bw3 + 20, line), "geometry, measured:", small);
+            y += 26;
+            if (d.GeoMs != null)
+            {
+                var g = d.GeoMs;
+                GUI.Label(new Rect(x, y, w, line),
+                          $"mesh tier  {g[0] * 1000,5:F2} {g[1] * 1000,5:F2} {g[2] * 1000,5:F2} {g[3] * 1000,5:F2}  us/agent", mono);
+                y += line + 4;
+            }
             var bm = BenchmarkRunner.Instance;
             if (bm != null && GUI.Button(new Rect(x, y, w, 22),
                     bm.Running ? $"benchmarking  {bm.Progress}" : "run benchmark sweep -> CSV"))
                 bm.Begin();
+        }
+
+        static string LookName(Look l)
+        {
+            switch (l)
+            {
+                case Look.Divergence: return "col: err";
+                case Look.Tiers: return "col: tier";
+                default: return "col: people";
+            }
         }
 
         void Trace(Rect r, Director d)

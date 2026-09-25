@@ -1,11 +1,21 @@
 // Builds the whole demo at runtime, so there is no scene to author and nothing to wire in
 // the Inspector: open the project, press Play. Two crowds from one seed under one camera,
-// left MassLOD baseline, right PARITY, both rendered by the same code so the only difference
-// on screen is the fidelity policy.
+// left MassLOD baseline, right PARITY, both rendered by the same code in the same set, so the
+// only difference on screen is the fidelity policy.
+//
+// Three sets, one per scene of sim/scenes.py: the open plaza, the station concourse with its
+// ticket queue, and the evacuation corridor with its one door. Each has its own measured
+// rates, its own cap and its own calibrated costs, so switching set re-derives all of them.
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Parity
 {
+    /// <summary>Matched: PARITY is held to exactly what MassLOD spends this frame, each priced
+    /// by its own measured costs -- the like-for-like comparison, and the default. Fraction and
+    /// absolute are sim/tiered.py's two budget forms, kept for exploring.</summary>
+    public enum BudgetMode { Matched, Fraction, Absolute }
+
     public sealed class Director : MonoBehaviour
     {
         public static Director Instance;
@@ -21,27 +31,32 @@ namespace Parity
             go.AddComponent<BenchmarkRunner>();
         }
 
-        public static readonly Vector2 SceneSize = new Vector2(120f, 120f);   // sim/scenes.py Plaza
-        static readonly Vector2 Focus = new Vector2(60f, 60f);                // bench/camerapaths.py FOCUS
+        public SceneKind Kind = SceneKind.Plaza;
+        public SceneSpec Spec => SceneSpec.Get(Kind);
 
         public int Agents = 1200;
+        public BudgetMode Budget = BudgetMode.Matched;
         public float BudgetFrac = 0.25f;   // sim/tiered.py's budget_frac
-        public bool AbsoluteBudget;
         public float TargetMs = 16.7f;
         public float Cap = (float)(300.0 * ParityTable.PlazaESur);   // 3.969, as sim/tiered.py builds it
         public bool Orbit = true;
         public float OrbitSeconds = 40f;
-        public float CamHeight = 14f;
-        public bool ColourByDivergence = true;
+        public Look Look = Look.Natural;
+        public bool Shadows = true;
+        public bool Post = true;
         public bool Paused;
 
-        // OnGUI runs more than once per frame, so the HUD only ever *requests* a size and
+        // OnGUI runs more than once per frame, so the HUD only ever *requests* a change and
         // the rebuild happens once, here, between frames.
         public int PendingAgents = -1;
+        public int PendingScene = -1;
+        public bool PendingRestage;
 
         public ParityTable Table;
         public CrowdWorld Base, Par;
         public Camera CamL, CamR;
+        public GameObject SetRoot;
+        public Light Sun;
         CrowdRenderer rendL, rendR;
         float orbitT;
         float lastBaseMs, lastParMs;
@@ -53,45 +68,96 @@ namespace Parity
         public int TraceHead;
 
         public ParityTable AllocTable;
-        public double CalibFloor;
+        public double CalibFloor, BaseFloor;
+        /// <summary>MassLOD's own measured per-axis costs: its tiers are frame strides, not
+        /// latent widths, so the same tier number costs it something different.</summary>
+        public double[,] BaseTheta;
+        /// <summary>The baseline's predicted spend this frame, which is PARITY's budget when matched.</summary>
+        public float BaseSpendMs;
         public int PrunedRows;
+        /// <summary>Measured ms per agent to draw each geometry tier, for the HUD.</summary>
+        public double[] GeoMs;
 
         // Recompiling while in Play mode triggers a domain reload. UnityEngine.Object refs (the
-        // cameras, the light) are re-serialised and survive; plain C# objects -- the table, both
-        // crowds, the renderers -- and every static field do not. Everything below is therefore
-        // written to be re-entrant, and Update calls it, so a hot reload heals instead of
-        // throwing a NullReferenceException every frame.
+        // cameras, the set, the sun) are re-serialised and survive; plain C# objects -- the
+        // table, both crowds, the renderers -- and every static field do not. Everything below
+        // is therefore written to be re-entrant, and Update calls it, so a hot reload heals
+        // instead of throwing a NullReferenceException every frame.
         void OnEnable() { Instance = this; }
 
         void Awake()
         {
             Instance = this;
+            Agents = Spec.DefaultAgents;
+            Cap = Spec.Cap;
             EnsureBuilt();
         }
 
         void EnsureBuilt()
         {
-            if (Table == null || AllocTable == null || CrowdWorld.CalibratedTheta == null)
+            ApplyQuality(Shadows);
+            if (SetRoot == null) SetRoot = Stage.Build(Spec, out Sun);
+            if (CamL == null || CamR == null)
             {
-                Table = ParityTable.Build();
-                // measured once, not authored (invariant 1), then the rows nothing would ever
-                // pick are dropped so the allocator's inner loop is 5-6x shorter
-                CrowdWorld.CalibrateAxes(SceneSize, Table, 400, out CalibFloor);
-                AllocTable = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta,
-                                                        out PrunedRows);
+                CamL = MakeCamera("Cam Baseline", new Rect(0f, 0f, 0.5f, 1f));
+                CamR = MakeCamera("Cam PARITY", new Rect(0.5f, 0f, 0.5f, 1f));
             }
-            if (CamL == null || CamR == null) BuildStage();
-            else if (rendL == null || rendR == null) MakeRenderers();
+            if (rendL == null || rendR == null) MakeRenderers();
+            if (Table == null || AllocTable == null || CrowdWorld.CalibratedTheta == null || BaseTheta == null)
+                Calibrate();
             if (Base == null || Par == null) Rebuild(Agents);
+        }
+
+        /// <summary>Measured once per set, not authored (invariant 1): the sim axes by timing the
+        /// crowd step, geometry by timing the renderer. Then the rows nothing would ever pick
+        /// are dropped so the allocator's inner loop is 5-6x shorter.</summary>
+        void Calibrate()
+        {
+            Table = ParityTable.Build(Spec.EMax);
+            CrowdWorld.CalibrateAxes(Spec, Table, 400, out CalibFloor);
+            BaseTheta = CrowdWorld.MeasureAxes(Spec, Table, 400, Policy.Baseline, out BaseFloor);
+            GeoMs = null;
+            if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Null && rendL != null) CalibrateGeometry();
+            AllocTable = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta, out PrunedRows);
+        }
+
+        void CalibrateGeometry()
+        {
+            // Without this, the sim-only calibration prices geometry at zero -- the step never
+            // reads it -- every coarser mesh is dominated, and PARITY is handed full-detail
+            // figures for free while the baseline pays for its LOD by distance. That is not a
+            // comparison. So the renderer is timed, GPU included, at each tier.
+            var cam = MakeCamera("Calibration", new Rect(0f, 0f, 1f, 1f));
+            cam.enabled = false;
+            DestroyImmediate(cam.GetComponent<PostFx>());
+            var rt = new RenderTexture(Mathf.Max(Screen.width / 2, 480), Mathf.Max(Screen.height, 360), 24,
+                                       RenderTextureFormat.DefaultHDR);
+            rt.antiAliasing = Mathf.Max(QualitySettings.antiAliasing, 1);
+            cam.targetTexture = rt;
+            Place(cam, 0f, out _, out _);
+            var w = new CrowdWorld(Policy.Parity, 400, Spec, 99u, Table);
+            rendL.Shadows = Shadows;
+            GeoMs = rendL.MeasureGeometry(w, cam);
+            // one renderer draws both crowds, so geometry costs both policies the same
+            for (int t = 0; t < ParityTable.NTiers - 1; t++)
+            {
+                double g = System.Math.Max(GeoMs[t] - GeoMs[ParityTable.NTiers - 1], 0.0);
+                CrowdWorld.CalibratedTheta[ParityTable.NAxes - 1, t] = g;
+                BaseTheta[ParityTable.NAxes - 1, t] = g;
+            }
+            w.Dispose();
+            cam.targetTexture = null;
+            Destroy(rt);
+            Destroy(cam.gameObject);
         }
 
         public void Rebuild(int n)
         {
             Agents = Mathf.Clamp(n, 50, 30000);
             Base?.Dispose(); Par?.Dispose();
-            Base = new CrowdWorld(Policy.Baseline, Agents, SceneSize, 1u, AllocTable, TargetMs, Cap);
-            Par = new CrowdWorld(Policy.Parity, Agents, SceneSize, 1u, AllocTable, TargetMs, Cap);
-            Base.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
+            Base = new CrowdWorld(Policy.Baseline, Agents, Spec, 1u, AllocTable, TargetMs, Cap);
+            Par = new CrowdWorld(Policy.Parity, Agents, Spec, 1u, AllocTable, TargetMs, Cap);
+            Base.ApplyCalibration(BaseFloor, BaseTheta);
             Par.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
             System.Array.Clear(TraceBase, 0, TraceBase.Length);
             System.Array.Clear(TracePar, 0, TracePar.Length);
@@ -100,91 +166,107 @@ namespace Parity
             TraceHead = 0;
         }
 
-        void BuildStage()
+        void SwitchScene(SceneKind k)
         {
-            if (GameObject.Find("Sun") == null) BuildSun();
-            if (GameObject.Find("Ground") == null) BuildGround();
-            if (CamL == null) CamL = MakeCamera("Cam Baseline", new Rect(0f, 0f, 0.5f, 1f));
-            if (CamR == null) CamR = MakeCamera("Cam PARITY", new Rect(0.5f, 0f, 0.5f, 1f));
-            MakeRenderers();
+            Kind = k;
+            if (SetRoot != null) Destroy(SetRoot);
+            SetRoot = null;
+            Table = null; AllocTable = null;
+            Base?.Dispose(); Par?.Dispose();
+            Base = null; Par = null;
+            Agents = Spec.DefaultAgents;
+            Cap = Spec.Cap;
+            orbitT = 0f;
+            EnsureBuilt();
         }
 
         void MakeRenderers()
         {
-            var shader = Shader.Find("Parity/CrowdInstanced");
-            if (shader == null)
+            var lit = Shader.Find("Parity/CrowdInstanced");
+            var imp = Shader.Find("Parity/CrowdImpostor");
+            var dec = Shader.Find("Parity/CrowdDecal");
+            if (lit == null || imp == null || dec == null)
             {
-                Debug.LogError("Parity/CrowdInstanced shader not found -- is Assets/Shaders in the project?");
+                Debug.LogError("Parity crowd shaders not found -- is Assets/Shaders in the project?");
                 return;
             }
-            rendL = new CrowdRenderer(CamL, shader);
-            rendR = new CrowdRenderer(CamR, shader);
+            rendL = new CrowdRenderer(lit, imp, dec);
+            rendR = new CrowdRenderer(lit, imp, dec);
         }
 
-        void BuildSun()
+        public static void ApplyQuality(bool shadows)
         {
-            var sun = new GameObject("Sun").AddComponent<Light>();
-            sun.type = LightType.Directional;
-            sun.transform.rotation = Quaternion.Euler(52f, 40f, 0f);
-            sun.intensity = 1.05f;
-            sun.shadows = LightShadows.None;
-            RenderSettings.ambientLight = new Color(0.36f, 0.38f, 0.44f);
+            QualitySettings.shadows = shadows ? ShadowQuality.All : ShadowQuality.Disable;
+            QualitySettings.shadowResolution = ShadowResolution.VeryHigh;
+            QualitySettings.shadowCascades = 4;
+            QualitySettings.shadowDistance = 110f;
+            QualitySettings.shadowProjection = ShadowProjection.StableFit;
+            QualitySettings.antiAliasing = 4;
+            QualitySettings.pixelLightCount = 4;
+            QualitySettings.anisotropicFiltering = AnisotropicFiltering.ForceEnable;
         }
 
-        void BuildGround()
-        {
-            var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
-            ground.name = "Ground";
-            ground.transform.position = new Vector3(SceneSize.x * 0.5f, 0f, SceneSize.y * 0.5f);
-            ground.transform.localScale = new Vector3(SceneSize.x / 10f, 1f, SceneSize.y / 10f);
-            Destroy(ground.GetComponent<Collider>());
-            var gm = ground.GetComponent<MeshRenderer>().material;
-            gm.color = new Color(0.16f, 0.17f, 0.20f);
-        }
-
-        static Camera MakeCamera(string name, Rect rect)
+        public static Camera MakeCamera(string name, Rect rect)
         {
             var go = new GameObject(name);
             var c = go.AddComponent<Camera>();
             c.rect = rect;
-            c.fieldOfView = 60f;
-            c.farClipPlane = 400f;
-            c.clearFlags = CameraClearFlags.SolidColor;
-            c.backgroundColor = new Color(0.07f, 0.08f, 0.10f);
+            c.fieldOfView = 55f;
+            c.nearClipPlane = 0.3f;
+            c.farClipPlane = 900f;
+            c.clearFlags = CameraClearFlags.Skybox;
+            c.allowHDR = true;
+            c.allowMSAA = true;
             c.depth = 0;
+            go.AddComponent<PostFx>();
             return c;
+        }
+
+        /// <summary>bench/camerapaths.py "orbit": radius 0.45 * min(w, h) about the focus point.
+        /// Height is presentation only; the LOD camera is (x, y, yaw), exactly as in Python.</summary>
+        void Place(Camera c, float t, out Vector2 camXZ, out float yaw)
+        {
+            var s = Spec;
+            float r = 0.45f * Mathf.Min(s.Size.x, s.Size.y);
+            float ang = t * Mathf.PI * 2f;
+            camXZ = new Vector2(s.Focus.x + r * Mathf.Cos(ang), s.Focus.y + r * Mathf.Sin(ang));
+            var look = new Vector3(s.Focus.x, 1.2f, s.Focus.y);
+            c.transform.position = new Vector3(camXZ.x, s.CamHeight, camXZ.y);
+            c.transform.LookAt(look);
+            yaw = Mathf.Atan2(look.z - camXZ.y, look.x - camXZ.x);
         }
 
         void Update()
         {
+            if (PendingScene >= 0) { var k = (SceneKind)PendingScene; PendingScene = -1; SwitchScene(k); }
+            if (PendingRestage)
+            {
+                // shadows change what geometry costs, so it is measured again
+                PendingRestage = false;
+                Table = null; AllocTable = null;
+                Base?.Dispose(); Par?.Dispose(); Base = null; Par = null;
+                if (Sun != null) Sun.shadows = Shadows ? LightShadows.Soft : LightShadows.None;
+            }
             EnsureBuilt();
             if (PendingAgents > 0 && PendingAgents != Agents) { Rebuild(PendingAgents); PendingAgents = -1; }
+            PostFx.On = Post;
             if (Paused) { Render(); return; }
             float dt = Mathf.Min(Time.deltaTime, 0.05f);
             if (Orbit) orbitT += dt / Mathf.Max(OrbitSeconds, 1f);
 
-            // bench/camerapaths.py "orbit": radius 0.45 * min(w, h) about the focus point
-            float r = 0.45f * Mathf.Min(SceneSize.x, SceneSize.y);
-            float ang = orbitT * Mathf.PI * 2f;
-            var camXZ = new Vector2(Focus.x + r * Mathf.Cos(ang), Focus.y + r * Mathf.Sin(ang));
-            var eye = new Vector3(camXZ.x, CamHeight, camXZ.y);
-            var look = new Vector3(Focus.x, 1.2f, Focus.y);
-            CamL.transform.position = eye; CamL.transform.LookAt(look);
-            CamR.transform.position = eye; CamR.transform.LookAt(look);
-
-            // the LOD camera is the render camera: what drives the tiers is what you see
-            float yaw = Mathf.Atan2(look.z - camXZ.y, look.x - camXZ.x);
+            Place(CamL, orbitT, out var camXZ, out float yaw);
+            Place(CamR, orbitT, out _, out _);
 
             foreach (var w in new[] { Base, Par })
             {
-                w.BudgetFrac = BudgetFrac; w.AbsoluteBudget = AbsoluteBudget;
+                w.BudgetFrac = BudgetFrac; w.AbsoluteBudget = Budget == BudgetMode.Absolute;
                 w.TargetMs = TargetMs; w.Cap = Cap;
             }
 
-            // The cost model is fed sim + render time for that crowd. Without the render half
-            // the geometry axis has no measurable cost at all, the RLS correctly prices it at
-            // zero, and the allocator hands every agent the best mesh for free.
+            // the LOD camera is the render camera: what drives the tiers is what you see
             Base.Step(camXZ, yaw, lastBaseMs);
+            BaseSpendMs = Base.PredictedSpendMs();
+            Par.MatchBudgetMs = Budget == BudgetMode.Matched ? BaseSpendMs : -1f;
             Par.Step(camXZ, yaw, lastParMs);
             lastBaseMs = Base.StepMs + RenderBaseMs;
             lastParMs = Par.StepMs + RenderParMs;
@@ -200,13 +282,12 @@ namespace Parity
         void Render()
         {
             if (rendL == null || rendR == null || Base == null || Par == null) return;
-            rendL.ColourByDivergence = ColourByDivergence; rendL.Cap = Cap;
-            rendR.ColourByDivergence = ColourByDivergence; rendR.Cap = Cap;
+            foreach (var r in new[] { rendL, rendR }) { r.Look = Look; r.Cap = Cap; r.Shadows = Shadows; }
             float t = Time.realtimeSinceStartup;
-            rendL.Draw(Base, Vector3.zero);
+            rendL.Draw(Base, CamL);
             RenderBaseMs = (Time.realtimeSinceStartup - t) * 1000f;
             t = Time.realtimeSinceStartup;
-            rendR.Draw(Par, Vector3.zero);
+            rendR.Draw(Par, CamR);
             RenderParMs = (Time.realtimeSinceStartup - t) * 1000f;
         }
 

@@ -34,72 +34,87 @@ namespace Parity
             StartCoroutine(Run());
         }
 
+        sealed class Acc
+        {
+            public readonly List<float> Step = new List<float>(), Alloc = new List<float>();
+            public long Evals, Fill, Met;
+        }
+
         IEnumerator Run()
         {
             Running = true;
             var d = Director.Instance;
             bool wasPaused = d.Paused;
             d.Paused = true;   // stop the live worlds stepping while we measure
-
             var sb = new StringBuilder();
             sb.AppendLine("n,policy,step_ms_mean,step_ms_p95,alloc_ms_mean,evals_mean,fill_mean," +
                           "budget_met_frac,kl_max_end,restorations,beh0,beh1,beh2,beh3");
-
             var table = d.AllocTable;
+            bool matched = d.Budget == BudgetMode.Matched;
             foreach (int n in Sizes)
             {
-                foreach (Policy pol in new[] { Policy.Baseline, Policy.Parity })
+                Progress = $"N={n}";
+                // Both policies step in lockstep so that, cost-matched, PARITY's budget each
+                // frame is the baseline's predicted spend on that same frame.
+                var worlds = new CrowdWorld[2];
+                for (int k = 0; k < 2; k++)
                 {
-                    Progress = $"N={n} {pol}";
-                    var w = new CrowdWorld(pol, n, Director.SceneSize, 1u, table, d.TargetMs, d.Cap)
+                    worlds[k] = new CrowdWorld(k == 0 ? Policy.Baseline : Policy.Parity, n, d.Spec, 1u, table,
+                                               d.TargetMs, d.Cap)
                     {
-                        BudgetFrac = d.BudgetFrac, AbsoluteBudget = d.AbsoluteBudget, TargetMs = d.TargetMs,
+                        BudgetFrac = d.BudgetFrac, AbsoluteBudget = d.Budget == BudgetMode.Absolute,
+                        TargetMs = d.TargetMs,
                     };
-                    w.ApplyCalibration(d.CalibFloor, CrowdWorld.CalibratedTheta);
-                    var step = new List<float>(MeasureFrames);
-                    var alloc = new List<float>(MeasureFrames);
-                    long evals = 0, fill = 0, met = 0;
-                    float last = 0f;
-
-                    for (int f = 0; f < WarmupFrames + MeasureFrames; f++)
+                }
+                worlds[0].ApplyCalibration(d.BaseFloor, d.BaseTheta);
+                worlds[1].ApplyCalibration(d.CalibFloor, CrowdWorld.CalibratedTheta);
+                var acc = new[] { new Acc(), new Acc() };
+                float lastB = 0f, lastP = 0f;
+                for (int f = 0; f < WarmupFrames + MeasureFrames; f++)
+                {
+                    var (cp, yaw) = OrbitAt(d.Spec, f);
+                    worlds[0].Step(cp, yaw, lastB);
+                    lastB = worlds[0].StepMs;
+                    worlds[1].MatchBudgetMs = matched ? worlds[0].PredictedSpendMs() : -1f;
+                    worlds[1].Step(cp, yaw, lastP);
+                    lastP = worlds[1].StepMs;
+                    if (f >= WarmupFrames)
                     {
-                        var (cp, yaw) = OrbitAt(f);
-                        w.Step(cp, yaw, last);
-                        last = w.StepMs;
-                        if (f >= WarmupFrames)
-                        {
-                            step.Add(w.StepMs);
-                            if (pol == Policy.Parity)
-                            {
-                                alloc.Add(w.AllocMs);
-                                evals += w.Last.Evals;
-                                fill += w.Last.FillSteps;
-                                if (!w.Last.Infeasible && w.Last.Cost <= w.BudgetMs) met++;
-                            }
-                            else if (w.StepMs <= w.BudgetMs) met++;
-                        }
-                        // keep the editor responsive; the measurement is per-frame wall time
-                        // of the crowd step itself, so yielding between frames does not bias it
-                        if ((f & 15) == 0) yield return null;
+                        acc[0].Step.Add(worlds[0].StepMs);
+                        if (worlds[0].StepMs <= worlds[0].BudgetMs) acc[0].Met++;
+                        var p = worlds[1];
+                        acc[1].Step.Add(p.StepMs);
+                        acc[1].Alloc.Add(p.AllocMs);
+                        acc[1].Evals += p.Last.Evals;
+                        acc[1].Fill += p.Last.FillSteps;
+                        if (!p.Last.Infeasible && p.Last.Cost <= p.BudgetMs * 1.0001f) acc[1].Met++;
                     }
-
+                    // keep the editor responsive; the measurement is per-frame wall time
+                    // of the crowd step itself, so yielding between frames does not bias it
+                    if ((f & 15) == 0) yield return null;
+                }
+                for (int k = 0; k < 2; k++)
+                {
+                    var w = worlds[k];
                     var c = w.Counts;
-                    sb.Append(n.ToString(CultureInfo.InvariantCulture)).Append(',').Append(pol).Append(',')
-                      .Append(F(Mean(step))).Append(',').Append(F(Pct(step, 0.95f))).Append(',')
-                      .Append(F(pol == Policy.Parity ? Mean(alloc) : 0f)).Append(',')
-                      .Append(F(evals / (float)MeasureFrames)).Append(',')
-                      .Append(F(fill / (float)MeasureFrames)).Append(',')
-                      .Append(F(met / (float)MeasureFrames)).Append(',')
+                    sb.Append(n.ToString(CultureInfo.InvariantCulture)).Append(',').Append(w.Mode).Append(',')
+                      .Append(F(Mean(acc[k].Step))).Append(',').Append(F(Pct(acc[k].Step, 0.95f))).Append(',')
+                      .Append(F(k == 1 ? Mean(acc[k].Alloc) : 0f)).Append(',')
+                      .Append(F(acc[k].Evals / (float)MeasureFrames)).Append(',')
+                      .Append(F(acc[k].Fill / (float)MeasureFrames)).Append(',')
+                      .Append(F(acc[k].Met / (float)MeasureFrames)).Append(',')
                       .Append(F(w.MaxDivergence())).Append(',')
                       .Append(w.Restorations).Append(',')
                       .Append(c[0, 0]).Append(',').Append(c[0, 1]).Append(',')
                       .Append(c[0, 2]).Append(',').Append(c[0, 3]).AppendLine();
                     w.Dispose();
-                    yield return null;
                 }
+                yield return null;
             }
-
-            string path = System.IO.Path.Combine(Application.persistentDataPath, "parity_engine_bench.csv");
+            // the plaza keeps the file name the recorded unity/bench/engine_bench.csv came from
+            string file = d.Kind == SceneKind.Plaza ? "parity_engine_bench.csv" : $"parity_engine_bench_{d.Spec.Name}.csv";
+            if (matched) file = file.Replace(".csv", "_matched.csv");
+            string path = System.IO.Path.Combine(Application.persistentDataPath, file);
             System.IO.File.WriteAllText(path, sb.ToString());
             Debug.Log("PARITY benchmark written to " + path + "\n" + sb);
             Progress = "";
@@ -107,10 +122,10 @@ namespace Parity
             d.Paused = wasPaused;
         }
 
-        static (Vector2, float) OrbitAt(int frame)
+        static (Vector2, float) OrbitAt(SceneSpec s, int frame)
         {
-            var focus = new Vector2(60f, 60f);
-            float r = 0.45f * Mathf.Min(Director.SceneSize.x, Director.SceneSize.y);
+            var focus = s.Focus;
+            float r = 0.45f * Mathf.Min(s.Size.x, s.Size.y);
             float ang = (frame / 2400f) * Mathf.PI * 2f;
             var p = new Vector2(focus.x + r * Mathf.Cos(ang), focus.y + r * Mathf.Sin(ang));
             return (p, Mathf.Atan2(focus.y - p.y, focus.x - p.x));

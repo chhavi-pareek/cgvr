@@ -28,6 +28,13 @@ namespace Parity
         public int N;
 
         public Vector2[] Pos, Goal, CoreP;   // CoreP: the core's authoritative position
+        public Vector2[] PrevPos, Final;     // pre-step position (wall crossing); corridor exit
+        public int[] Slot;                   // hub queue slot, -1 when not queued
+        public bool[] Queuer;
+        public sbyte[] Stage;                // corridor route leg: mouth / doorway / exit
+        /// <summary>Facing, from actual displacement, and how much of a walk the agent is
+        /// doing (0 standing .. 1 full stride). Both are presentation only.</summary>
+        public float[] Heading, Walk;
         public float[] Latent;               // [n * LatentDim] the behaviour latent being decoded
         public float[] SpeedScale, LatBias;  // decoded behaviour heads
         public float[] JointBlend;           // decoded gait, consumed by the renderer
@@ -57,14 +64,19 @@ namespace Parity
         public bool UseOnlineRls;
         public float BudgetFrac = 0.25f;
         public bool AbsoluteBudget;
+        /// <summary>When set (>= 0), the budget IS this: the baseline's own predicted spend this
+        /// frame, so both policies are held to the same milliseconds.</summary>
+        public float MatchBudgetMs = -1f;
         public float TargetMs = 16.7f;
         public float BudgetMs = 16.7f;   // recomputed every frame unless AbsoluteBudget
         // cap = 300 * e_sur, as sim/tiered.py builds it from the occupancy-weighted mean rate
-        public float Cap = (float)(300.0 * ParityTable.PlazaESur);
+        public float Cap;
         /// <summary>Measured per-context surrogate KL rate. The ledger spends the ACTUAL rate
         /// while the table admitted against the worst one, so D can only ever land under the
         /// cap -- that asymmetry is what makes invariant 3 exact rather than probable.</summary>
-        public static readonly float[] ERate = System.Array.ConvertAll(ParityTable.PlazaERate, v => (float)v);
+        public readonly float[] ERate;
+        public readonly SceneSpec Spec;
+        public readonly CrowdScene Scene;
         public AllocResult Last;
         public float AllocMs, StepMs;
         /// <summary>Predicted cost of the tier work the budget actually governs. The rest of
@@ -92,12 +104,14 @@ namespace Parity
         Grid grid;
         int frame;
 
-        public CrowdWorld(Policy mode, int n, Vector2 sceneSize, uint seed, ParityTable table,
+        public CrowdWorld(Policy mode, int n, SceneSpec spec, uint seed, ParityTable table,
                           float budgetMs = 16.7f, float cap = -1f)
         {
-            Mode = mode; size = sceneSize; Table = table;
+            Mode = mode; Spec = spec; size = spec.Size; Table = table;
+            Scene = CrowdScene.Make(spec);
+            ERate = System.Array.ConvertAll(spec.ERate, v => (float)v);
             BudgetMs = budgetMs;
-            if (cap > 0f) Cap = cap;          // before Allocate: the ledger seeds D from Cap
+            Cap = cap > 0f ? cap : spec.Cap;  // before Allocate: the ledger seeds D from Cap
             rowCost = new float[table.M];
             rng = new Rng(seed);
             Allocate(n);
@@ -107,7 +121,9 @@ namespace Parity
         {
             N = n;
             Pos = new Vector2[n]; Goal = new Vector2[n]; CoreP = new Vector2[n];
-            CoreFrom = new Vector2[n];
+            CoreFrom = new Vector2[n]; PrevPos = new Vector2[n]; Final = new Vector2[n];
+            Slot = new int[n]; Queuer = new bool[n]; Stage = new sbyte[n];
+            Heading = new float[n]; Walk = new float[n];
             Speed = new float[n]; Sig = new float[n]; Phase = new float[n];
             Dmeas = new float[n]; CoreS = new float[n]; CoreLen = new float[n];
             InView = new bool[n]; SimTier = new sbyte[n]; VisTier = new sbyte[n]; Ctx = new sbyte[n];
@@ -116,12 +132,17 @@ namespace Parity
             Row = new int[n]; Beh = new sbyte[n]; Nav = new sbyte[n]; Anim = new sbyte[n]; Geo = new sbyte[n];
 
             var r = new Rng(12345u);
+            for (int i = 0; i < n; i++) Slot[i] = -1;
+            Scene.Begin(this);
             for (int i = 0; i < n; i++)
             {
-                Pos[i] = new Vector2(r.Range(0f, size.x), r.Range(0f, size.y));
-                NewGoal(i, ref r);
-                Speed[i] = r.Range(1.0f, 1.6f);
+                // position, goal and speed are the scene's; the plaza draws them in the order
+                // this loop always did, so its crowd is bit-identical to the plaza-only build
+                Scene.SpawnOne(this, i, ref r);
                 Phase[i] = r.NextFloat() * Mathf.PI * 2f;
+                Walk[i] = 1f;
+                Vector2 to = Goal[i] - Pos[i];
+                Heading[i] = Mathf.Atan2(to.x, to.y);
                 SpeedScale[i] = 1f;
                 // nested-dropout ordering: leading dimensions carry the most energy, so a
                 // truncated decode loses the tail first. That is the whole point of the axis.
@@ -143,9 +164,10 @@ namespace Parity
             frame = 0;
         }
 
-        void NewGoal(int i, ref Rng r)
+        /// <summary>Retarget an agent and re-seat its core on where the agent actually is.</summary>
+        public void SetGoal(int i, Vector2 g)
         {
-            Goal[i] = new Vector2(r.Range(2f, size.x - 2f), r.Range(2f, size.y - 2f));
+            Goal[i] = g;
             CoreFrom[i] = Pos[i];
             CoreP[i] = Pos[i];
             CoreS[i] = 0f;
@@ -158,10 +180,21 @@ namespace Parity
         /// sim/tiered.py::measure_costs does. Runs on a throwaway crowd so the live one is not
         /// perturbed. Returns ms per agent per frame; the caller subtracts the all-tier-3 floor.
         /// Nothing authored enters the result, which is invariant 1.</summary>
-        public static double CalibrateAxes(Vector2 size, ParityTable table, int n,
+        public static double CalibrateAxes(SceneSpec spec, ParityTable table, int n,
                                            out double floorMsPerAgent, int reps = 24)
         {
-            var w = new CrowdWorld(Policy.Parity, n, size, 99u, table);
+            CalibratedTheta = MeasureAxes(spec, table, n, Policy.Parity, out floorMsPerAgent, reps);
+            return floorMsPerAgent;
+        }
+
+        /// <summary>The same measurement under either policy's mechanism. MassLOD's tiers are
+        /// frame strides and PARITY's are latent widths, so the same tier number costs each of
+        /// them something different, and a cost-matched comparison has to price each policy's
+        /// spend with its own measured costs.</summary>
+        public static double[,] MeasureAxes(SceneSpec spec, ParityTable table, int n, Policy mode,
+                                            out double floorMsPerAgent, int reps = 24)
+        {
+            var w = new CrowdWorld(mode, n, spec, 99u, table);
             double Time4(int b, int nv, int a, int g)
             {
                 for (int i = 0; i < w.N; i++)
@@ -189,8 +222,7 @@ namespace Parity
                     th[ax, t] = System.Math.Max(ms - floorMsPerAgent, 0.0);
                 }
             w.Dispose();
-            CalibratedTheta = th;
-            return floorMsPerAgent;
+            return th;
         }
 
         public static double[,] CalibratedTheta;
@@ -258,7 +290,9 @@ namespace Parity
                 if (rowCost[c] < cmin) cmin = rowCost[c];
                 if (rowCost[c] > cmax) cmax = rowCost[c];
             }
-            BudgetMs = AbsoluteBudget ? TargetMs : N * (cmin + BudgetFrac * (cmax - cmin));
+            BudgetMs = AbsoluteBudget ? TargetMs
+                     : MatchBudgetMs >= 0f ? MatchBudgetMs
+                     : N * (cmin + BudgetFrac * (cmax - cmin));
 
             Ledger.Cap = Cap;
             Ledger.Refresh(N);
@@ -385,6 +419,8 @@ namespace Parity
         void StepFine()
         {
             grid.Build(Pos, N);
+            System.Array.Copy(Pos, PrevPos, N);
+            bool congested = Spec.Kind != SceneKind.Plaza;
             for (int i = 0; i < N; i++)
             {
                 // context is read from the core's neighbourhood, so it is available at every
@@ -408,10 +444,24 @@ namespace Parity
                     Vector2 dir = d > 1e-4f ? to / d : Vector2.zero;
                     Vector2 sep = Vector2.zero;
                     int budget = NavBudget[Nav[i]];
-                    if (budget > 0) sep = grid.Separation(Pos, i, 1.6f, budget);
+                    // someone standing in their queue slot keeps 0.8 m to the next person
+                    // rather than being pushed out to the 1.6 m separation radius
+                    bool inLine = Slot[i] >= 0 && d < 1.2f;
+                    if (budget > 0 && !inLine) sep = grid.Separation(Pos, i, 1.6f, budget);
                     dir = new Vector2(dir.x - dir.y * LatBias[i], dir.y + dir.x * LatBias[i]);
                     float adv = Mode == Policy.Baseline ? Stride[beh] : 1;
-                    Vector2 v = (dir + sep * 1.4f).normalized * Speed[i] * SpeedScale[i] * adv * Dt;
+                    Vector2 v;
+                    if (!congested)
+                        v = (dir + sep * 1.4f).normalized * Speed[i] * SpeedScale[i] * adv * Dt;
+                    else
+                    {
+                        // Queues and doorways: the pull and the push are summed, not
+                        // normalised, so a pressed crowd slows instead of vibrating at full
+                        // walking speed, and an agent eases into its slot instead of
+                        // overshooting it every frame.
+                        Vector2 u = Vector2.ClampMagnitude(dir * Mathf.Clamp01(d / 0.6f) + sep * 1.4f, 1f);
+                        v = u * Speed[i] * SpeedScale[i] * adv * Dt;
+                    }
                     Pos[i] += v;
                     Pos[i] = new Vector2(Mathf.Clamp(Pos[i].x, 0f, size.x), Mathf.Clamp(Pos[i].y, 0f, size.y));
                 }
@@ -419,11 +469,28 @@ namespace Parity
                 int astride = Mode == Policy.Baseline ? Stride[anim] : 1;
                 if (anim < 3 && frame % astride == 0)
                 {
-                    Phase[i] += Speed[i] * Dt * astride * 6f;
+                    Phase[i] += Speed[i] * Dt * astride * 6f * Mathf.Clamp01(Walk[i]);
                     Joints(i, JointCount[anim]);
                 }
+            }
+            Scene.Constrain(this);
+            Scene.AfterStep(this, frame, ref rng);
+            Presentation();
+        }
 
-                if ((Goal[i] - Pos[i]).sqrMagnitude < 1.0f || CoreS[i] >= CoreLen[i]) NewGoal(i, ref rng);
+        void Presentation()
+        {
+            for (int i = 0; i < N; i++)
+            {
+                Vector2 m = Pos[i] - PrevPos[i];
+                float step = m.magnitude;
+                if (step > 2f) continue;    // a respawn or a reconciliation snap, not a stride
+                // the baseline moves in k-frame jumps, so walking is judged over time: the
+                // average is taken before the clamp, and a 10-frame jump still reads as a walk
+                Walk[i] = Mathf.Lerp(Walk[i], step / (Speed[i] * Dt * 0.8f), 0.08f);
+                if (step > 1e-4f)
+                    Heading[i] = Mathf.LerpAngle(Heading[i] * Mathf.Rad2Deg,
+                                                 Mathf.Atan2(m.x, m.y) * Mathf.Rad2Deg, 0.2f) * Mathf.Deg2Rad;
             }
         }
 
@@ -468,6 +535,9 @@ namespace Parity
         }
 
         public int[,] Counts { get { Histogram(); return counts; } }
+
+        /// <summary>What this frame's tier mix costs under this world's calibrated cost model.</summary>
+        public float PredictedSpendMs() => (float)Cost.Predict(Counts, N);
 
         public float MaxDivergence()
         {
