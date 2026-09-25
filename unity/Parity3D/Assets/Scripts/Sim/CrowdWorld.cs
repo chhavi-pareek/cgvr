@@ -67,10 +67,19 @@ namespace Parity
         public static readonly float[] ERate = System.Array.ConvertAll(ParityTable.PlazaERate, v => (float)v);
         public AllocResult Last;
         public float AllocMs, StepMs;
+        /// <summary>Predicted cost of the tier work the budget actually governs. The rest of
+        /// StepMs is the assigner and the spatial grid, which are tier-independent and which
+        /// both policies pay identically.</summary>
+        public float AllocatableMs;
         public int Restorations, Promotes, Demotes;
         /// <summary>Agents whose ledger passed the cap. The feasibility mask makes this
         /// impossible by construction, so it is displayed as a live assertion.</summary>
         public int CapBreaches;
+        /// <summary>One agent followed for the trace. The max over N agents is flat once N is
+        /// large -- someone is always near the cap -- so the sawtooth only shows per agent.</summary>
+        public int Tracked;
+        public float TrackedD => Tracked < N ? Dmeas[Tracked] : 0f;
+        public int TrackedRestores;
 
         readonly float[] rowCost;
         readonly double[,] thetaAxis = new double[ParityTable.NAxes, ParityTable.NTiers];
@@ -262,6 +271,7 @@ namespace Parity
             float t0 = Time.realtimeSinceStartup;
             Alloc.SetCosts(Table, rowCost);
             Last = Alloc.Solve(salience, headroom, N, BudgetMs, assign);
+            AllocatableMs = Last.Cost;
             AllocMs = (Time.realtimeSinceStartup - t0) * 1000f;
 
             Promotes = 0; Demotes = 0;
@@ -279,6 +289,7 @@ namespace Parity
                     Ledger.Reset(i);
                     Dmeas[i] = 0f;
                     Restorations++; Promotes++;
+                    if (i == Tracked) TrackedRestores++;
                 }
                 else if (Beh[i] < 3 && nb == 3) Demotes++;
                 Beh[i] = nb;

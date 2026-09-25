@@ -49,21 +49,40 @@ namespace Parity
 
         public float[] TraceBase = new float[600];
         public float[] TracePar = new float[600];
+        public float[] TraceOne = new float[600];   // one followed PARITY agent
         public int TraceHead;
 
         public ParityTable AllocTable;
         public double CalibFloor;
         public int PrunedRows;
 
+        // Recompiling while in Play mode triggers a domain reload. UnityEngine.Object refs (the
+        // cameras, the light) are re-serialised and survive; plain C# objects -- the table, both
+        // crowds, the renderers -- and every static field do not. Everything below is therefore
+        // written to be re-entrant, and Update calls it, so a hot reload heals instead of
+        // throwing a NullReferenceException every frame.
+        void OnEnable() { Instance = this; }
+
         void Awake()
         {
-            Table = ParityTable.Build();
-            // measured once, not authored (invariant 1), then the rows nothing would ever pick
-            // are dropped so the allocator's inner loop is 5-6x shorter
-            CrowdWorld.CalibrateAxes(SceneSize, Table, 400, out CalibFloor);
-            AllocTable = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta, out PrunedRows);
-            BuildStage();
-            Rebuild(Agents);
+            Instance = this;
+            EnsureBuilt();
+        }
+
+        void EnsureBuilt()
+        {
+            if (Table == null || AllocTable == null || CrowdWorld.CalibratedTheta == null)
+            {
+                Table = ParityTable.Build();
+                // measured once, not authored (invariant 1), then the rows nothing would ever
+                // pick are dropped so the allocator's inner loop is 5-6x shorter
+                CrowdWorld.CalibrateAxes(SceneSize, Table, 400, out CalibFloor);
+                AllocTable = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta,
+                                                        out PrunedRows);
+            }
+            if (CamL == null || CamR == null) BuildStage();
+            else if (rendL == null || rendR == null) MakeRenderers();
+            if (Base == null || Par == null) Rebuild(Agents);
         }
 
         public void Rebuild(int n)
@@ -76,10 +95,33 @@ namespace Parity
             Par.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
             System.Array.Clear(TraceBase, 0, TraceBase.Length);
             System.Array.Clear(TracePar, 0, TracePar.Length);
+            System.Array.Clear(TraceOne, 0, TraceOne.Length);
+            Par.Tracked = Agents / 2;
             TraceHead = 0;
         }
 
         void BuildStage()
+        {
+            if (GameObject.Find("Sun") == null) BuildSun();
+            if (GameObject.Find("Ground") == null) BuildGround();
+            if (CamL == null) CamL = MakeCamera("Cam Baseline", new Rect(0f, 0f, 0.5f, 1f));
+            if (CamR == null) CamR = MakeCamera("Cam PARITY", new Rect(0.5f, 0f, 0.5f, 1f));
+            MakeRenderers();
+        }
+
+        void MakeRenderers()
+        {
+            var shader = Shader.Find("Parity/CrowdInstanced");
+            if (shader == null)
+            {
+                Debug.LogError("Parity/CrowdInstanced shader not found -- is Assets/Shaders in the project?");
+                return;
+            }
+            rendL = new CrowdRenderer(CamL, shader);
+            rendR = new CrowdRenderer(CamR, shader);
+        }
+
+        void BuildSun()
         {
             var sun = new GameObject("Sun").AddComponent<Light>();
             sun.type = LightType.Directional;
@@ -87,7 +129,10 @@ namespace Parity
             sun.intensity = 1.05f;
             sun.shadows = LightShadows.None;
             RenderSettings.ambientLight = new Color(0.36f, 0.38f, 0.44f);
+        }
 
+        void BuildGround()
+        {
             var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
             ground.name = "Ground";
             ground.transform.position = new Vector3(SceneSize.x * 0.5f, 0f, SceneSize.y * 0.5f);
@@ -95,14 +140,6 @@ namespace Parity
             Destroy(ground.GetComponent<Collider>());
             var gm = ground.GetComponent<MeshRenderer>().material;
             gm.color = new Color(0.16f, 0.17f, 0.20f);
-
-            CamL = MakeCamera("Cam Baseline", new Rect(0f, 0f, 0.5f, 1f));
-            CamR = MakeCamera("Cam PARITY", new Rect(0.5f, 0f, 0.5f, 1f));
-
-            var shader = Shader.Find("Parity/CrowdInstanced");
-            if (shader == null) Debug.LogError("Parity/CrowdInstanced shader not found -- is Assets/Shaders in the project?");
-            rendL = new CrowdRenderer(CamL, shader);
-            rendR = new CrowdRenderer(CamR, shader);
         }
 
         static Camera MakeCamera(string name, Rect rect)
@@ -120,6 +157,7 @@ namespace Parity
 
         void Update()
         {
+            EnsureBuilt();
             if (PendingAgents > 0 && PendingAgents != Agents) { Rebuild(PendingAgents); PendingAgents = -1; }
             if (Paused) { Render(); return; }
             float dt = Mathf.Min(Time.deltaTime, 0.05f);
@@ -153,6 +191,7 @@ namespace Parity
 
             TraceBase[TraceHead] = Base.MaxDivergence();
             TracePar[TraceHead] = Par.MaxDivergence();
+            TraceOne[TraceHead] = Par.TrackedD;
             TraceHead = (TraceHead + 1) % TraceBase.Length;
 
             Render();
@@ -160,6 +199,7 @@ namespace Parity
 
         void Render()
         {
+            if (rendL == null || rendR == null || Base == null || Par == null) return;
             rendL.ColourByDivergence = ColourByDivergence; rendL.Cap = Cap;
             rendR.ColourByDivergence = ColourByDivergence; rendR.Cap = Cap;
             float t = Time.realtimeSinceStartup;

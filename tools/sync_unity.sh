@@ -16,12 +16,6 @@ LOG="$PROJ/Logs/batch_compile.log"
 [ -d "$PROJ" ] || { echo "no project at $PROJ (set PARITY_UNITY_PROJECT)"; exit 1; }
 [ -x "$UNITY" ] || { echo "no editor at $UNITY (set PARITY_UNITY_BIN)"; exit 1; }
 
-if pgrep -f "Unity.app/Contents/MacOS/Unity" >/dev/null 2>&1; then
-    echo "The Unity editor is running. Batchmode cannot open a project the editor holds a"
-    echo "lock on, so quit Unity (Cmd+Q) and run this again."
-    exit 1
-fi
-
 echo "sync  $REPO/unity/Parity3D/Assets/  ->  $PROJ/Assets/"
 rsync -a --delete \
       "$REPO/unity/Parity3D/Assets/Scripts/" "$PROJ/Assets/Scripts/"
@@ -30,7 +24,15 @@ rsync -a --delete \
 rsync -a --delete \
       "$REPO/unity/Parity3D/Assets/Editor/" "$PROJ/Assets/Editor/"
 
-[ "${1:-}" = "--no-compile" ] && { echo "synced (compile skipped)"; exit 0; }
+[ "${1:-}" = "--no-compile" ] && { echo "synced; the open editor recompiles when it regains focus"; exit 0; }
+
+# Only the compile needs the project lock; syncing into a live editor is the fast path, because
+# Unity hot-reloads the changed scripts as soon as the window regains focus.
+if pgrep -x Unity >/dev/null 2>&1; then
+    echo "synced, but the editor is running so batchmode cannot take the project lock."
+    echo "Either quit Unity (Cmd+Q) and rerun, or just click back into Unity to hot-reload."
+    exit 2
+fi
 
 mkdir -p "$PROJ/Logs"
 EXTRA=""

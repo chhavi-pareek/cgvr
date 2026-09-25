@@ -23,7 +23,10 @@ namespace Parity
         public bool Running { get; private set; }
         public string Progress { get; private set; } = "";
 
+        // static fields are cleared by a domain reload, so re-register on enable too
         void Awake() { Instance = this; }
+
+        void OnEnable() { Instance = this; }
 
         public void Begin()
         {
