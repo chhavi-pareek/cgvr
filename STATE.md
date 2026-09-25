@@ -165,6 +165,15 @@
   - **The law is unchanged, tested against a control rather than a threshold.** Region occupancy shifts by TV 0.089 (mean of 3 seeds) while two *default* runs at different seeds already differ by TV 0.132 -- the treatment is below the noise floor. The first version of this test used the 1000-point fine-latent histogram and failed; at that sparsity two identical policies differ by TV 0.67, so an absolute threshold there measures nothing. Measured KL mean shifts are sign-varying across seeds (+7.3, -6.5, +0.6, +2.2%), i.e. path noise.
   - Off by default (`COUPLE = False`), so nothing recorded is invalidated.
 
+- **The `parity_authored` null result is explained, and it is a property of the experiment rather than evidence against invariant 2** (`bench/invariant2.py`). Two facts produce it:
+  1. Only the behaviour axis executes in phase 7, so it is the only axis carrying cost.
+  2. Its measured costs are **10.930 / 10.943 / 10.527 / 4.854 us per agent** -- tier 1 costs *more* than tier 0, and all three live tiers sit within 4% of each other against a surrogate at less than half. Tiers 1 and 2 are dominated: the same cost as tier 0 for strictly less quality.
+
+  So the allocator's real choice is binary, tier 0 or surrogate, and the observed tier mix is `[k, 0, 0, n-k]` at every budget. For a binary choice on one axis the quality gain `(q0 - q3)` is a **constant across agents**, so it cancels out of the ranking and agents sort by salience alone -- **any** monotone quality model then produces the identical allocation whatever its values. The ablation is structurally incapable of separating, which is why it is byte-identical rather than merely close.
+  - Measured: phase-7 costs give **0** differing assignments across nine budget fractions; the Unity calibration, which prices all four axes, gives **542**; a decode-dominated cost structure gives **992** and is the only one in which the intermediate latent tiers are ever selected.
+  - **Action: run the invariant-2 ablation in the Unity build**, where `CrowdWorld.CalibrateAxes` prices all four axes. It cannot work in phase 7.
+- This is the same root cause as the Unity demo's bang-bang tier mix (2953/5/0/5042). In both implementations the nested-dropout intermediate tiers are dominated because the fine step -- motion, separation, band binding -- dominates the decode, so narrowing the latent saves almost nothing. **The ordered-latent axis earns its intermediate tiers only when decode is a substantial fraction of per-agent cost**, and that is now demonstrated in the prototype and the engine independently, from measured costs in both.
+
 ## DECISIONS
 - Repo root is `cgvr/`; `sim/`, `bench/`, `tests/` sit at root.
 - Tier index: 0=HIGH, 1=MED, 2=LOW, 3=OFF.
