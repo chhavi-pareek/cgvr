@@ -43,7 +43,7 @@ def demote(idx, d, region, surrogate, core, phase, dist_at_demote):
     return region
 
 
-def promote(idx, d, region, surrogate, core, a, phase, dist_at_demote, rng):
+def promote(idx, d, region, surrogate, core, a, phase, dist_at_demote, rng, s_at=None):
     idx = np.atleast_1d(idx)
     if idx.size == 0:
         return
@@ -62,7 +62,11 @@ def promote(idx, d, region, surrogate, core, a, phase, dist_at_demote, rng):
     travelled = np.maximum(core.s[idx] - dist_at_demote[idx], 0.0)
     phase[idx] = (phase[idx] + travelled / stride(dec)) % 1.0
     # social context: nearest free lateral slot around the core point, tangent velocity
-    p0 = core.point(core.s[idx], idx)
+    # s_at: where along the route the surrogate agent actually is. With sim.tiered's
+    # SURROGATE_SPEED on, surrogates carry a progress offset from the core, and restoring them
+    # to core.point(s) instead would reintroduce an along-route snap of up to BAND on every
+    # promotion -- which is what the first version of that fix did, undoing the coupling.
+    p0 = core.point(core.s[idx] if s_at is None else s_at, idx)
     t = core.tangent(idx)
     nrm = np.stack([-t[:, 1], t[:, 0]], 1)
     # Slot search. Two phases, because the cost here was never arithmetic -- it was numpy

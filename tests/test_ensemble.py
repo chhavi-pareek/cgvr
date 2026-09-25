@@ -30,7 +30,7 @@ def _run(frames=600, seed=0, couple=False, alpha=0.0, n=200):
     try:
         r = AgedRun("plaza", n, "parity", seed=seed, cam=camera("plaza", "orbit", frames), calib=CAL)
         r.alpha = alpha
-        band, snap, spend = [], [], []
+        band, snap, psnap, spend = [], [], [], []
         at_sur = np.zeros(n)
         longest = np.zeros(n)
         cur = np.zeros(n)
@@ -40,6 +40,9 @@ def _run(frames=600, seed=0, couple=False, alpha=0.0, n=200):
             dem = np.flatnonzero((prev_tier < 3) & (r.tier == 3))
             if dem.size:
                 snap.append(np.linalg.norm(r.a.pos[dem] - prev_pos[dem], axis=1))
+            pro = np.flatnonzero((prev_tier == 3) & (r.tier < 3))
+            if pro.size:
+                psnap.append(np.linalg.norm(r.a.pos[pro] - prev_pos[pro], axis=1))
             band.append(float(np.abs(r.core.project(r.a.pos) - r.core.s).max()))
             spend.append(float(r.cost[r.assign].sum()))
             s = r.tier == 3
@@ -48,6 +51,7 @@ def _run(frames=600, seed=0, couple=False, alpha=0.0, n=200):
             longest = np.maximum(longest, cur)
         return dict(r=r, band=np.array(band),
                     snap=np.concatenate(snap) if snap else np.zeros(1),
+                    psnap=np.concatenate(psnap) if psnap else np.zeros(1),
                     spend=np.array(spend), frac=at_sur / frames, longest=longest)
     finally:
         reconcile.COUPLE = False
@@ -82,11 +86,12 @@ def test_aging_still_removes_starvation_with_coupling_on():
 
 def test_coupling_still_shrinks_the_snap_with_aging_on():
     """And the converse: aging changes the reconciliation schedule, so the coupling result has
-    to survive it too."""
+    to survive it too. Coupling acts on PROMOTION; an earlier version of this test compared
+    demotion snaps, which coupling never touches, and passed by schedule noise."""
     plain = _run(couple=False, alpha=4.0)
     cpl = _run(couple=True, alpha=4.0)
-    assert np.percentile(cpl["snap"], 95) < np.percentile(plain["snap"], 95), (
-        "coupling stopped helping once aging was enabled")
+    assert np.percentile(cpl["psnap"], 95) < np.percentile(plain["psnap"], 95), (
+        "coupling stopped shrinking the promotion snap once aging was enabled")
 
 
 def test_band_ablation_does_not_break_the_ledger_under_the_full_ensemble():

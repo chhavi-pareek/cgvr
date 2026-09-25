@@ -19,13 +19,29 @@ from alloc.serial import SerialAllocator
 
 from .assign_threshold import ThresholdAssigner
 from .behaviour import CHOKEPOINT, NEAR_GOAL, QUEUED, WALKING, BehaviourProcess, lateral_bias, speed_scale, stride
-from .invariant import Core
+from .invariant import BAND, Core
 from .reconcile import demote, promote
 from .run import DT, SEP_K, SEP_R, _separation
 from .scenes import ARRIVE, SCENES
 from .surrogate import BASELINE_PERIODS, Surrogate
 
 LOOKAHEAD = 2.0
+
+# Surrogate speed marginal. The surrogate used to move every agent at core.mbar[ctx] -- the
+# per-context MEAN speed scale -- both in its reported velocity and in its actual displacement
+# (its position rides the core point, which core.step advances at speed * mbar). The
+# Metropolis-Hastings correction makes region OCCUPANCY exact but constrains nothing else, so
+# the speed distribution collapsed toward its conditional mean: speed std 0.2082 for surrogate
+# agents against 0.2670 live and 0.2931 in the reference, found by bench/cfd.py.
+#
+# With this on, each surrogate agent carries a speed scale drawn from the reference law for its
+# CURRENT region, pi_ref(d | R, ctx) through Surrogate.lift_tables, redrawn whenever its region
+# changes, and an along-route progress offset from its core point that integrates the
+# difference from the context mean. The offset is clamped to +-BAND, the same band Core.bind
+# enforces on live agents, so invariant 4's positional bound is untouched and the core stays
+# authoritative. Velocity and displacement both use the drawn scale, so the fix changes how
+# agents actually move, not just what the metric reads. False reproduces the recorded sweep.
+SURROGATE_SPEED = True
 LOG_EVERY = 30
 CORE_US = 4.0  # invariant core, fixed per agent (not allocated)
 
@@ -259,6 +275,9 @@ class Run:
         self.phase = self.brng.random(n)
         self.dist_at_demote = np.zeros(n)
         self.lat_off = np.zeros(n)
+        self.prog_off = np.zeros(n)            # surrogate along-route offset, |.| <= BAND
+        self.sur_scale = np.ones(n)            # surrogate speed scale drawn for its region
+        self.sur_reg = np.full(n, -1, np.int64)
         self.D_meas = np.zeros(n)
         self.D_meas_reset = np.zeros(n)
         self._prev_x = self.a.pos[:, 0].copy()
@@ -304,7 +323,12 @@ class Run:
         prom = np.flatnonzero((self.tier == 3) & (new < 3))
         dem = np.flatnonzero((self.tier < 3) & (new == 3))
         if prom.size:
-            promote(prom, self.d, self.region, self.sur, self.core, self.a, self.phase, self.dist_at_demote, self.brng)
+            s_at = None
+            if SURROGATE_SPEED:
+                s_at = np.clip(self.core.s[prom] + self.prog_off[prom], 0.0, self.core.L[prom])
+            promote(prom, self.d, self.region, self.sur, self.core, self.a, self.phase, self.dist_at_demote,
+                    self.brng, s_at=s_at)
+            self.prog_off[prom] = 0.0
             self.ledger.reset(prom)
             self.D_meas[prom] = 0.0
         if dem.size:
@@ -312,6 +336,12 @@ class Run:
             t = self.core.tangent(dem)
             rel = self.a.pos[dem] - self.core.point(self.core.s[dem], dem)
             self.lat_off[dem] = np.clip(-rel[:, 0] * t[:, 1] + rel[:, 1] * t[:, 0], -1.8, 1.8)
+            if SURROGATE_SPEED:
+                # carry the live agent's along-route position into the surrogate rather than
+                # snapping it onto the core point; bind has already held it inside the band
+                off = self.core.project(self.a.pos[dem], dem) - self.core.s[dem]
+                self.prog_off[dem] = np.clip(off, -BAND, BAND)
+                self.sur_reg[dem] = -1         # force a fresh draw for the new region
         self.tier = new.astype(np.int8)
 
     def _fine_core(self):
@@ -337,8 +367,42 @@ class Run:
         if sur.size:
             t = core.tangent(sur)
             nrm = np.stack([-t[:, 1], t[:, 0]], 1)
-            a.pos[sur] = core.point(core.s[sur], sur) + nrm * self.lat_off[sur, None]
-            a.vel[sur] = t * (a.speed[sur] * core.mbar[ctx[sur]] * (~core.queued[sur]))[:, None]
+            moving = ~core.queued[sur]
+            if SURROGATE_SPEED:
+                self._surrogate_speed(sur, ctx)
+                scale = self.sur_scale[sur]
+                off = self.prog_off[sur] + a.speed[sur] * (scale - core.mbar[ctx[sur]]) * DT * moving
+                off = np.clip(off, -BAND, BAND)
+                s_pos = np.clip(core.s[sur] + off, 0.0, core.L[sur])
+                # Core.bind is invariant 4 for surrogate agents exactly as for live ones: the
+                # band is enforced on the position that is drawn, not on the progress parameter,
+                # so corners and lateral offsets cannot push an agent outside it
+                pos = core.bind(core.point(s_pos, sur) + nrm * self.lat_off[sur, None], sur)
+                a.pos[sur] = pos
+                self.prog_off[sur] = np.clip(core.project(pos, sur) - core.s[sur], -BAND, BAND)
+                # pinned at the band edge the agent moves at the core's pace, not its own
+                pinned = np.abs(self.prog_off[sur]) >= BAND - 1e-6
+                eff = np.where(pinned, core.mbar[ctx[sur]], scale)
+                a.vel[sur] = t * (a.speed[sur] * eff * moving)[:, None]
+            else:
+                a.pos[sur] = core.point(core.s[sur], sur) + nrm * self.lat_off[sur, None]
+                a.vel[sur] = t * (a.speed[sur] * core.mbar[ctx[sur]] * moving)[:, None]
+
+    def _surrogate_speed(self, sur, ctx):
+        """Redraw the speed scale of every surrogate agent whose region changed, from the
+        reference law for that region: d ~ pi_ref(. | R, ctx), scale = speed_scale(decode(d))."""
+        stale = sur[self.sur_reg[sur] != self.region[sur]]
+        if not stale.size:
+            return
+        cand, cdf = self.sur.lift_tables()
+        u = self.brng.random(stale.size)
+        dd = np.empty(stale.size, np.int64)
+        for k, i in enumerate(stale):
+            R = int(self.region[i])
+            c = cdf[int(ctx[i])][R]
+            dd[k] = cand[R][min(int(np.searchsorted(c, u[k])), c.size - 1)]
+        self.sur_scale[stale] = speed_scale(self.proc.decode(dd, 16))
+        self.sur_reg[stale] = self.region[stale]
 
     def _fine_free(self, tick_period):
         """Fine-authoritative step (calib / baseline); tick_period per agent, 0 = frozen."""
@@ -411,6 +475,8 @@ class Run:
         idx = np.flatnonzero(done)
         if idx.size:
             world.complete(idx, frame, teleport=False)
+            self.prog_off[idx] = 0.0
+            self.sur_reg[idx] = -1
         world.service(frame)
 
     def run(self, frames, log=True):

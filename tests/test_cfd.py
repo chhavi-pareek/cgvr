@@ -57,21 +57,35 @@ def test_a_degraded_policy_scores_above_the_floor(cond):
         f"{cond} scored {d.mean():.4f}, at or below the {floor.mean():.4f} noise floor")
 
 
-def test_surrogate_collapses_the_speed_distribution():
-    """A specific defect the metric found on its first run: sim/tiered.py:341 gives surrogate
-    agents `core.mbar[ctx]`, a per-context MEAN speed multiplier, instead of their decoded
-    speed_scale. The Metropolis-Hastings correction makes region occupancy exact but leaves
-    the speed marginal unconstrained, so it collapses toward the mean."""
+def _speed_spread(flag):
+    import sim.tiered as st
     from bench.camerapaths import camera
     from sim.tiered import Run
 
-    r = Run("plaza", 200, "parity", seed=0, cam=camera("plaza", "orbit", 400), calib=CAL)
-    for f in range(400):
-        r.step(f)
-    sur = r.tier == 3
-    v = np.linalg.norm(r.a.vel, axis=1)
-    assert sur.sum() > 10 and (~sur).sum() > 10, "need both populations to compare"
-    assert v[sur].std() < v[~sur].std(), (
-        "surrogate speed spread is no longer below the live agents'; if sim/tiered.py:341 now "
-        "samples a speed scale instead of using core.mbar, delete this test and update cfd's "
-        "speed row in STATE.md")
+    st.SURROGATE_SPEED = flag
+    try:
+        r = Run("plaza", 200, "parity", seed=0, cam=camera("plaza", "orbit", 400), calib=CAL)
+        sur_v, live_v = [], []
+        for f in range(400):
+            r.step(f)
+            if f > 100:
+                v = np.linalg.norm(r.a.vel, axis=1)
+                sur_v.append(v[r.tier == 3])
+                live_v.append(v[r.tier < 3])
+        return np.concatenate(sur_v).std(), np.concatenate(live_v).std()
+    finally:
+        st.SURROGATE_SPEED = True
+
+
+def test_old_surrogate_collapsed_the_speed_distribution():
+    """The defect bench/cfd.py found on its first run, kept reproducible behind the flag:
+    moving every surrogate agent at core.mbar[ctx] collapses speed toward the context mean."""
+    sur, live = _speed_spread(False)
+    assert sur < 0.85 * live, f"old surrogate spread {sur:.4f} vs live {live:.4f}"
+
+
+def test_surrogate_speed_marginal_is_restored():
+    """With the scale drawn from pi_ref(d | R, ctx) per region, surrogate agents spread their
+    speeds like live agents do. Measured: surrogate std 0.2039 -> 0.2847, reference 0.2931."""
+    sur, live = _speed_spread(True)
+    assert sur > 0.9 * live, f"surrogate spread {sur:.4f} still well below live {live:.4f}"
