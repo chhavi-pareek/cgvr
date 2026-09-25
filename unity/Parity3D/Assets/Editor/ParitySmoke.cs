@@ -241,7 +241,10 @@ public static class ParitySmoke
         int worstFree = 0, worstHeld = 0, differ = 0;
         foreach (bool ledger in new[] { false, true })
         {
-            var w = new CrowdWorld(Policy.Parity, 1500, spec, 1u, table) { Viewers = 2, PopLedger = ledger, BudgetFrac = 0.25f };
+            var w = new CrowdWorld(Policy.Parity, 1500, spec, 1u, table)
+            {
+                Viewers = 2, PopLedger = ledger, SwitchCost = ledger ? 0.12f : 0f, BudgetFrac = 0.25f,
+            };
             w.ApplyCalibration(floor, th);
             int maskViol = 0, over = 0;
             for (int f = 0; f < 600; f++)
@@ -260,8 +263,9 @@ public static class ParitySmoke
             differ += diffRun;
             int worst = Mathf.Max(w.Pops[0].WorstWindow, w.Pops[1].WorstWindow);
             if (ledger) worstHeld = worst; else worstFree = worst;
-            Log($"two viewers, pops {(ledger ? "bounded" : "free")}: viewer pops/agent-min " +
-                $"{w.Pops[0].PerAgentMinute:F1} / {w.Pops[1].PerAgentMinute:F1}, worst agent in 2 s {worst}, " +
+            Log($"two viewers, pops {(ledger ? "bounded + cost" : "free")}: viewer pops/agent-min " +
+                $"{w.Pops[0].PerAgentMinute:F1} / {w.Pops[1].PerAgentMinute:F1} (area-weighted " +
+                $"{w.Pops[0].WeightedPerAgentMinute:F2}), worst agent in 2 s {worst}, " +
                 $"holds released {w.HoldsReleased}, agents drawn differently by the two viewers {diffRun}, " +
                 $"allocator {w.AllocMs:F2} ms");
             failures += Check($"two viewers ({(ledger ? "bounded" : "free")}) budget overruns", over, 0);

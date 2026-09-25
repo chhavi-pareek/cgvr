@@ -255,8 +255,14 @@ namespace Parity
             y += 26;
             if (GUI.Button(new Rect(x, y, bw3, 22), d.CoOp ? "co-op: 2 views" : "compare"))
                 d.PendingCoOp = true;
-            if (GUI.Button(new Rect(x + bw3 + 6, y, bw3, 22), d.PopLedger ? "pops: bounded" : "pops: free"))
-                d.PopLedger = !d.PopLedger;
+            string pops = d.PopLedger ? (d.SwitchCost ? "pops: bound + cost" : "pops: bounded") : "pops: free";
+            if (GUI.Button(new Rect(x + bw3 + 6, y, bw3, 22), pops))
+            {
+                // free -> bounded -> bounded + switching cost -> free
+                if (!d.PopLedger) { d.PopLedger = true; d.SwitchCost = false; }
+                else if (!d.SwitchCost) d.SwitchCost = true;
+                else { d.PopLedger = false; d.SwitchCost = false; }
+            }
             if (GUI.Button(new Rect(x + 2 * (bw3 + 6), y, bw3, 22), d.Occlusion ? "occlusion on" : "occlusion off"))
                 d.Occlusion = !d.Occlusion;
             y += 26;

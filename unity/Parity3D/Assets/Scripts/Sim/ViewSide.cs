@@ -28,6 +28,9 @@ namespace Parity
         int[] ring, ringHead;
         int[] holdBuf;
         public long Pops;
+        /// <summary>Pops weighted by the agent's projected area at the time ((d0/d)^2, capped at 1):
+        /// a distant impostor changing is a few pixels, a figure at arm's length is not.</summary>
+        public double WeightedPops;
         public long AgentFrames;
         public int WorstWindow;
         int frame;
@@ -41,7 +44,7 @@ namespace Parity
             holdBuf = new int[n];
             for (int i = 0; i < n; i++) { tokens[i] = Capacity; prev[i] = -1; }
             for (int i = 0; i < ring.Length; i++) ring[i] = int.MinValue / 2;
-            Pops = 0; AgentFrames = 0; WorstWindow = 0; frame = 0;
+            Pops = 0; WeightedPops = 0; AgentFrames = 0; WorstWindow = 0; frame = 0;
         }
 
         /// <summary>Key of the (animation, geometry) pair to hold, or -1 where it may change.</summary>
@@ -52,7 +55,7 @@ namespace Parity
             return holdBuf;
         }
 
-        public void Update(sbyte[] anim, sbyte[] geo, bool[] seen, int n)
+        public void Update(sbyte[] anim, sbyte[] geo, bool[] seen, int n, float[] area = null)
         {
             frame++;
             for (int i = 0; i < n; i++)
@@ -63,6 +66,7 @@ namespace Parity
                 {
                     tokens[i] -= 1f;
                     Pops++;
+                    WeightedPops += area != null ? area[i] : 1.0;
                     ring[i * Ring + ringHead[i]] = frame;
                     ringHead[i] = (ringHead[i] + 1) % Ring;
                     int recent = 0;
@@ -77,6 +81,8 @@ namespace Parity
 
         /// <summary>Visible pops per agent per minute at 60 frames a second.</summary>
         public float PerAgentMinute => AgentFrames > 0 ? Pops * 3600f / AgentFrames : 0f;
+        /// <summary>Area-weighted visible pops per agent per minute.</summary>
+        public float WeightedPerAgentMinute => AgentFrames > 0 ? (float)(WeightedPops * 3600.0 / AgentFrames) : 0f;
     }
 
     public sealed class CoverageBuffer

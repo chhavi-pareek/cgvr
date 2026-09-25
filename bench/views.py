@@ -62,7 +62,7 @@ def worst_window(hist, W):
     return (cs[W:] - cs[:-W]).max(0)
 
 
-def run(scene, n, frames, seed, frac, cam2, C, refill, beh_us=BEH_US):
+def run(scene, n, frames, seed, frac, cam2, C, refill, beh_us=BEH_US, switch=0.12):
     cal = calibrate(scene, n=200, seed=0)
     table = phase7_table(0.05716)
     aq = AXIS_QUALITY.copy()
@@ -74,11 +74,14 @@ def run(scene, n, frames, seed, frac, cam2, C, refill, beh_us=BEH_US):
     asg = ThresholdAssigner()
 
     free, held = FactoredAllocator(table, axis_quality=aq), FactoredAllocator(table, axis_quality=aq)
-    led = PopLedger((1, n), C, refill)
+    sticky, both = FactoredAllocator(table, axis_quality=aq), FactoredAllocator(table, axis_quality=aq)
+    led, led2 = PopLedger((1, n), C, refill), PopLedger((1, n), C, refill)
     prev_free = np.full(n, -1)
+    prev_sticky, prev_both = np.full(n, -1), np.full(n, -1)
     prev_mass = None
-    pops = {"MassLOD": [], "free": [], "ledger": []}
-    util_free, util_held, released = [], [], 0
+    pops = {"MassLOD": [], "free": [], "ledger": [], "switch": [], "switch+ledger": []}
+    util = {k: [] for k in ("free", "ledger", "switch", "switch+ledger")}
+    released = 0
     multi, merged = [], []
     B1 = budget_for(F, n, 1, frac)
     B2 = budget_for(F, n, 2, frac)
@@ -108,8 +111,20 @@ def run(scene, n, frames, seed, frac, cam2, C, refill, beh_us=BEH_US):
         popped = led.update(held.view_pair, s1[None, :])[0]
         if f:
             pops["ledger"].append(popped)
-        util_free.append(rf.utility)
-        util_held.append(rh.utility)
+        util["free"].append(rf.utility)
+        util["ledger"].append(rh.utility)
+        rs = sticky.allocate(a, cost, B1, view_salience=b1, view_prev=prev_sticky, switch_cost=switch)
+        if f:
+            pops["switch"].append((sticky.view_pair[0] != prev_sticky) & s1)
+        prev_sticky = sticky.view_pair[0].copy()
+        rb = both.allocate(a, cost, B1, view_salience=b1, view_lock=led2.holds(s1[None, :]),
+                           view_prev=prev_both, switch_cost=switch)
+        popped2 = led2.update(both.view_pair, s1[None, :])[0]
+        if f:
+            pops["switch+ledger"].append(popped2)
+        prev_both = both.view_pair[0].copy()
+        util["switch"].append(rs.utility)
+        util["switch+ledger"].append(rb.utility)
 
         # -- two viewers -------------------------------------------------------------
         B = np.vstack([b1, b2])
@@ -124,17 +139,18 @@ def run(scene, n, frames, seed, frac, cam2, C, refill, beh_us=BEH_US):
     secs = frames / 60.0
     print(f"{scene}: N={n}, {frames} frames ({secs:.0f} s), budget {100*frac:.0f}% of the priced range, "
           f"viewer 2 = '{cam2}', behaviour {beh_us} us")
-    print("\nvisible detail changes (viewer 1)        per agent-min   worst agent in any 2 s   any 10 s")
-    for k in ("MassLOD", "free", "ledger"):
+    print("\nvisible detail changes (viewer 1)          per agent-min  worst in 2 s  in 10 s  utility vs free")
+    for k in ("MassLOD", "free", "ledger", "switch", "switch+ledger"):
         h = np.array(pops[k])
         rate = h.sum() / n / (h.shape[0] / 3600.0)
         w2, w10 = worst_window(h, 120), worst_window(h, 600)
         name = {"MassLOD": "MassLOD bands + hysteresis", "free": "two-salience, no pop limit",
-                "ledger": f"two-salience + pop ledger"}[k]
-        print(f"  {name:36s} {rate:10.2f} {w2.max():16d} {w10.max():12d}")
+                "ledger": "two-salience + pop ledger", "switch": f"+ switching cost {switch}",
+                "switch+ledger": "+ switching cost + pop ledger"}[k]
+        du = "" if k in ("MassLOD", "free") else f"{100 * (np.mean(util[k]) / np.mean(util['free']) - 1):+.2f}%"
+        print(f"  {name:38s} {rate:10.2f} {w2.max():11d} {w10.max():8d}  {du:>12s}")
     print(f"  ledger bound C + r*T: {C + refill * 120:.1f} in 2 s, {C + refill * 600:.1f} in 10 s;"
           f"  holds released for the budget: {released}")
-    print(f"  utility cost of the pop ledger: {100 * (1 - np.mean(util_held) / np.mean(util_free)):.3f}%")
     print("\ntwo viewers on one simulation, same budget")
     print(f"  per-viewer detail vs one detail drawn in both views: utility +{100 * (np.mean(multi) / np.mean(merged) - 1):.2f}%")
 
@@ -149,11 +165,12 @@ def main():
     ap.add_argument("--cam2", default="sweep")
     ap.add_argument("--capacity", type=float, default=2.0)
     ap.add_argument("--refill", type=float, default=1.0 / 300.0)
+    ap.add_argument("--switch", type=float, default=0.12, help="switching cost per unit view salience")
     ap.add_argument("--heavy-behaviour", action="store_true",
                     help="behaviour at the Python model's measured 6.1 / 6.1 / 5.7 us over the surrogate")
     a = ap.parse_args()
     beh = (6.08, 6.09, 5.68) if a.heavy_behaviour else BEH_US
-    run(a.scene, a.agents, a.frames, a.seed, a.frac, a.cam2, a.capacity, a.refill, beh)
+    run(a.scene, a.agents, a.frames, a.seed, a.frac, a.cam2, a.capacity, a.refill, beh, a.switch)
 
 
 if __name__ == "__main__":

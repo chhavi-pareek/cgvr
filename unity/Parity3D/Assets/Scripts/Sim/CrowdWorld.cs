@@ -80,6 +80,10 @@ namespace Parity
         public readonly PopTracker[] Pops = { new PopTracker(), new PopTracker() };
         /// <summary>Hold view pairs of agents with no pop token (PARITY only; MassLOD is only counted).</summary>
         public bool PopLedger = true;
+        /// <summary>Price on changing an agent's view pair, per unit of its view salience
+        /// (alloc/factored.py switch_cost): a preference in the objective that lowers the average
+        /// pop rate, where the pop ledger only bounds the worst. 0 turns it off.</summary>
+        public float SwitchCost = 0.12f;
         /// <summary>View salience from visible pixels in a coverage buffer instead of distance alone.</summary>
         public bool Occlusion = true;
         public readonly CoverageBuffer Coverage = new CoverageBuffer();
@@ -91,7 +95,7 @@ namespace Parity
         public int[] Occluded = new int[MaxViewers];
         float[][] viewSalV;
         readonly float[][] smoothed = new float[MaxViewers][];
-        int[][] holdV, assignV;
+        int[][] holdV, assignV, prevV;
         public ErrorLedger Ledger;
         public readonly RlsCostModel Cost = new RlsCostModel();
 
@@ -197,6 +201,7 @@ namespace Parity
             {
                 Alloc = new FidelityAllocator(Table);
                 Factored = FactoredAllocator.TryCreate(Table);
+                if (Factored != null) { Factored.Warm = true; Factored.Btol = 1e-3; }
                 stateSalM = new float[n]; headroomM = new float[n];
                 Ledger = new ErrorLedger(n, Cap, 7u);
                 salience = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
@@ -210,6 +215,7 @@ namespace Parity
             AnimV = new[] { new sbyte[n], new sbyte[n] };
             viewSalV = new[] { new float[n], new float[n] };
             holdV = new[] { new int[n], new int[n] };
+            prevV = new[] { new int[n], new int[n] };
             assignV = new[] { new int[n], new int[n] };
             VisiblePx = new[] { new float[n], new float[n] };
             foreach (var p in Pops) p.Resize(n);
@@ -326,7 +332,18 @@ namespace Parity
             StepFine();
             AccrueDivergence();
             int views = Mode == Policy.Parity ? Viewers : 1;
-            for (int k = 0; k < views; k++) Pops[k].Update(AnimV[k], GeoV[k], SeenBy(k), N);
+            for (int k = 0; k < views; k++)
+            {
+                // the same area measure for both policies: (d0 / d)^2 from the LOD camera distance
+                var sigK = k == 0 ? Sig : Sig2;
+                if (popArea == null || popArea.Length != N) popArea = new float[N];
+                for (int i = 0; i < N; i++)
+                {
+                    float r = ViewD0 / Mathf.Max(sigK[i], 1e-3f);
+                    popArea[i] = Mathf.Min(1f, r * r);
+                }
+                Pops[k].Update(AnimV[k], GeoV[k], SeenBy(k), N, popArea);
+            }
             StepMs = (Time.realtimeSinceStartup - t0) * 1000f;
             frame++;
         }
@@ -414,6 +431,8 @@ namespace Parity
                         sm[i] = frame == 0 ? vs[i] : Mathf.Lerp(sm[i], vs[i], ViewSmoothing);
                         vs[i] = sm[i];
                     }
+                    for (int i = 0; i < N; i++)
+                        prevV[k][i] = frame == 0 ? -1 : Factored.ViewPairOfKey(AnimV[k][i] * ParityTable.NTiers + GeoV[k][i]);
                     if (PopLedger)
                     {
                         var h = Pops[k].Holds(seen, N);
@@ -428,7 +447,8 @@ namespace Parity
                 var sal = V == 1 ? new[] { viewSalV[0] } : viewSalV;
                 var holds = PopLedger ? (V == 1 ? new[] { holdV[0] } : holdV) : null;
                 var asg = V == 1 ? new[] { assignV[0] } : assignV;
-                Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg);
+                var prevs = SwitchCost > 0f ? (V == 1 ? new[] { prevV[0] } : prevV) : null;
+                Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg, prevs, SwitchCost);
                 HoldsReleased += Factored.Released;
             }
             else
@@ -475,6 +495,7 @@ namespace Parity
 
         /// <summary>Pop-ledger holds the allocator released to meet the frame budget, cumulative.</summary>
         public int HoldsReleased;
+        float[] popArea;
 
         /// <summary>Invariant 4: stepped for every agent at every tier, never allocated.</summary>
         void StepCore()

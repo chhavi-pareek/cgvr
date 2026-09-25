@@ -100,9 +100,16 @@ class Factorisation:
 
 class _Half:
     """One shared-menu problem: agents sorted by salience, one hull per feasible group, plus a
-    constant for agents whose choice is fixed (a view pair held by the pop ledger)."""
+    constant for agents whose choice is fixed (a view pair held by the pop ledger).
 
-    def __init__(self, sal, q, c, groups, fixed_cost=0.0):
+    With `prev` and `bonus` it is a switching-cost problem: each agent has one extra option, its
+    previous choice, worth `bonus` more than the menu says. That option is agent-specific, so it
+    cannot join the shared hull; instead every evaluation compares each agent's hull choice with
+    its own previous choice -- O(n) per multiplier instead of O(K log n), still exact, and total
+    cost is still non-increasing in the multiplier because each agent's choice is an argmax of
+    value - lam * cost over a fixed option set."""
+
+    def __init__(self, sal, q, c, groups, fixed_cost=0.0, prev=None, bonus=None):
         self.parts = []
         for idx, mask in groups:
             if len(idx) == 0:
@@ -111,23 +118,47 @@ class _Half:
             h = menu[upper_hull(c[menu], q[menu])]
             order = idx[np.argsort(-sal[idx], kind="stable")]
             self.parts.append((order, sal[order], h, hull_thetas(c, q, h)))
-        self.c = c
+        self.c, self.q, self.sal = c, q, sal
         self.fixed = float(fixed_cost)
+        self.prev = prev if (prev is not None and bonus is not None and (bonus > 0).any()) else None
+        self.bonus = bonus
 
-    def total(self, lam):
-        t = self.fixed
-        for order, ss, h, th in self.parts:
-            bounds, verts = HullAllocator._blocks(lam, ss, th)
-            t += float((np.diff(bounds) * self.c[h[verts]]).sum())
-        return t
-
-    def choose(self, lam, pick):
+    def _hull_pick(self, lam, pick):
         for order, ss, h, th in self.parts:
             bounds, verts = HullAllocator._blocks(lam, ss, th)
             for k in range(len(verts)):
                 lo, hi = int(bounds[k]), int(bounds[k + 1])
                 if hi > lo:
                     pick[order[lo:hi]] = h[verts[k]]
+        return pick
+
+    def _sticky(self, lam, pick):
+        """Replace each agent's hull choice by its previous one where keeping it is worth more."""
+        ids = np.concatenate([p[0] for p in self.parts]) if self.parts else np.zeros(0, np.int64)
+        pv = self.prev[ids]
+        ok = pv >= 0
+        ids, pv = ids[ok], pv[ok]
+        hv = pick[ids]
+        s = self.sal[ids]
+        keep = (s * self.q[pv] + self.bonus[ids] - lam * self.c[pv]) >= (s * self.q[hv] - lam * self.c[hv])
+        pick[ids[keep]] = pv[keep]
+        return pick
+
+    def total(self, lam):
+        if self.prev is None:
+            t = self.fixed
+            for order, ss, h, th in self.parts:
+                bounds, verts = HullAllocator._blocks(lam, ss, th)
+                t += float((np.diff(bounds) * self.c[h[verts]]).sum())
+            return t
+        pick = np.full(len(self.sal), -1, np.int64)
+        self._sticky(lam, self._hull_pick(lam, pick))
+        return self.fixed + float(self.c[pick[pick >= 0]].sum())
+
+    def choose(self, lam, pick):
+        self._hull_pick(lam, pick)
+        if self.prev is not None:
+            self._sticky(lam, pick)
         return pick
 
 
@@ -145,14 +176,20 @@ class FactoredAllocator:
       viewer draws its own mesh). The objective and the cost sum over viewers, so the problem
       is 1 + V shared-menu halves under one multiplier; `assign` is then (V, n), viewer k's
       row for each agent.
+    * view_prev + switch_cost: each agent's previous view pair per viewer (or -1), and a price
+      on changing it, in the same units as quality, scaled by the agent's view salience -- so a
+      change nobody sees is free and a change in full view must earn switch_cost more quality
+      per unit salience than it costs. A preference in the objective, priced against the budget
+      like everything else; the pop ledger remains the hard bound.
     * view_lock, same shape as view_salience: a view-pair index to hold, or -1. Held agents
       drop out of that viewer's half with a fixed cost. If the held costs alone make the budget
       unreachable, holds are released, most expensive first, and `self.released` counts them:
       the frame budget outranks the pop budget, as the error cap outranks the frame budget.
     """
 
-    def __init__(self, table, rtol=1e-4, btol=1e-3, max_iter=64, fill=True, axis_quality=None):
+    def __init__(self, table, rtol=1e-4, btol=0.0, max_iter=64, fill=True, axis_quality=None, warm=False):
         self.table = table
+        self.warm = warm
         self.rtol, self.btol, self.max_iter = rtol, btol, max_iter
         self.axis_quality = axis_quality
         self.lam = None
@@ -167,7 +204,8 @@ class FactoredAllocator:
             self._fac = f
         return f[1]
 
-    def allocate(self, salience, cost, budget, headroom=None, view_salience=None, view_lock=None):
+    def allocate(self, salience, cost, budget, headroom=None, view_salience=None, view_lock=None,
+                 view_prev=None, switch_cost=0.0):
         a = np.asarray(salience, np.float64)
         B = a if view_salience is None else np.asarray(view_salience, np.float64)
         multi = B.ndim == 2
@@ -208,25 +246,49 @@ class FactoredAllocator:
                     L[k, i] = -1
                     self.released += 1
 
+        P = None if view_prev is None else np.asarray(view_prev, np.int64).reshape(V, n)
         views = [_Half(B[k], F.q_view, F.c_view, [(np.flatnonzero(L[k] < 0), None)],
-                       fixed_cost=F.c_view[L[k][L[k] >= 0]].sum()) for k in range(V)]
+                       fixed_cost=F.c_view[L[k][L[k] >= 0]].sum(),
+                       prev=None if P is None else P[k], bonus=switch_cost * B[k])
+                 for k in range(V)]
 
         def total(lam):
             return state.total(lam) + sum(h.total(lam) for h in views)
 
+        # Warm start: the multiplier moves little between frames, so bracket around last frame's
+        # instead of growing from 1. The C# port brackets identically, so the two stay bit-equal.
+        # Stop once the spend at the feasible end is within btol of the budget (the serial
+        # allocator's rule): the remaining multiplier interval can only move a sliver of budget.
+        warm = self.lam if (self.warm and self.lam) else 0.0
         if total(0.0) <= budget:
             lam = 0.0
         else:
-            hi = 1.0
-            while total(hi) > budget and hi < 1e18:
-                hi *= 4.0
-            lo = 0.0
+            if warm > 0.0:
+                hi = warm
+                t_hi = total(hi)
+                while t_hi > budget and hi < 1e18:
+                    hi *= 2.0
+                    t_hi = total(hi)
+                lo = hi * 0.5
+                while lo > 1e-12:
+                    t_lo = total(lo)
+                    if t_lo > budget:
+                        break
+                    hi, t_hi, lo = lo, t_lo, lo * 0.5
+            else:
+                hi = 1.0
+                t_hi = total(hi)
+                while t_hi > budget and hi < 1e18:
+                    hi *= 4.0
+                    t_hi = total(hi)
+                lo = 0.0
             for _ in range(self.max_iter):
-                if hi - lo <= self.rtol * max(hi, 1e-12):
+                if hi - lo <= self.rtol * max(hi, 1e-12) or budget - t_hi <= self.btol * abs(budget):
                     break
                 mid = 0.5 * (lo + hi)
-                if total(mid) <= budget:
-                    hi = mid
+                t_mid = total(mid)
+                if t_mid <= budget:
+                    hi, t_hi = mid, t_mid
                 else:
                     lo = mid
             lam = hi

@@ -50,6 +50,7 @@ namespace Parity
         /// agent, each viewer's own mesh detail, one budget (alloc/factored.py, V = 2).</summary>
         public bool CoOp;
         public bool PopLedger = true;
+        public bool SwitchCost = true;
         public bool Occlusion = true;
         public bool Post = true;
         public bool Paused;
@@ -305,6 +306,7 @@ namespace Parity
                 w.TargetMs = TargetMs; w.Cap = Cap;
             }
             Par.PopLedger = PopLedger;
+            Par.SwitchCost = SwitchCost ? 0.12f : 0f;
             Par.Occlusion = Occlusion;
             Par.Viewers = CoOp ? 2 : 1;
             Par.Cam2 = camXZ2; Par.Yaw2 = yaw2;

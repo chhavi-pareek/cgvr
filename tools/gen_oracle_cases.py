@@ -113,6 +113,7 @@ def main():
     ok &= capped_fill(env)
     ok &= factored(env)
     ok &= viewers(env)
+    ok &= viewers_warm(env)
     print("\nC# port agrees with alloc/serial.py" if ok else "\nC# PORT DISAGREES -- investigate")
     sys.exit(0 if ok else 1)
 
@@ -222,6 +223,8 @@ def viewers(env):
             rng = np.random.default_rng(200 + seed)
             B = np.where(rng.random((2, n)) < 0.3, 0.0, np.minimum(1.0, (10.0 / rng.uniform(2, 120, (2, n))) ** 2))
             H = np.where(rng.random((2, n)) < 0.25, rng.integers(0, 15, (2, n)), -1)
+            Pv = np.where(rng.random((2, n)) < 0.9, rng.integers(0, 15, (2, n)), -1)
+            w = (0.0, 0.05, 0.12, 0.3)[seed]      # one seed without the switching cost
             top = FactoredAllocator(TABLE).allocate(s, cost, np.inf, headroom=hr, view_salience=B).cost
             floor = FactoredAllocator(TABLE).allocate(s, cost, 0.0, headroom=hr, view_salience=B).cost
             # the last two sit just above the no-hold floor, so holds have to be released
@@ -230,18 +233,20 @@ def viewers(env):
                 cases.append(dict(n=n, budget=b, salience=[float(x) for x in s],
                                   views=[[float(x) for x in row] for row in B],
                                   holds=[[int(x) for x in row] for row in H],
+                                  prevs=[[int(x) for x in row] for row in Pv], switchCost=w,
                                   rowCost=[float(x) for x in cost], headroom=[float(x) for x in hr],
                                   fillMax=0, warm=False))
-                meta.append((n, s, B, H, cost, hr, b))
+                meta.append((n, s, B, H, cost, hr, b, Pv, w))
     got = _run(cases, env, "viewers")
     verdict = over = mask_v = diff = rel_diff = 0
     tot = released = 0
     f32 = lambda x: np.asarray(x, np.float32).astype(np.float64)
-    for (n, s, B, H, cost, hr, b), g in zip(meta, got):
+    for (n, s, B, H, cost, hr, b, Pv, w), g in zip(meta, got):
         # the port reads every number as fp32; give the reference the same numbers, or the
         # release loop's running floor lands on different sides of a budget it sits right on
         al = FactoredAllocator(TABLE)
-        py = al.allocate(f32(s), f32(cost), float(np.float32(b)), headroom=f32(hr), view_salience=f32(B), view_lock=H)
+        py = al.allocate(f32(s), f32(cost), float(np.float32(b)), headroom=f32(hr), view_salience=f32(B), view_lock=H,
+                         view_prev=Pv, switch_cost=float(np.float32(w)))
         cs = np.asarray(g["assign"], np.int64)
         tot += 2 * n
         verdict += int(bool(py.infeasible) != bool(g["infeasible"]))
@@ -254,7 +259,7 @@ def viewers(env):
         if np.any(TABLE.err[cs] > np.asarray(hr)[None, :] + 1e-6):
             mask_v += 1
         diff += int((cs != py.assign).sum())
-    print(f"\nviewers (two views, pop holds): {len(meta)} cases, {tot} agent-view decisions, "
+    print(f"\nviewers (two views, pop holds, switching cost): {len(meta)} cases, {tot} agent-view decisions, "
           f"{released} holds released for the budget")
     print(f"  infeasibility verdict disagreements : {verdict}")
     print(f"  released-hold count disagreements   : {rel_diff}")
@@ -264,6 +269,39 @@ def viewers(env):
     ok = verdict == 0 and rel_diff == 0 and over == 0 and mask_v == 0 and diff == 0
     print("  ->", "viewer port agrees with alloc/factored.py" if ok else "VIEWER PORT DISAGREES")
     return ok
+
+
+def viewers_warm(env):
+    """The factored allocator's warm start over 40 frames: salience drifting and the budget
+    wobbling as a matched budget would, with the switching cost and pop holds both on. Python and
+    C# each reuse one allocator, so both carry the multiplier forward."""
+    n = 800
+    s, cost, hr = instance(11, n, True)
+    rng = np.random.default_rng(12)
+    B = np.minimum(1.0, (10.0 / rng.uniform(2, 120, (2, n))) ** 2)
+    top = FactoredAllocator(TABLE).allocate(s, cost, np.inf, headroom=hr, view_salience=B).cost
+    f32 = lambda x: np.asarray(x, np.float32).astype(np.float64)
+    frames, cases = [], []
+    prev = np.full((2, n), -1)
+    py = FactoredAllocator(TABLE, warm=True, btol=1e-3)      # exactly as the engine runs it
+    for f in range(40):
+        B = np.clip(B * rng.uniform(0.97, 1.03, B.shape), 0.0, 1.0)
+        b = float(np.float32(0.35 * top * (1 + rng.uniform(-0.03, 0.03))))
+        H = np.where(rng.random((2, n)) < 0.1, np.maximum(prev, 0), -1)
+        r = py.allocate(f32(s), f32(cost), b, headroom=f32(hr), view_salience=f32(B), view_lock=H,
+                        view_prev=prev, switch_cost=float(np.float32(0.12)))
+        cases.append(dict(n=n, budget=b, salience=[float(x) for x in s], views=[[float(x) for x in row] for row in B],
+                          holds=[[int(x) for x in row] for row in H], prevs=[[int(x) for x in row] for row in prev],
+                          switchCost=0.12, rowCost=[float(x) for x in cost], headroom=[float(x) for x in hr],
+                          fillMax=0, warm=True, btol=1e-3))
+        frames.append(r.assign.copy())
+        prev = py.view_pair.copy()
+    got = _run(cases, env, "viewers-warm")
+    diff = sum(int((np.asarray(g["assign"]) != a).sum()) for g, a in zip(got, frames))
+    print(f"\nfactored warm start: 40 frames, N={n}, two views, switching cost and holds, budget +-3%")
+    print(f"  differing agent-view assignments    : {diff}  of {40 * 2 * n}")
+    print("  ->", "warm factored path agrees" if diff == 0 else "WARM FACTORED PATH DISAGREES")
+    return diff == 0
 
 
 def capped_fill(env):

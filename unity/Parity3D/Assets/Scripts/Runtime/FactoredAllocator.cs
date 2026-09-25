@@ -26,6 +26,12 @@ namespace Parity
     {
         public int MaxIter = 64;
         public double Rtol = 1e-4;
+        /// <summary>Stop once spend is within Btol of the budget (0 = off, the exact hull answer;
+        /// the engine runs 1e-3, the serial allocator's rule).</summary>
+        public double Btol;
+        /// <summary>Bracket the multiplier around last frame's (alloc/factored.py warm=True).</summary>
+        public bool Warm;
+        double lastLam;
 
         readonly int nS, nV;
         readonly int[] rowOf;            // [s * nV + v]
@@ -45,6 +51,8 @@ namespace Parity
         double[] fixedV = new double[0];
         List<Part>[] partsV = new List<Part>[0];
         readonly List<int> freeWork = new List<int>();
+        int[] groupOf = new int[0];
+        bool[] member = new bool[0];
         readonly List<Held> heldWork = new List<Held>();
         struct Held { public int K, I; public double Extra; }
         /// <summary>Holds the last solve had to release to meet the frame budget.</summary>
@@ -216,6 +224,73 @@ namespace Parity
             return total;
         }
 
+        // -- temporal coherence --------------------------------------------------------
+        // The salience order barely changes from one frame to the next, so each half keeps last
+        // frame's order of ALL agents and repairs it by insertion sort: O(n + inversions) instead
+        // of O(n log n). A group's slice is then that order filtered to the group, which is the
+        // group sorted -- the order is total (salience descending, index ascending), so the result
+        // is identical to sorting from scratch. A camera cut can scramble the order; past
+        // CoherentLimit inversions per agent the repair gives up and sorts.
+        public bool Coherent = true;
+        public int CoherentLimit = 12;
+        /// <summary>Inversions repaired last solve, and whether any half fell back to a full sort.</summary>
+        public long LastInversions;
+        public bool LastFellBack;
+        int[] orderS = new int[0];
+        int[][] orderV = new int[0][];
+        Agent[] sortWork = new Agent[0];
+
+        static bool Before(float[] key, int a, int b) => key[a] > key[b] || (key[a] == key[b] && a < b);
+
+        void CoherentOrder(float[] key, int n, ref int[] order)
+        {
+            if (order.Length != n)
+            {
+                order = new int[n];
+                for (int i = 0; i < n; i++) order[i] = i;
+            }
+            long moves = 0, limit = (long)CoherentLimit * n;
+            bool ok = Coherent;
+            for (int j = 1; j < n && ok; j++)
+            {
+                int x = order[j], k = j - 1;
+                while (k >= 0 && Before(key, x, order[k]))
+                {
+                    order[k + 1] = order[k];
+                    k--;
+                    if (++moves > limit) { ok = false; break; }
+                }
+                order[k + 1] = x;
+            }
+            LastInversions += moves;
+            if (!ok)
+            {
+                LastFellBack |= Coherent;
+                if (sortWork.Length < n) sortWork = new Agent[n];
+                for (int i = 0; i < n; i++) sortWork[i] = new Agent { Key = key[i], Index = i };
+                Array.Sort(sortWork, 0, n, Desc);
+                for (int i = 0; i < n; i++) order[i] = sortWork[i].Index;
+            }
+        }
+
+        /// <summary>Lays out one hull part from a pre-sorted order filtered by `member`.</summary>
+        void PrepareOrdered(Agent[] sorted, double[] sal, float[] salience, int[] order, int n, bool[] member,
+                            int start, double[] c, double[] q, List<int> menu, List<Part> parts, out int count)
+        {
+            count = 0;
+            for (int j = 0; j < n; j++)
+            {
+                int i = order[j];
+                if (member != null && !member[i]) continue;
+                sorted[start + count] = new Agent { Key = salience[i], Index = i };
+                sal[start + count] = salience[i];
+                count++;
+            }
+            if (count == 0) return;
+            var h = UpperHull(c, q, menu);
+            parts.Add(new Part { Lo = start, Hi = start + count, Hull = h, Theta = Thetas(c, q, h) });
+        }
+
         void Prepare(Agent[] sorted, double[] sal, float[] salience, List<int> idx, int count, int start,
                      double[] c, double[] q, List<int> menu, List<Part> parts)
         {
@@ -230,6 +305,43 @@ namespace Parity
             parts.Add(new Part { Lo = start, Hi = start + count, Hull = h, Theta = Thetas(c, q, h) });
         }
 
+        // switching cost (alloc/factored.py _Half._sticky): each agent may keep its previous view
+        // pair for a bonus of switchCost * its view salience; exact per multiplier, O(n) per call
+        int[][] prevV;
+        double switchCost;
+
+        double ViewBlocks(Part p, double lam, int k, int[] pick)
+        {
+            if (prevV == null || prevV[k] == null || switchCost <= 0.0)
+                return Blocks(p, lam, salV[k], cV, sortV[k], pick);
+            int n = p.Hi - p.Lo, K = p.Hull.Length;
+            if (n == 0) return 0.0;
+            var sal = salV[k]; var sorted = sortV[k]; var prev = prevV[k];
+            double total = 0.0;
+            int done = 0;
+            for (int blk = 0; blk < K; blk++)
+            {
+                int vtx = K - 1 - blk, end;
+                if (vtx == 0) end = n;
+                else end = CountAtLeast(sal, p.Lo, p.Hi, lam / Math.Max(p.Theta[vtx - 1], 1e-300));
+                end = Math.Min(Math.Max(end, done), n);
+                int hv = p.Hull[vtx];
+                for (int j = done; j < end; j++)
+                {
+                    int i = sorted[p.Lo + j].Index, choice = hv, pv = prev[i];
+                    if (pv >= 0)
+                    {
+                        double s = sal[p.Lo + j];
+                        if (s * qV[pv] + switchCost * s - lam * cV[pv] >= s * qV[hv] - lam * cV[hv]) choice = pv;
+                    }
+                    total += cV[choice];
+                    if (pick != null) pick[i] = choice;
+                }
+                done = end;
+            }
+            return total;
+        }
+
         double Total(double lam, int V)
         {
             double t = 0.0;
@@ -237,7 +349,7 @@ namespace Parity
             for (int k = 0; k < V; k++)
             {
                 t += fixedV[k];
-                foreach (var p in partsV[k]) t += Blocks(p, lam, salV[k], cV, sortV[k], null);
+                foreach (var p in partsV[k]) t += ViewBlocks(p, lam, k, null);
             }
             return t;
         }
@@ -271,9 +383,11 @@ namespace Parity
         /// free; viewHold may be null); assign[k] receives viewer k's full-table rows, all of
         /// which share one state pair per agent. Negative view salience is treated as 0.</summary>
         public AllocResult Solve(float[] stateSal, float[][] viewSal, int[][] viewHold, float[] headroom, int n,
-                                 float budget, int[][] assign)
+                                 float budget, int[][] assign, int[][] viewPrev = null, float switchCostPerSalience = 0f)
         {
             int V = viewSal.Length;
+            prevV = viewPrev;
+            switchCost = switchCostPerSalience;
             Grow(n, V);
             partsS.Clear();
             var res = new AllocResult();
@@ -294,15 +408,19 @@ namespace Parity
                 if (g == 0) { res.Starved++; g = 1; }   // cannot happen while a rate-0 pair exists
                 byLevel[g].Add(i);
             }
+            LastInversions = 0; LastFellBack = false;
+            CoherentOrder(stateSal, n, ref orderS);
+            if (groupOf.Length < n) { groupOf = new int[n]; member = new bool[n]; }
+            for (int g = 1; g <= L; g++) foreach (int i in byLevel[g]) groupOf[i] = g;
             int start = 0;
             for (int g = 1; g <= L; g++)
             {
                 if (byLevel[g].Count == 0) continue;
                 menuS.Clear();
                 for (int s = 0; s < nS; s++) if (eS[s] <= levels[g - 1] + 1e-12) menuS.Add(s);
-                var idx = byLevel[g];
-                Prepare(sortS, salS, stateSal, idx, idx.Count, start, cS, qS, menuS, partsS);
-                start += idx.Count;
+                for (int i = 0; i < n; i++) member[i] = groupOf[i] == g;
+                PrepareOrdered(sortS, salS, stateSal, orderS, n, member, start, cS, qS, menuS, partsS, out int cnt);
+                start += cnt;
             }
 
             // holds, and the release the frame budget may force on them
@@ -359,8 +477,12 @@ namespace Parity
                 for (int v = 0; v < nV; v++) menuV.Add(v);
                 if (freeWork.Count > 0)
                 {
-                    Prepare(sortV[k], salV[k], viewSal[k], freeWork, freeWork.Count, 0, cV, qV, menuV, partsV[k]);
-                    for (int j = 0; j < freeWork.Count; j++) if (salV[k][j] < 0.0) salV[k][j] = 0.0;
+                    if (orderV.Length < V) Array.Resize(ref orderV, V);
+                    if (orderV[k] == null) orderV[k] = new int[0];
+                    CoherentOrder(viewSal[k], n, ref orderV[k]);
+                    for (int i = 0; i < n; i++) member[i] = hold[k][i] < 0;
+                    PrepareOrdered(sortV[k], salV[k], viewSal[k], orderV[k], n, member, 0, cV, qV, menuV, partsV[k], out int cnt);
+                    for (int j = 0; j < cnt; j++) if (salV[k][j] < 0.0) salV[k][j] = 0.0;
                 }
             }
 
@@ -369,19 +491,37 @@ namespace Parity
             if (Total(0.0, V) <= budget) lam = 0.0;
             else
             {
-                double hi = 1.0;
-                evals++;
-                while (Total(hi, V) > budget && hi < 1e18) { hi *= 4.0; evals++; }
-                double lo = 0.0;
+                double hi, lo, tHi;
+                if (Warm && lastLam > 0.0)
+                {
+                    hi = lastLam;
+                    tHi = Total(hi, V); evals++;
+                    while (tHi > budget && hi < 1e18) { hi *= 2.0; tHi = Total(hi, V); evals++; }
+                    lo = hi * 0.5;
+                    while (lo > 1e-12)
+                    {
+                        double tLo = Total(lo, V); evals++;
+                        if (tLo > budget) break;
+                        hi = lo; tHi = tLo; lo *= 0.5;
+                    }
+                }
+                else
+                {
+                    hi = 1.0;
+                    tHi = Total(hi, V); evals++;
+                    while (tHi > budget && hi < 1e18) { hi *= 4.0; tHi = Total(hi, V); evals++; }
+                    lo = 0.0;
+                }
                 for (int it = 0; it < MaxIter; it++)
                 {
-                    if (hi - lo <= Rtol * Math.Max(hi, 1e-12)) break;
+                    if (hi - lo <= Rtol * Math.Max(hi, 1e-12) || budget - tHi <= Btol * Math.Abs(budget)) break;
                     double mid = 0.5 * (lo + hi);
-                    evals++;
-                    if (Total(mid, V) <= budget) hi = mid; else lo = mid;
+                    double tMid = Total(mid, V); evals++;
+                    if (tMid <= budget) { hi = mid; tHi = tMid; } else lo = mid;
                 }
                 lam = hi;
             }
+            lastLam = lam;
 
             foreach (var p in partsS) Blocks(p, lam, salS, cS, sortS, pickS);
             double cost = 0.0, util = 0.0;
@@ -389,7 +529,7 @@ namespace Parity
             for (int k = 0; k < V; k++)
             {
                 for (int i = 0; i < n; i++) pickV[k][i] = hold[k][i];
-                foreach (var p in partsV[k]) Blocks(p, lam, salV[k], cV, sortV[k], pickV[k]);
+                foreach (var p in partsV[k]) ViewBlocks(p, lam, k, pickV[k]);
                 for (int i = 0; i < n; i++)
                 {
                     int v = pickV[k][i];

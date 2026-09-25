@@ -83,8 +83,9 @@ public static class ParityShots
             par.MatchBudgetMs = bas.PredictedSpendMs();
             par.Step(xz, yaw, par.StepMs);
         }
-        Log($"{spec.Name}: pops/agent-min MassLOD {bas.Pops[0].PerAgentMinute:F1} (worst {bas.Pops[0].WorstWindow} in 2 s)" +
-            $"  PARITY {par.Pops[0].PerAgentMinute:F1} (worst {par.Pops[0].WorstWindow})" +
+        Log($"{spec.Name}: pops/agent-min MassLOD {bas.Pops[0].PerAgentMinute:F1} area-weighted {bas.Pops[0].WeightedPerAgentMinute:F2}" +
+            $" (worst {bas.Pops[0].WorstWindow} in 2 s)  PARITY {par.Pops[0].PerAgentMinute:F1} area-weighted " +
+            $"{par.Pops[0].WeightedPerAgentMinute:F2} (worst {par.Pops[0].WorstWindow})" +
             $"   in view but hidden behind nearer agents: {par.Occluded[0]}");
         var c = par.Counts;
         Log($"{spec.Name}: N {n}  matched budget {par.BudgetMs:F2} ms  PARITY spent {par.Last.Cost:F2}" +

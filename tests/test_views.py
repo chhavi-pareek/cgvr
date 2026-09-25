@@ -148,3 +148,42 @@ def test_pop_ledger_ignores_changes_nobody_sees():
     popped = led.update(np.array([[1, 1, 0, 0]]), np.array([[True, False, True, False]]))
     assert popped.tolist() == [[True, False, False, False]]
     assert led.holds(np.array([[True] * 4])).tolist() == [[1, -1, -1, -1]]
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_switching_cost_is_exact_at_lambda(seed):
+    """With a price on changing view pair, each agent's choice is still the exact argmax over
+    every view pair of b q - lam c + (switch_cost * b if it is the previous pair)."""
+    a, B, hr, c = instance(seed, n=200, V=1)
+    b = B[0]
+    F = Factorisation(T, c)
+    rng = np.random.default_rng(seed)
+    prev = np.where(rng.random(200) < 0.8, rng.integers(0, len(F.vkeys), 200), -1)
+    w = 0.05
+    budget = 0.4 * top(a, B, hr, c)
+    al = FactoredAllocator(T)
+    r = al.allocate(a, c, budget, headroom=hr, view_salience=b, view_prev=prev, switch_cost=w)
+    assert r.cost <= budget * (1 + 1e-9)
+    val = b[:, None] * F.q_view[None, :] - r.lam * F.c_view[None, :]
+    val[np.arange(200)[prev >= 0], prev[prev >= 0]] += w * b[prev >= 0]
+    vp = al.view_pair[0]
+    assert np.allclose(val[np.arange(200), vp], val.max(1), atol=1e-12)
+
+
+def test_switching_cost_zero_is_the_plain_problem_and_positive_cost_changes_less():
+    a, B, hr, c = instance(5, n=300, V=1)
+    b = B[0]
+    F = Factorisation(T, c)
+    rng = np.random.default_rng(1)
+    prev = rng.integers(0, len(F.vkeys), 300)
+    budget = 0.4 * top(a, B, hr, c)
+    plain = FactoredAllocator(T).allocate(a, c, budget, headroom=hr, view_salience=b)
+    al0 = FactoredAllocator(T)
+    zero = al0.allocate(a, c, budget, headroom=hr, view_salience=b, view_prev=prev, switch_cost=0.0)
+    assert (zero.assign == plain.assign).all()
+    changed = []
+    for w in (0.0, 0.02, 0.1):
+        al = FactoredAllocator(T)
+        al.allocate(a, c, budget, headroom=hr, view_salience=b, view_prev=prev, switch_cost=w)
+        changed.append(int(((al.view_pair[0] != prev) & (b > 0)).sum()))
+    assert changed[0] >= changed[1] >= changed[2] and changed[2] < changed[0]
