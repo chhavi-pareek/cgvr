@@ -42,6 +42,9 @@ LOGS = os.path.join(os.path.dirname(__file__), "logs")
 SCENES = ("plaza", "hub", "corridor")
 AGENTS = (100, 200, 500, 1000, 2000, 5000)
 CONDITIONS = ("reference", "baseline", "parity", "parity_nocap", "parity_authored", "parity_sequential")
+# parity_sequential is proven to reproduce parity's allocation exactly (see STATE.md), so every
+# cell it runs is redundant; it stays selectable with --conditions but is out of the default grid.
+DEFAULT_CONDITIONS = tuple(c for c in CONDITIONS if c != "parity_sequential")
 
 # invariant-2 ablation: authored per-axis ramps and hand weights (behaviour, nav, anim, geo)
 AUTHORED_RAMP = np.array([1.0, 0.75, 0.5, 0.0])
@@ -173,7 +176,7 @@ def cells(args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--scenes", nargs="+", default=list(SCENES), choices=SCENES)
-    p.add_argument("--conditions", nargs="+", default=list(CONDITIONS), choices=CONDITIONS)
+    p.add_argument("--conditions", nargs="+", default=list(DEFAULT_CONDITIONS), choices=CONDITIONS)
     p.add_argument("--agents", nargs="+", type=int, default=list(AGENTS))
     p.add_argument("--seeds", nargs="+", type=int, default=[0])
     p.add_argument("--cams", nargs="+", default=["orbit"], choices=NAMES)
