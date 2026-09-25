@@ -227,3 +227,55 @@ def test_sequential_utility_never_above_joint(seed, frac):
     if not seq.infeasible:
         assert seq.cost <= B
     assert seq.utility <= joint.utility * (1 + 1e-9) + 1e-9
+
+
+# -- sharper strawman: stage 1 spends the error budget maximally, stage 2 downgrades ----
+
+
+def test_sequential_mode_is_validated():
+    with pytest.raises(ValueError):
+        SequentialAllocator(TABLE, mode="greedy")
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("frac", [0.1, 0.35, 0.7, 0.95])
+def test_sequential_maximal_matches_joint(seed, frac):
+    """`mode="maximal"` commits each agent to the best configuration its error headroom
+    allows before the frame budget is even looked at, then claws time back by downgrading.
+    It is the opponent the cheapest-first strawman is not: its stage-1 choice is the one
+    stage 2 has to live with. It still lands on the joint solver's exact assignment."""
+    n = 120
+    rng = np.random.default_rng(200 + seed)
+    s, ticks = _instance(seed, n)
+    cost = ticks.astype(np.float64)
+    headroom = rng.uniform(0.15, 1.5, n)
+    B = float(cost.min() * n + frac * (cost.max() - cost.min()) * n)
+    seq = SequentialAllocator(TABLE, mode="maximal").allocate(s, cost, B, headroom=headroom)
+    joint = SerialAllocator(TABLE).allocate(s, cost, B, headroom=headroom)
+    assert np.all(TABLE.err[seq.assign] <= headroom)
+    assert seq.infeasible == joint.infeasible
+    if not seq.infeasible:
+        assert seq.cost <= B
+        assert np.array_equal(seq.assign, joint.assign)
+
+
+def test_greedy_fill_is_what_closes_the_gap_not_the_joint_solve():
+    """With the fill disabled the three solves separate, and not in the expected direction:
+    cheapest-first collapses (it never spends the time budget at all), while maximal-first
+    is level with the joint Lagrangian or slightly ahead of it, because the bisection stops
+    at a bracket end below the budget and leaves the integrality gap unspent. So the fill,
+    not the joint relaxation, is what makes the allocation exact; the joint relaxation is
+    what makes it fast. Re-enabling the fill collapses all three onto one assignment."""
+    n = 120
+    rng = np.random.default_rng(7)
+    s, ticks = _instance(4, n)
+    cost = ticks.astype(np.float64)
+    headroom = rng.uniform(0.15, 1.5, n)
+    B = float(cost.min() * n + 0.4 * (cost.max() - cost.min()) * n)
+    kw = dict(headroom=headroom)
+    joint = SerialAllocator(TABLE, fill=False).allocate(s, cost, B, **kw)
+    cheap = SequentialAllocator(TABLE, fill=False, mode="cheapest").allocate(s, cost, B, **kw)
+    maxim = SequentialAllocator(TABLE, fill=False, mode="maximal").allocate(s, cost, B, **kw)
+    assert cheap.utility < 0.9 * joint.utility  # measured ~0.15x: stage 1 is the floor
+    assert maxim.utility >= joint.utility * (1 - 1e-9)
+    assert maxim.cost <= B and cheap.cost <= B
