@@ -103,7 +103,20 @@ def build(q_tick, e_tick, e_sur, reconcile_us=0.0, cap=1.0):
         # the full step every k frames, the core every frame; the core is never allocated
         rows.append((f"tick-{k}", q_tick[k], CORE_US + (FULL_US - CORE_US) / k, e_tick[k]))
     if reconcile_us > 0.0:
-        rows = [(n, q, c + reconcile_us * e / cap, e) for (n, q, c, e) in rows]
+        # Per-TRANSITION-TYPE, not global. Charging one R to every drifting row flatters the
+        # surrogate, because the two transitions are not the same operation:
+        #   surrogate -> live  reconstructs state: draw d ~ pi_ref(. | R, ctx), find a free
+        #                      lateral slot, rebuild gait phase, and snap the position onto
+        #                      the core point. Measured 16.4 us/agent.
+        #   tick-k -> tick-1   RESUMES. A tick-k agent never left the live state -- its latent
+        #                      is valid and merely lagged, its position was integrated from its
+        #                      own decoded velocity and is already inside the core band. There
+        #                      is nothing to reconstruct and nothing to snap, so the cost is a
+        #                      tier-field write.
+        # That is structural, not a constant factor: frame-skipping avoids reconciliation by
+        # construction, so no optimisation of promote() can close the gap.
+        rows = [(n, q, c + (reconcile_us if n == "surrogate" else 0.0) * e / cap, e)
+                for (n, q, c, e) in rows]
     return Menu(rows)
 
 
