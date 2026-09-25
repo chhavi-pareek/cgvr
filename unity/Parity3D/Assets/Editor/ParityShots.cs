@@ -77,10 +77,15 @@ public static class ParityShots
         for (int f = 0; f < Frames; f++)
         {
             Orbit(cam, spec, tOrbit * f / Frames, out var xz, out float yaw);
+            var pm = cam.projectionMatrix;
+            par.SetView(0, pm * cam.worldToCameraMatrix, pm.m00, pm.m11);
             bas.Step(xz, yaw, bas.StepMs);
             par.MatchBudgetMs = bas.PredictedSpendMs();
             par.Step(xz, yaw, par.StepMs);
         }
+        Log($"{spec.Name}: pops/agent-min MassLOD {bas.Pops[0].PerAgentMinute:F1} (worst {bas.Pops[0].WorstWindow} in 2 s)" +
+            $"  PARITY {par.Pops[0].PerAgentMinute:F1} (worst {par.Pops[0].WorstWindow})" +
+            $"   in view but hidden behind nearer agents: {par.Occluded[0]}");
         var c = par.Counts;
         Log($"{spec.Name}: N {n}  matched budget {par.BudgetMs:F2} ms  PARITY spent {par.Last.Cost:F2}" +
             $"   behaviour {c[0, 0]}/{c[0, 1]}/{c[0, 2]}/{c[0, 3]}   geometry {c[3, 0]}/{c[3, 1]}/{c[3, 2]}/{c[3, 3]}");
@@ -116,6 +121,45 @@ public static class ParityShots
         }
 
         bas.Dispose(); par.Dispose();
+
+        // co-op: the same PARITY crowd from two cameras half an orbit apart, one budget
+        var coop = new CrowdWorld(Policy.Parity, n, spec, 1u, alloc) { Viewers = 2, BudgetFrac = 0.25f };
+        coop.ApplyCalibration(floor, CrowdWorld.CalibratedTheta);
+        var cam2 = Director.MakeCamera("Shot 2", new Rect(0f, 0f, 1f, 1f));
+        cam2.enabled = false;
+        cam2.targetTexture = hdr;
+        UnityEngine.Object.DestroyImmediate(cam2.GetComponent<PostFx>());
+        for (int f = 0; f < 600; f++)
+        {
+            float t = tOrbit * f / 600f;
+            Orbit(cam, spec, t, out var xz1, out float y1);
+            Orbit(cam2, spec, t + 0.5f, out var xz2, out float y2);
+            var p1 = cam.projectionMatrix; var p2 = cam2.projectionMatrix;
+            coop.SetView(0, p1 * cam.worldToCameraMatrix, p1.m00, p1.m11);
+            coop.SetView(1, p2 * cam2.worldToCameraMatrix, p2.m00, p2.m11);
+            coop.Cam2 = xz2; coop.Yaw2 = y2;
+            coop.Step(xz1, y1, coop.StepMs);
+        }
+        var g1 = new int[4]; var g2 = new int[4];
+        int differ = 0;
+        for (int i = 0; i < coop.N; i++)
+        {
+            g1[coop.GeoV[0][i]]++; g2[coop.GeoV[1][i]]++;
+            if (coop.GeoV[0][i] != coop.GeoV[1][i]) differ++;
+        }
+        Log($"{spec.Name} co-op: viewer 1 mesh mix {g1[0]}/{g1[1]}/{g1[2]}/{g1[3]}, viewer 2 {g2[0]}/{g2[1]}/{g2[2]}/{g2[3]}," +
+            $" {differ} agents drawn differently, hidden {coop.Occluded[0]} / {coop.Occluded[1]}, allocator {coop.AllocMs:F2} ms");
+        rend.Look = Look.Natural;
+        rend.Draw(coop, cam, 0); cam.Render(); fx.Process(hdr, ldr); Read(ldr, tex);
+        split.SetPixels(0, 0, PanelW, PanelH, tex.GetPixels());
+        rend.Draw(coop, cam2, 1); cam2.Render(); fx.Process(hdr, ldr); Read(ldr, tex);
+        split.SetPixels(PanelW, 0, PanelW, PanelH, tex.GetPixels());
+        split.Apply();
+        File.WriteAllBytes(Path.Combine(dir, $"{spec.Name}_coop.png"), split.EncodeToPNG());
+        coop.Dispose();
+        cam2.targetTexture = null;
+        UnityEngine.Object.DestroyImmediate(cam2.gameObject);
+
         cam.targetTexture = null;
         UnityEngine.Object.DestroyImmediate(hdr);
         UnityEngine.Object.DestroyImmediate(ldr);
@@ -143,6 +187,15 @@ public static class ParityShots
         fx.Process(hdr, ldr);
         var prev = RenderTexture.active;
         RenderTexture.active = ldr;
+        tex.ReadPixels(new Rect(0, 0, PanelW, PanelH), 0, 0, false);
+        tex.Apply();
+        RenderTexture.active = prev;
+    }
+
+    static void Read(RenderTexture rt, Texture2D tex)
+    {
+        var prev = RenderTexture.active;
+        RenderTexture.active = rt;
         tex.ReadPixels(new Rect(0, 0, PanelW, PanelH), 0, 0, false);
         tex.Apply();
         RenderTexture.active = prev;

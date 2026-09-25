@@ -10,6 +10,13 @@
 // Needs the FULL table: pruning on combined quality drops rows a two-salience optimum uses
 // (tests/test_factored.py shows one). Each hull prunes its own half, which stays valid.
 // Arithmetic is fp64 throughout to track the Python oracle; the result reports fp32.
+//
+// Several viewers on one simulation: one state pair per agent (behaviour is simulated once)
+// and one view pair per agent per viewer (each viewer draws its own mesh), so V viewers are
+// 1 + V halves under the one multiplier. A view pair can be HELD (the pop ledger,
+// alloc/pops.py): the agent leaves that viewer's half at a fixed cost. If the held costs alone
+// make the budget unreachable, holds are released costliest first -- the frame budget outranks
+// the pop budget, as the error cap outranks the frame budget.
 using System;
 using System.Collections.Generic;
 
@@ -22,14 +29,26 @@ namespace Parity
 
         readonly int nS, nV;
         readonly int[] rowOf;            // [s * nV + v]
+        int[] viewOf;                    // [row] -> view pair
+        readonly int[] keyToV = new int[ParityTable.NTiers * ParityTable.NTiers];   // anim*4+geo -> pair
         readonly double[] qS, qV, eS;
         readonly double[] cS, cV;
         double[] levels;                 // distinct state error rates, ascending
 
         // per-solve work, grown on demand
-        Agent[] sortS = new Agent[0], sortV = new Agent[0];
-        double[] salS = new double[0], salV = new double[0];
-        int[] pickS = new int[0], pickV = new int[0];
+        Agent[] sortS = new Agent[0];
+        double[] salS = new double[0];
+        int[] pickS = new int[0];
+        Agent[][] sortV = new Agent[0][];
+        double[][] salV = new double[0][];
+        int[][] pickV = new int[0][];
+        double[] fixedV = new double[0];
+        List<Part>[] partsV = new List<Part>[0];
+        readonly List<int> freeWork = new List<int>();
+        readonly List<Held> heldWork = new List<Held>();
+        struct Held { public int K, I; public double Extra; }
+        /// <summary>Holds the last solve had to release to meet the frame budget.</summary>
+        public int Released { get; private set; }
 
         struct Agent { public double Key; public int Index; }
         sealed class DescOrder : IComparer<Agent>
@@ -52,7 +71,7 @@ namespace Parity
             public int[] Hull;           // menu indices, increasing cost
             public double[] Theta;       // switch points, decreasing
         }
-        readonly List<Part> partsS = new List<Part>(), partsV = new List<Part>();
+        readonly List<Part> partsS = new List<Part>();
 
         FactoredAllocator(int s, int v)
         {
@@ -88,6 +107,10 @@ namespace Parity
                 f.qV[v] = (t.AxisQ[2, a] + t.AxisQ[3, g]) / ParityTable.NAxes;
             }
             for (int i = 0; i < f.rowOf.Length; i++) if (f.rowOf[i] < 0) return null;
+            for (int k = 0; k < f.keyToV.Length; k++) f.keyToV[k] = -1;
+            foreach (var kv in vIdx) f.keyToV[kv.Key] = kv.Value;
+            f.viewOf = new int[t.M];
+            for (int i = 0; i < f.rowOf.Length; i++) f.viewOf[f.rowOf[i]] = i % f.nV;
             var lv = new SortedSet<double>();
             for (int s = 0; s < f.nS; s++)
             {
@@ -107,8 +130,12 @@ namespace Parity
         /// <summary>Split an additive row cost into state (carrying the core) and view halves.</summary>
         public void SetCosts(float[] rowCost)
         {
-            for (int s = 0; s < nS; s++) cS[s] = rowCost[rowOf[s * nV]];
-            for (int v = 0; v < nV; v++) cV[v] = rowCost[rowOf[v]] - rowCost[rowOf[0]];
+            // against the CHEAPEST view pair: a view cost is a non-negative increment over the
+            // tier-3 floor, which is what several viewers each pay (alloc/factored.py)
+            int vref = 0;
+            for (int v = 1; v < nV; v++) if (rowCost[rowOf[v]] < rowCost[rowOf[vref]]) vref = v;
+            for (int s = 0; s < nS; s++) cS[s] = rowCost[rowOf[s * nV + vref]];
+            for (int v = 0; v < nV; v++) cV[v] = rowCost[rowOf[v]] - rowCost[rowOf[vref]];
             double scale = 0.0;
             for (int r = 0; r < rowCost.Length; r++) scale = Math.Max(scale, Math.Abs(rowCost[r]));
             double tol = 1e-5 * scale + 1e-9;
@@ -203,26 +230,52 @@ namespace Parity
             parts.Add(new Part { Lo = start, Hi = start + count, Hull = h, Theta = Thetas(c, q, h) });
         }
 
-        double Total(double lam)
+        double Total(double lam, int V)
         {
             double t = 0.0;
             foreach (var p in partsS) t += Blocks(p, lam, salS, cS, sortS, null);
-            foreach (var p in partsV) t += Blocks(p, lam, salV, cV, sortV, null);
+            for (int k = 0; k < V; k++)
+            {
+                t += fixedV[k];
+                foreach (var p in partsV[k]) t += Blocks(p, lam, salV[k], cV, sortV[k], null);
+            }
             return t;
         }
 
-        /// <summary>stateSal / viewSal / headroom are per agent; assign receives full-table rows.
-        /// A negative view salience array entry is treated as 0.</summary>
+        void Grow(int n, int V)
+        {
+            if (sortS.Length < n) { sortS = new Agent[n]; salS = new double[n]; pickS = new int[n]; }
+            if (sortV.Length < V)
+            {
+                Array.Resize(ref sortV, V); Array.Resize(ref salV, V); Array.Resize(ref pickV, V);
+                Array.Resize(ref fixedV, V); Array.Resize(ref partsV, V);
+            }
+            for (int k = 0; k < V; k++)
+            {
+                if (sortV[k] == null || sortV[k].Length < n)
+                {
+                    sortV[k] = new Agent[n]; salV[k] = new double[n]; pickV[k] = new int[n];
+                }
+                if (partsV[k] == null) partsV[k] = new List<Part>();
+            }
+        }
+
+        /// <summary>One viewer, nothing held. assign receives full-table rows.</summary>
         public AllocResult Solve(float[] stateSal, float[] viewSal, float[] headroom, int n, float budget,
                                  int[] assign)
         {
-            if (sortS.Length < n)
-            {
-                sortS = new Agent[n]; sortV = new Agent[n];
-                salS = new double[n]; salV = new double[n];
-                pickS = new int[n]; pickV = new int[n];
-            }
-            partsS.Clear(); partsV.Clear();
+            return Solve(stateSal, new[] { viewSal }, null, headroom, n, budget, new[] { assign });
+        }
+
+        /// <summary>viewSal[k] / viewHold[k] per viewer (a hold is a view-pair index, -1 for
+        /// free; viewHold may be null); assign[k] receives viewer k's full-table rows, all of
+        /// which share one state pair per agent. Negative view salience is treated as 0.</summary>
+        public AllocResult Solve(float[] stateSal, float[][] viewSal, int[][] viewHold, float[] headroom, int n,
+                                 float budget, int[][] assign)
+        {
+            int V = viewSal.Length;
+            Grow(n, V);
+            partsS.Clear();
             var res = new AllocResult();
 
             // group agents by how many error levels their headroom affords
@@ -251,39 +304,99 @@ namespace Parity
                 Prepare(sortS, salS, stateSal, idx, idx.Count, start, cS, qS, menuS, partsS);
                 start += idx.Count;
             }
-            menuV.Clear();
-            for (int v = 0; v < nV; v++) menuV.Add(v);
-            Prepare(sortV, salV, viewSal, null, n, 0, cV, qV, menuV, partsV);
-            for (int i = 0; i < n; i++) if (salV[i] < 0.0) salV[i] = 0.0;
+
+            // holds, and the release the frame budget may force on them
+            double cvMin = double.MaxValue;
+            for (int v = 0; v < nV; v++) cvMin = Math.Min(cvMin, cV[v]);
+            heldWork.Clear();
+            Released = 0;
+            var hold = new int[V][];
+            for (int k = 0; k < V; k++)
+            {
+                hold[k] = new int[n];
+                for (int i = 0; i < n; i++)
+                {
+                    int h = viewHold != null && viewHold[k] != null ? viewHold[k][i] : -1;
+                    hold[k][i] = h;
+                    if (h >= 0) heldWork.Add(new Held { K = k, I = i, Extra = cV[h] - cvMin });
+                }
+            }
+            if (heldWork.Count > 0)
+            {
+                double floor = 0.0;
+                foreach (var p in partsS) floor += Blocks(p, 1e300, salS, cS, sortS, null);
+                for (int k = 0; k < V; k++)
+                    for (int i = 0; i < n; i++) floor += hold[k][i] >= 0 ? cV[hold[k][i]] : cvMin;
+                if (floor > budget)
+                {
+                    // costliest first, ties in (viewer, agent) order: numpy's stable argsort
+                    var order = heldWork.ToArray();
+                    var keys = new double[order.Length];
+                    var pos = new int[order.Length];
+                    for (int j = 0; j < order.Length; j++) { keys[j] = -order[j].Extra; pos[j] = j; }
+                    Array.Sort(pos, (x, y) => { int c = keys[x].CompareTo(keys[y]); return c != 0 ? c : x.CompareTo(y); });
+                    foreach (int j in pos)
+                    {
+                        if (floor <= budget) break;
+                        floor -= order[j].Extra;
+                        hold[order[j].K][order[j].I] = -1;
+                        Released++;
+                    }
+                }
+            }
+
+            for (int k = 0; k < V; k++)
+            {
+                partsV[k].Clear();
+                freeWork.Clear();
+                fixedV[k] = 0.0;
+                for (int i = 0; i < n; i++)
+                {
+                    if (hold[k][i] >= 0) fixedV[k] += cV[hold[k][i]];
+                    else freeWork.Add(i);
+                }
+                menuV.Clear();
+                for (int v = 0; v < nV; v++) menuV.Add(v);
+                if (freeWork.Count > 0)
+                {
+                    Prepare(sortV[k], salV[k], viewSal[k], freeWork, freeWork.Count, 0, cV, qV, menuV, partsV[k]);
+                    for (int j = 0; j < freeWork.Count; j++) if (salV[k][j] < 0.0) salV[k][j] = 0.0;
+                }
+            }
 
             int evals = 1;
             double lam;
-            if (Total(0.0) <= budget) lam = 0.0;
+            if (Total(0.0, V) <= budget) lam = 0.0;
             else
             {
                 double hi = 1.0;
                 evals++;
-                while (Total(hi) > budget && hi < 1e18) { hi *= 4.0; evals++; }
+                while (Total(hi, V) > budget && hi < 1e18) { hi *= 4.0; evals++; }
                 double lo = 0.0;
                 for (int it = 0; it < MaxIter; it++)
                 {
                     if (hi - lo <= Rtol * Math.Max(hi, 1e-12)) break;
                     double mid = 0.5 * (lo + hi);
                     evals++;
-                    if (Total(mid) <= budget) hi = mid; else lo = mid;
+                    if (Total(mid, V) <= budget) hi = mid; else lo = mid;
                 }
                 lam = hi;
             }
 
             foreach (var p in partsS) Blocks(p, lam, salS, cS, sortS, pickS);
-            foreach (var p in partsV) Blocks(p, lam, salV, cV, sortV, pickV);
             double cost = 0.0, util = 0.0;
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < n; i++) { cost += cS[pickS[i]]; util += stateSal[i] * qS[pickS[i]]; }
+            for (int k = 0; k < V; k++)
             {
-                int s = pickS[i], v = pickV[i];
-                assign[i] = rowOf[s * nV + v];
-                cost += cS[s] + cV[v];
-                util += stateSal[i] * qS[s] + Math.Max(viewSal[i], 0f) * qV[v];
+                for (int i = 0; i < n; i++) pickV[k][i] = hold[k][i];
+                foreach (var p in partsV[k]) Blocks(p, lam, salV[k], cV, sortV[k], pickV[k]);
+                for (int i = 0; i < n; i++)
+                {
+                    int v = pickV[k][i];
+                    assign[k][i] = rowOf[pickS[i] * nV + v];
+                    cost += cV[v];
+                    util += Math.Max(viewSal[k][i], 0f) * qV[v];
+                }
             }
             res.Lambda = (float)lam;
             res.Cost = (float)cost;
@@ -292,6 +405,18 @@ namespace Parity
             res.Slack = (float)(budget - cost);
             res.Infeasible = cost > budget * (1.0 + 1e-9);
             return res;
+        }
+
+        /// <summary>The view pair of a full-table row.</summary>
+        public int ViewOfRow(int row) => viewOf[row];
+
+        /// <summary>View pair of an (animation * NTiers + geometry) key, -1 if not in the table.</summary>
+        public int ViewPairOfKey(int key) => key >= 0 && key < keyToV.Length ? keyToV[key] : -1;
+
+        /// <summary>The largest per-viewer view cost increment, for sizing a V-viewer budget.</summary>
+        public double MaxViewCost
+        {
+            get { double m = 0.0; for (int v = 0; v < nV; v++) m = Math.Max(m, cV[v]); return m; }
         }
     }
 }

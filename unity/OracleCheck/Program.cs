@@ -23,6 +23,8 @@ static class Program
         public int fillMax { get; set; }
         public bool warm { get; set; }
         public float[] view { get; set; }   // present: the two-salience allocator on the full table
+        public float[][] views { get; set; }  // present: several viewers, one row list per viewer
+        public int[][] holds { get; set; }    // per viewer: view pair held by the pop ledger, or -1
     }
 
     static int Main(string[] args)
@@ -48,6 +50,31 @@ static class Program
             {
                 if (warmAlloc != null) warmAlloc.Dispose();
                 warmAlloc = new FidelityAllocator(table);
+            }
+            if (c.views != null)
+            {
+                var fac = FactoredAllocator.TryCreate(table);
+                var hm = new float[c.n];
+                for (int i = 0; i < c.n; i++) hm[i] = c.headroom != null ? c.headroom[i] : float.MaxValue;
+                int V = c.views.Length;
+                var am = new int[V][];
+                for (int v = 0; v < V; v++) am[v] = new int[c.n];
+                fac.SetCosts(c.rowCost);
+                var rf = fac.Solve(c.salience, c.views, c.holds, hm, c.n, c.budget, am);
+                if (k > 0) sb.Append(',');
+                sb.Append("{\"assign\":[");
+                for (int v = 0; v < V; v++)
+                {
+                    if (v > 0) sb.Append(',');
+                    sb.Append('[');
+                    for (int i = 0; i < c.n; i++) { if (i > 0) sb.Append(','); sb.Append(am[v][i]); }
+                    sb.Append(']');
+                }
+                sb.Append("],\"cost\":").Append(F(rf.Cost))
+                  .Append(",\"released\":").Append(fac.Released)
+                  .Append(",\"infeasible\":").Append(rf.Infeasible ? "true" : "false")
+                  .Append('}');
+                continue;
             }
             if (c.view != null)
             {

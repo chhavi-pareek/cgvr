@@ -60,8 +60,38 @@ namespace Parity
         /// pixels at ViewD0, and a figure's pixel count falls as 1 / d^2.</summary>
         public bool ViewAware = true;
         public float ViewD0 = 10f;
-        float[] stateSalM, viewSalM, headroomM;
-        int[] assignM;
+        /// <summary>Weight of the new frame in the view salience's running average. Coverage
+        /// flickers as people pass in front of each other; unsmoothed, that flicker is re-decided
+        /// every frame and shows up as popping.</summary>
+        public float ViewSmoothing = 0.25f;
+        float[] stateSalM, headroomM;
+
+        // -- the view side: several viewers, the pop ledger, occlusion ------------------
+        /// <summary>1, or 2 for two viewers on this one simulation (co-op split screen): one
+        /// behaviour per agent, a mesh and gait tier per agent per viewer.</summary>
+        public int Viewers = 1;
+        public const int MaxViewers = 2;
+        public Vector2 Cam2; public float Yaw2;
+        public readonly MassLodAssigner MassLod2 = new MassLodAssigner();
+        public float[] Sig2; public bool[] InView2; sbyte[] simTier2, visTier2;
+        /// <summary>[viewer][agent] render tiers. GeoV[0] is Geo; AnimV[0] mirrors Anim for one
+        /// viewer, while Anim itself is the most detailed gait any viewer needs (it is computed once).</summary>
+        public sbyte[][] GeoV, AnimV;
+        public readonly PopTracker[] Pops = { new PopTracker(), new PopTracker() };
+        /// <summary>Hold view pairs of agents with no pop token (PARITY only; MassLOD is only counted).</summary>
+        public bool PopLedger = true;
+        /// <summary>View salience from visible pixels in a coverage buffer instead of distance alone.</summary>
+        public bool Occlusion = true;
+        public readonly CoverageBuffer Coverage = new CoverageBuffer();
+        readonly Matrix4x4[] viewProj = new Matrix4x4[MaxViewers];
+        readonly Vector2[] proj = new Vector2[MaxViewers];
+        readonly bool[] hasView = new bool[MaxViewers];
+        public float[][] VisiblePx;
+        /// <summary>In-frustum agents at most a quarter visible, per viewer, last frame.</summary>
+        public int[] Occluded = new int[MaxViewers];
+        float[][] viewSalV;
+        readonly float[][] smoothed = new float[MaxViewers][];
+        int[][] holdV, assignV;
         public ErrorLedger Ledger;
         public readonly RlsCostModel Cost = new RlsCostModel();
 
@@ -167,13 +197,22 @@ namespace Parity
             {
                 Alloc = new FidelityAllocator(Table);
                 Factored = FactoredAllocator.TryCreate(Table);
-                stateSalM = new float[n]; viewSalM = new float[n]; headroomM = new float[n]; assignM = new int[n];
+                stateSalM = new float[n]; headroomM = new float[n];
                 Ledger = new ErrorLedger(n, Cap, 7u);
                 salience = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
                 headroom = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
                 assign = new Unity.Collections.NativeArray<int>(n, Unity.Collections.Allocator.Persistent);
             }
             MassLod.Resize(n);
+            MassLod2.Resize(n);
+            Sig2 = new float[n]; InView2 = new bool[n]; simTier2 = new sbyte[n]; visTier2 = new sbyte[n];
+            GeoV = new[] { Geo, new sbyte[n] };
+            AnimV = new[] { new sbyte[n], new sbyte[n] };
+            viewSalV = new[] { new float[n], new float[n] };
+            holdV = new[] { new int[n], new int[n] };
+            assignV = new[] { new int[n], new int[n] };
+            VisiblePx = new[] { new float[n], new float[n] };
+            foreach (var p in Pops) p.Resize(n);
             frame = 0;
         }
 
@@ -263,10 +302,22 @@ namespace Parity
 
         // -- per-frame -----------------------------------------------------------------
 
+        /// <summary>The render camera of viewer k, for the coverage pass. Without one the view
+        /// salience falls back to the (d0 / d)^2 area model.</summary>
+        public void SetView(int k, Matrix4x4 viewProjection, float projX, float projY)
+        {
+            viewProj[k] = viewProjection;
+            proj[k] = new Vector2(projX, projY);
+            hasView[k] = true;
+        }
+
+        public bool[] SeenBy(int k) => k == 0 ? InView : InView2;
+
         public void Step(Vector2 camPos, float camYaw, float measuredFrameMs)
         {
             float t0 = Time.realtimeSinceStartup;
             MassLod.Step(Pos, N, camPos, camYaw, Sig, InView, SimTier, VisTier);
+            if (Viewers > 1) MassLod2.Step(Pos, N, Cam2, Yaw2, Sig2, InView2, simTier2, visTier2);
 
             if (Mode == Policy.Baseline) ApplyBaselineTiers();
             else RunAllocator(measuredFrameMs);
@@ -274,6 +325,8 @@ namespace Parity
             StepCore();
             StepFine();
             AccrueDivergence();
+            int views = Mode == Policy.Parity ? Viewers : 1;
+            for (int k = 0; k < views; k++) Pops[k].Update(AnimV[k], GeoV[k], SeenBy(k), N);
             StepMs = (Time.realtimeSinceStartup - t0) * 1000f;
             frame++;
         }
@@ -285,6 +338,7 @@ namespace Parity
             {
                 sbyte t = SimTier[i];
                 Beh[i] = t; Nav[i] = t; Anim[i] = VisTier[i]; Geo[i] = VisTier[i];
+                AnimV[0][i] = Anim[i];
                 Row[i] = -1;
             }
         }
@@ -303,33 +357,79 @@ namespace Parity
                 if (rowCost[c] < cmin) cmin = rowCost[c];
                 if (rowCost[c] > cmax) cmax = rowCost[c];
             }
+            bool factored = ViewAware && Factored != null;
+            int V = factored ? Mathf.Clamp(Viewers, 1, MaxViewers) : 1;
+            if (factored && V > 1)
+            {
+                // each extra viewer can draw every agent once more
+                Factored.SetCosts(rowCost);
+                cmax += (float)((V - 1) * Factored.MaxViewCost);
+            }
             BudgetMs = AbsoluteBudget ? TargetMs
                      : MatchBudgetMs >= 0f ? MatchBudgetMs
                      : N * (cmin + BudgetFrac * (cmax - cmin));
 
             Ledger.Cap = Cap;
             Ledger.Refresh(N);
-            bool factored = ViewAware && Factored != null;
             for (int i = 0; i < N; i++)
             {
-                float s = 1f / (1f + Sig[i] / 20f);
+                // behaviour is simulated once, so its salience is the nearest viewer's
+                float sig = V > 1 ? Mathf.Min(Sig[i], Sig2[i]) : Sig[i];
+                float s = 1f / (1f + sig / 20f);
                 salience[i] = s;
                 headroom[i] = Ledger.Headroom[i];
-                if (factored)
-                {
-                    stateSalM[i] = s;
-                    headroomM[i] = headroom[i];
-                    // in view, Sig is the camera distance
-                    float r = ViewD0 / Mathf.Max(Sig[i], 1e-3f);
-                    viewSalM[i] = InView[i] ? Mathf.Min(1f, r * r) : 0f;
-                }
+                if (factored) { stateSalM[i] = s; headroomM[i] = headroom[i]; }
             }
+            if (factored)
+                for (int k = 0; k < V; k++)
+                {
+                    var seen = SeenBy(k);
+                    var sigK = k == 0 ? Sig : Sig2;
+                    var vs = viewSalV[k];
+                    if (smoothed[k] == null || smoothed[k].Length != N) smoothed[k] = new float[N];
+                    var sm = smoothed[k];
+                    Occluded[k] = 0;
+                    if (Occlusion && hasView[k])
+                    {
+                        float refPx = Coverage.Compute(Pos, N, viewProj[k], proj[k].x, proj[k].y, ViewD0, VisiblePx[k]);
+                        for (int i = 0; i < N; i++)
+                        {
+                            vs[i] = Mathf.Min(1f, VisiblePx[k][i] / refPx);
+                            if (seen[i])
+                            {
+                                float r = ViewD0 / Mathf.Max(sigK[i], 1e-3f);
+                                if (VisiblePx[k][i] < 0.25f * Mathf.Min(1f, r * r) * refPx) Occluded[k]++;
+                            }
+                        }
+                    }
+                    else
+                        for (int i = 0; i < N; i++)
+                        {
+                            // in view, Sig is the camera distance
+                            float r = ViewD0 / Mathf.Max(sigK[i], 1e-3f);
+                            vs[i] = seen[i] ? Mathf.Min(1f, r * r) : 0f;
+                        }
+                    for (int i = 0; i < N; i++)
+                    {
+                        sm[i] = frame == 0 ? vs[i] : Mathf.Lerp(sm[i], vs[i], ViewSmoothing);
+                        vs[i] = sm[i];
+                    }
+                    if (PopLedger)
+                    {
+                        var h = Pops[k].Holds(seen, N);
+                        for (int i = 0; i < N; i++) holdV[k][i] = h[i] >= 0 ? Factored.ViewPairOfKey(h[i]) : -1;
+                    }
+                }
 
             float t0 = Time.realtimeSinceStartup;
             if (factored)
             {
                 Factored.SetCosts(rowCost);
-                Last = Factored.Solve(stateSalM, viewSalM, headroomM, N, BudgetMs, assignM);
+                var sal = V == 1 ? new[] { viewSalV[0] } : viewSalV;
+                var holds = PopLedger ? (V == 1 ? new[] { holdV[0] } : holdV) : null;
+                var asg = V == 1 ? new[] { assignV[0] } : assignV;
+                Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg);
+                HoldsReleased += Factored.Released;
             }
             else
             {
@@ -342,7 +442,7 @@ namespace Parity
             Promotes = 0; Demotes = 0;
             for (int i = 0; i < N; i++)
             {
-                int row = factored ? assignM[i] : assign[i];
+                int row = factored ? assignV[0][i] : assign[i];
                 Row[i] = row;
                 sbyte nb = (sbyte)Table.TierOf(row, 0);
                 if (Beh[i] == 3 && nb < 3)
@@ -361,8 +461,20 @@ namespace Parity
                 Nav[i] = (sbyte)Table.TierOf(row, 1);
                 Anim[i] = (sbyte)Table.TierOf(row, 2);
                 Geo[i] = (sbyte)Table.TierOf(row, 3);
+                AnimV[0][i] = Anim[i];
+                for (int k = 1; k < V; k++)
+                {
+                    int rk = assignV[k][i];
+                    AnimV[k][i] = (sbyte)Table.TierOf(rk, 2);
+                    GeoV[k][i] = (sbyte)Table.TierOf(rk, 3);
+                    // the gait is evaluated once, at the most detailed tier any viewer draws
+                    if (AnimV[k][i] < Anim[i]) Anim[i] = AnimV[k][i];
+                }
             }
         }
+
+        /// <summary>Pop-ledger holds the allocator released to meet the frame budget, cumulative.</summary>
+        public int HoldsReleased;
 
         /// <summary>Invariant 4: stepped for every agent at every tier, never allocated.</summary>
         void StepCore()

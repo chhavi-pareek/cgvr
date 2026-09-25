@@ -46,6 +46,11 @@ namespace Parity
         /// <summary>Two saliences (alloc/factored.py): behaviour by significance, meshes and
         /// gait by projected size. Off falls back to the single-salience allocator.</summary>
         public bool ViewAware = true;
+        /// <summary>Both panels show the ONE PARITY crowd, from two cameras: one behaviour per
+        /// agent, each viewer's own mesh detail, one budget (alloc/factored.py, V = 2).</summary>
+        public bool CoOp;
+        public bool PopLedger = true;
+        public bool Occlusion = true;
         public bool Post = true;
         public bool Paused;
 
@@ -53,7 +58,7 @@ namespace Parity
         // the rebuild happens once, here, between frames.
         public int PendingAgents = -1;
         public int PendingScene = -1;
-        public bool PendingRestage;
+        public bool PendingRestage, PendingCoOp;
 
         public ParityTable Table;
         public CrowdWorld Base, Par;
@@ -188,6 +193,7 @@ namespace Parity
             Base.ApplyCalibration(BaseFloor, BaseTheta);
             Par.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
             Par.ViewAware = ViewAware;
+            Par.Viewers = CoOp ? 2 : 1;
             System.Array.Clear(TraceBase, 0, TraceBase.Length);
             System.Array.Clear(TracePar, 0, TracePar.Length);
             System.Array.Clear(TraceOne, 0, TraceOne.Length);
@@ -268,6 +274,12 @@ namespace Parity
         void Update()
         {
             if (PendingScene >= 0) { var k = (SceneKind)PendingScene; PendingScene = -1; SwitchScene(k); }
+            if (PendingCoOp)
+            {
+                PendingCoOp = false;
+                CoOp = !CoOp;
+                Rebuild(Agents);
+            }
             if (PendingRestage)
             {
                 // shadows change what geometry costs, so it is measured again
@@ -284,18 +296,30 @@ namespace Parity
             if (Orbit) orbitT += dt / Mathf.Max(OrbitSeconds, 1f);
 
             Place(CamL, orbitT, out var camXZ, out float yaw);
-            Place(CamR, orbitT, out _, out _);
+            // co-op: the second viewer walks the same orbit half a turn behind
+            Place(CamR, CoOp ? orbitT + 0.5f : orbitT, out var camXZ2, out float yaw2);
 
             foreach (var w in new[] { Base, Par })
             {
                 w.BudgetFrac = BudgetFrac; w.AbsoluteBudget = Budget == BudgetMode.Absolute;
                 w.TargetMs = TargetMs; w.Cap = Cap;
             }
+            Par.PopLedger = PopLedger;
+            Par.Occlusion = Occlusion;
+            Par.Viewers = CoOp ? 2 : 1;
+            Par.Cam2 = camXZ2; Par.Yaw2 = yaw2;
+            SetView(Par, 0, CoOp ? CamL : CamR);
+            if (CoOp) SetView(Par, 1, CamR);
 
             // the LOD camera is the render camera: what drives the tiers is what you see
-            Base.Step(camXZ, yaw, lastBaseMs);
-            BaseSpendMs = Base.PredictedSpendMs();
-            Par.MatchBudgetMs = Budget == BudgetMode.Matched ? BaseSpendMs : -1f;
+            if (!CoOp)
+            {
+                Base.Step(camXZ, yaw, lastBaseMs);
+                BaseSpendMs = Base.PredictedSpendMs();
+            }
+            // two viewers have no MassLOD counterpart on screen to match, so co-op runs on the
+            // fraction budget sized for two views
+            Par.MatchBudgetMs = Budget == BudgetMode.Matched && !CoOp ? BaseSpendMs : -1f;
             Par.Step(camXZ, yaw, lastParMs);
             lastBaseMs = Base.StepMs + RenderBaseMs;
             lastParMs = Par.StepMs + RenderParMs;
@@ -308,15 +332,21 @@ namespace Parity
             Render();
         }
 
+        static void SetView(CrowdWorld w, int k, Camera c)
+        {
+            var p = c.projectionMatrix;
+            w.SetView(k, p * c.worldToCameraMatrix, p.m00, p.m11);
+        }
+
         void Render()
         {
             if (rendL == null || rendR == null || Base == null || Par == null) return;
             foreach (var r in new[] { rendL, rendR }) { r.Look = Look; r.Cap = Cap; r.Shadows = Shadows; }
             float t = Time.realtimeSinceStartup;
-            rendL.Draw(Base, CamL);
+            if (CoOp) rendL.Draw(Par, CamL, 0); else rendL.Draw(Base, CamL);
             RenderBaseMs = (Time.realtimeSinceStartup - t) * 1000f;
             t = Time.realtimeSinceStartup;
-            rendR.Draw(Par, CamR);
+            rendR.Draw(Par, CamR, CoOp ? 1 : 0);
             RenderParMs = (Time.realtimeSinceStartup - t) * 1000f;
         }
 

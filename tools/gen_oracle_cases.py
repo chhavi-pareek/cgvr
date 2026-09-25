@@ -112,6 +112,7 @@ def main():
     ok &= warm_path(env)
     ok &= capped_fill(env)
     ok &= factored(env)
+    ok &= viewers(env)
     print("\nC# port agrees with alloc/serial.py" if ok else "\nC# PORT DISAGREES -- investigate")
     sys.exit(0 if ok else 1)
 
@@ -207,6 +208,61 @@ def factored(env):
     print(f"  C# solve at N=3000                  : median {np.median(ms):.3f} ms")
     ok = verdict == 0 and over == 0 and mask_v == 0 and worst < 1e-3
     print("  ->", "factored port agrees with alloc/factored.py" if ok else "FACTORED PORT DISAGREES")
+    return ok
+
+
+def viewers(env):
+    """Two viewers on one simulation, with pop-ledger holds, including budgets low enough that
+    holds must be released."""
+    q_s, q_v = split_quality(TABLE)
+    cases, meta = [], []
+    for seed in range(4):
+        for n in (64, 400, 1500):
+            s, cost, hr = instance(seed, n, True)
+            rng = np.random.default_rng(200 + seed)
+            B = np.where(rng.random((2, n)) < 0.3, 0.0, np.minimum(1.0, (10.0 / rng.uniform(2, 120, (2, n))) ** 2))
+            H = np.where(rng.random((2, n)) < 0.25, rng.integers(0, 15, (2, n)), -1)
+            top = FactoredAllocator(TABLE).allocate(s, cost, np.inf, headroom=hr, view_salience=B).cost
+            floor = FactoredAllocator(TABLE).allocate(s, cost, 0.0, headroom=hr, view_salience=B).cost
+            # the last two sit just above the no-hold floor, so holds have to be released
+            for b in [f * top for f in (0.05, 0.2, 0.5, 0.9)] + [1.02 * floor, 1.2 * floor]:
+                b = float(b)
+                cases.append(dict(n=n, budget=b, salience=[float(x) for x in s],
+                                  views=[[float(x) for x in row] for row in B],
+                                  holds=[[int(x) for x in row] for row in H],
+                                  rowCost=[float(x) for x in cost], headroom=[float(x) for x in hr],
+                                  fillMax=0, warm=False))
+                meta.append((n, s, B, H, cost, hr, b))
+    got = _run(cases, env, "viewers")
+    verdict = over = mask_v = diff = rel_diff = 0
+    tot = released = 0
+    f32 = lambda x: np.asarray(x, np.float32).astype(np.float64)
+    for (n, s, B, H, cost, hr, b), g in zip(meta, got):
+        # the port reads every number as fp32; give the reference the same numbers, or the
+        # release loop's running floor lands on different sides of a budget it sits right on
+        al = FactoredAllocator(TABLE)
+        py = al.allocate(f32(s), f32(cost), float(np.float32(b)), headroom=f32(hr), view_salience=f32(B), view_lock=H)
+        cs = np.asarray(g["assign"], np.int64)
+        tot += 2 * n
+        verdict += int(bool(py.infeasible) != bool(g["infeasible"]))
+        rel_diff += int(al.released != g["released"])
+        if al.released != g["released"]:
+            print(f"    n={n} budget {b:.6g}: released python {al.released} vs C# {g['released']}")
+        released += al.released
+        if not g["infeasible"] and g["cost"] > b * (1 + 1e-5):
+            over += 1
+        if np.any(TABLE.err[cs] > np.asarray(hr)[None, :] + 1e-6):
+            mask_v += 1
+        diff += int((cs != py.assign).sum())
+    print(f"\nviewers (two views, pop holds): {len(meta)} cases, {tot} agent-view decisions, "
+          f"{released} holds released for the budget")
+    print(f"  infeasibility verdict disagreements : {verdict}")
+    print(f"  released-hold count disagreements   : {rel_diff}")
+    print(f"  budget overruns (C#)                : {over}")
+    print(f"  error-mask violations (C#)          : {mask_v}")
+    print(f"  differing agent-view assignments    : {diff}  ({100*diff/tot:.4f}%)")
+    ok = verdict == 0 and rel_diff == 0 and over == 0 and mask_v == 0 and diff == 0
+    print("  ->", "viewer port agrees with alloc/factored.py" if ok else "VIEWER PORT DISAGREES")
     return ok
 
 

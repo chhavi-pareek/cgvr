@@ -112,6 +112,8 @@ public static class ParitySmoke
             failures += Scene(SceneKind.Plaza, 2000, 360);
             failures += Scene(SceneKind.Hub, 800, 3600);
             failures += Scene(SceneKind.Corridor, 260, 3600);
+            failures += Coverage();
+            failures += ViewSide();
         }
         catch (Exception ex)
         {
@@ -195,6 +197,85 @@ public static class ParitySmoke
         }
         if (kind == SceneKind.Hub && queued == 0) { Err("hub: the ticket queue emptied and never refilled"); failures++; }
         foreach (var w in worlds) w.Dispose();
+        return failures;
+    }
+
+    /// <summary>The software occlusion pass: a lone figure at the view-salience distance reads
+    /// as about fully visible, and one directly behind another loses pixels to it.</summary>
+    static int Coverage()
+    {
+        int failures = 0;
+        var go = new GameObject("smoke cam");
+        var cam = go.AddComponent<Camera>();
+        cam.fieldOfView = 55f; cam.aspect = 0.9f;
+        go.transform.position = new Vector3(0f, 1.6f, -10f);
+        go.transform.LookAt(new Vector3(0f, 0.9f, 0f));
+        var p = cam.projectionMatrix;
+        var vp = p * cam.worldToCameraMatrix;
+        var cov = new CoverageBuffer();
+        var vis = new float[2];
+        float refPx = cov.Compute(new[] { new Vector2(0f, 0f), new Vector2(40f, 0f) }, 2, vp, p.m00, p.m11, 10f, vis);
+        Log($"coverage: lone figure at 10 m {vis[0]:F0} px against {refPx:F0} expected; off-screen {vis[1]:F0}");
+        if (Mathf.Abs(vis[0] / refPx - 1f) > 0.35f) { Err("coverage: lone figure is not about fully visible"); failures++; }
+        if (vis[1] != 0f) { Err("coverage: an off-screen figure has pixels"); failures++; }
+        cov.Compute(new[] { new Vector2(0f, 0f), new Vector2(0f, 4f) }, 2, vp, p.m00, p.m11, 10f, vis);
+        var alone = new float[1];
+        cov.Compute(new[] { new Vector2(0f, 4f) }, 1, vp, p.m00, p.m11, 10f, alone);
+        Log($"coverage: figure 4 m behind another keeps {vis[1]:F0} of its {alone[0]:F0} px");
+        if (!(vis[1] < 0.5f * alone[0])) { Err("coverage: the figure behind was not occluded"); failures++; }
+        UnityEngine.Object.DestroyImmediate(go);
+        return failures;
+    }
+
+    /// <summary>Two viewers on one crowd, with the pop ledger. This run has no renderer, so
+    /// geometry is priced with the engine's measured plaza values injected by hand.</summary>
+    static int ViewSide()
+    {
+        int failures = 0;
+        var spec = SceneSpec.Get(SceneKind.Plaza);
+        var table = ParityTable.Build(spec.EMax, new[] { 1.0, 0.891, 0.545, 0.457 });
+        double floor;
+        CrowdWorld.CalibrateAxes(spec, table, 200, out floor);
+        var th = CrowdWorld.CalibratedTheta;
+        th[3, 0] = 0.0148; th[3, 1] = 0.0038; th[3, 2] = 0.0010;
+        int worstFree = 0, worstHeld = 0, differ = 0;
+        foreach (bool ledger in new[] { false, true })
+        {
+            var w = new CrowdWorld(Policy.Parity, 1500, spec, 1u, table) { Viewers = 2, PopLedger = ledger, BudgetFrac = 0.25f };
+            w.ApplyCalibration(floor, th);
+            int maskViol = 0, over = 0;
+            for (int f = 0; f < 600; f++)
+            {
+                float a1 = f / 2400f * Mathf.PI * 2f, a2 = a1 + Mathf.PI;
+                var c1 = spec.Focus + 54f * new Vector2(Mathf.Cos(a1), Mathf.Sin(a1));
+                var c2 = spec.Focus + 54f * new Vector2(Mathf.Cos(a2), Mathf.Sin(a2));
+                w.Cam2 = c2; w.Yaw2 = Mathf.Atan2(spec.Focus.y - c2.y, spec.Focus.x - c2.x);
+                w.Step(c1, Mathf.Atan2(spec.Focus.y - c1.y, spec.Focus.x - c1.x), w.StepMs);
+                if (!w.Last.Infeasible && w.Last.Cost > w.BudgetMs * 1.0001f) over++;
+                for (int i = 0; i < w.N; i++)
+                    if (table.Err[w.Row[i]] > w.Ledger.Headroom[i] + 1e-4f) { maskViol++; break; }
+            }
+            int diffRun = 0;
+            for (int i = 0; i < w.N; i++) if (w.GeoV[0][i] != w.GeoV[1][i]) diffRun++;
+            differ += diffRun;
+            int worst = Mathf.Max(w.Pops[0].WorstWindow, w.Pops[1].WorstWindow);
+            if (ledger) worstHeld = worst; else worstFree = worst;
+            Log($"two viewers, pops {(ledger ? "bounded" : "free")}: viewer pops/agent-min " +
+                $"{w.Pops[0].PerAgentMinute:F1} / {w.Pops[1].PerAgentMinute:F1}, worst agent in 2 s {worst}, " +
+                $"holds released {w.HoldsReleased}, agents drawn differently by the two viewers {diffRun}, " +
+                $"allocator {w.AllocMs:F2} ms");
+            failures += Check($"two viewers ({(ledger ? "bounded" : "free")}) budget overruns", over, 0);
+            failures += Check($"two viewers ({(ledger ? "bounded" : "free")}) error-mask violations", maskViol, 0);
+            float bound = w.Pops[0].Capacity + w.Pops[0].Refill * w.Pops[0].Window;
+            if (ledger && w.HoldsReleased == 0 && worst > bound + 1e-4f)
+            {
+                Err($"pop ledger: an agent popped {worst} times in 2 s against a bound of {bound:F1}");
+                failures++;
+            }
+            w.Dispose();
+        }
+        if (differ == 0) { Err("the two viewers were never given different detail"); failures++; }
+        Log($"pop ledger: worst agent in any 2 s {worstFree} free -> {worstHeld} bounded");
         return failures;
     }
 

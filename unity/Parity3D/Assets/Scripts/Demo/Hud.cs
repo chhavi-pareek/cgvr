@@ -51,7 +51,7 @@ namespace Parity
                                   normal = { textColor = new Color(0.90f, 0.92f, 0.96f) } };
         }
 
-        int PanelH => pad + line + 5 * line + 4 * (line - 3) + pad;
+        int PanelH => pad + line + 6 * line + 4 * (line - 3) + pad;
 
         void OnGUI()
         {
@@ -63,7 +63,7 @@ namespace Parity
 
             Box(new Rect(half - 1, 0, 2, h), new Color(0, 0, 0, 0.55f));
             Panels(d, half);
-            float ch = 9 * line + 3 * 26 + 2 * pad + 52;
+            float ch = 9 * line + 4 * 26 + 2 * pad + 52;
             float cw = Mathf.Min(380, half - 24);
             Controls(new Rect(12, h - ch - 10, cw, ch), d);
             Trace(new Rect(w - TraceW - 34, h - 196, TraceW + 22, 186), d);
@@ -81,22 +81,63 @@ namespace Parity
         {
             float pw = half - 24;
             var p = d.Par; var b = d.Base;
+            var popP = p.Pops[0];
+            string bound = d.PopLedger ? $"bound {popP.Capacity + popP.Refill * popP.Window:F0}" : "no bound";
 
             var r = new Rect(12, 10, pw, PanelH);
             Box(r, Panel);
-            Title(r, "MassLOD baseline", ColBase);
             int i = 0;
-            Row(r, i++, $"crowd step {b.StepMs,7:F2} ms      tier work {d.BaseSpendMs,6:F2} ms (predicted)");
-            Row(r, i++, "distance bands, frustum, per-level caps");
-            Row(r, i++, "one LOD level per agent, every axis at once");
-            Row(r, i++, "ticks at 1 / 3 / 10 frames: skipped frames ARE the divergence");
-            RowCol(r, i++, "no error ledger: nothing ever forces a restoration", ColBase);
-            Histogram(r, i, b);
+            if (!d.CoOp)
+            {
+                Title(r, "MassLOD baseline", ColBase);
+                Row(r, i++, $"crowd step {b.StepMs,7:F2} ms      tier work {d.BaseSpendMs,6:F2} ms (predicted)");
+                Row(r, i++, "distance bands, frustum, per-level caps");
+                Row(r, i++, "one LOD level per agent, every axis at once");
+                Row(r, i++, "ticks at 1 / 3 / 10 frames: skipped frames ARE the divergence");
+                RowCol(r, i++, "no error ledger: nothing ever forces a restoration", ColBase);
+                Row(r, i++, $"visible pops {b.Pops[0].PerAgentMinute,5:F1}/agent-min   worst agent " +
+                            $"{b.Pops[0].WorstWindow,2} in 2 s  (hysteresis, no bound)");
+                Histogram(r, i, b, 0);
+            }
+            else
+            {
+                Title(r, "PARITY  -  viewer 1 of 2", ColPar);
+                ParityRows(r, ref i, d, p);
+                Row(r, i++, $"visible pops {popP.PerAgentMinute,5:F1}/agent-min   worst agent " +
+                            $"{popP.WorstWindow,2} in 2 s  ({bound})");
+                Histogram(r, i, p, 0);
+            }
 
             r = new Rect(half + 12, 10, pw, PanelH);
             Box(r, Panel);
-            Title(r, "PARITY", ColPar);
             i = 0;
+            if (!d.CoOp)
+            {
+                Title(r, "PARITY", ColPar);
+                ParityRows(r, ref i, d, p);
+                Row(r, i++, $"visible pops {popP.PerAgentMinute,5:F1}/agent-min   worst agent " +
+                            $"{popP.WorstWindow,2} in 2 s  ({bound})" +
+                            (d.Occlusion ? $"   hidden {p.Occluded[0]}" : ""));
+                Histogram(r, i, p, 0);
+            }
+            else
+            {
+                var pop2 = p.Pops[1];
+                Title(r, "PARITY  -  viewer 2 of 2, the same crowd", ColPar);
+                Row(r, i++, "one simulation: every agent has ONE behaviour, seen by both");
+                Row(r, i++, "mesh and gait detail chosen per viewer, from one budget");
+                Row(r, i++, $"budget for both views {p.BudgetMs,6:F2} ms   spent {p.AllocatableMs,6:F2} ms");
+                Row(r, i++, d.Occlusion ? $"hidden behind nearer agents: {p.Occluded[0]} / {p.Occluded[1]}"
+                                        : "occlusion off: view salience from distance");
+                Row(r, i++, $"holds released for the budget {p.HoldsReleased}");
+                Row(r, i++, $"visible pops {pop2.PerAgentMinute,5:F1}/agent-min   worst agent " +
+                            $"{pop2.WorstWindow,2} in 2 s  ({bound})");
+                Histogram(r, i, p, 1);
+            }
+        }
+
+        void ParityRows(Rect r, ref int i, Director d, CrowdWorld p)
+        {
             Row(r, i++, $"crowd step {p.StepMs,7:F2} ms      allocator {p.AllocMs,6:F2} ms");
             Row(r, i++, $"tier work  {p.AllocatableMs,7:F2} ms  of budget {p.BudgetMs,6:F2} ms" +
                         $"   slack {p.Last.Slack,5:F2}");
@@ -106,7 +147,6 @@ namespace Parity
             RowCol(r, i++, $"invariant 3: agents over the cap  {p.CapBreaches}" +
                            (p.Last.Starved > 0 ? $"   STARVED {p.Last.Starved}" : ""),
                    p.CapBreaches == 0 && p.Last.Starved == 0 ? ColCap : Color.red);
-            Histogram(r, i, p);
         }
 
         void Title(Rect r, string s, Color c)
@@ -129,9 +169,12 @@ namespace Parity
             mono.normal.textColor = prev;
         }
 
-        void Histogram(Rect r, int startRow, CrowdWorld world)
+        /// <summary>Tier mix per axis; the two view axes are the given viewer's own.</summary>
+        void Histogram(Rect r, int startRow, CrowdWorld world, int viewer)
         {
-            var counts = world.Counts;
+            var counts = (int[,])world.Counts.Clone();
+            for (int t = 0; t < ParityTable.NTiers; t++) { counts[2, t] = 0; counts[3, t] = 0; }
+            for (int i = 0; i < world.N; i++) { counts[2, world.AnimV[viewer][i]]++; counts[3, world.GeoV[viewer][i]]++; }
             int bh = line - 3;
             float x0 = r.x + pad + 76, avail = r.width - 2 * pad - 80;
             for (int ax = 0; ax < ParityTable.NAxes; ax++)
@@ -209,6 +252,13 @@ namespace Parity
                 d.ViewAware = !d.ViewAware;
                 d.PendingRestage = true;   // a different table: full product vs pruned
             }
+            y += 26;
+            if (GUI.Button(new Rect(x, y, bw3, 22), d.CoOp ? "co-op: 2 views" : "compare"))
+                d.PendingCoOp = true;
+            if (GUI.Button(new Rect(x + bw3 + 6, y, bw3, 22), d.PopLedger ? "pops: bounded" : "pops: free"))
+                d.PopLedger = !d.PopLedger;
+            if (GUI.Button(new Rect(x + 2 * (bw3 + 6), y, bw3, 22), d.Occlusion ? "occlusion on" : "occlusion off"))
+                d.Occlusion = !d.Occlusion;
             y += 26;
             if (d.GeoMs != null)
             {

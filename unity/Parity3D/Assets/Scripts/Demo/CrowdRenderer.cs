@@ -163,9 +163,13 @@ namespace Parity
 
         // -- drawing -------------------------------------------------------------------
 
-        public void Draw(CrowdWorld w, Camera cam)
+        /// <summary>Draws the crowd as viewer `viewer` of the world sees it: its own mesh and gait
+        /// tiers (several viewers share one behaviour but not one LOD).</summary>
+        public void Draw(CrowdWorld w, Camera cam, int viewer = 0)
         {
             EnsureAppearance(w.N);
+            var geoT = w.GeoV[viewer];
+            var animT = w.AnimV[viewer];
             Vector3 eye = cam.transform.position;
             var sTorso = streams[(int)S.TorsoHi];
             for (int i = 0; i < w.N; i++)
@@ -182,7 +186,7 @@ namespace Parity
                     cShirt = cLegs = (Vector4)tint.linear;
                 }
 
-                int g = w.Geo[i];
+                int g = geoT[i];
                 float k = height[i];
                 if (g == 3)
                 {
@@ -197,7 +201,7 @@ namespace Parity
                 else
                 {
                     float walk = Mathf.Clamp01(w.Walk[i]);
-                    bool animated = w.Anim[i] < 3;
+                    bool animated = animT[i] < 3;
                     // the decoded gait, not a raw sine: a lower animation tier blends fewer
                     // joints, so the swing coarsens before it freezes at tier 3
                     float swing = animated ? w.JointBlend[i] * walk : 0f;
@@ -312,8 +316,8 @@ namespace Parity
             for (int g = 0; g < best.Length; g++) best[g] = double.MaxValue;
             var probe = new Texture2D(1, 1, TextureFormat.RGBA32, false);
             var keepGeo = (sbyte[])w.Geo.Clone();
-            var keepAnim = (sbyte[])w.Anim.Clone();
-            for (int i = 0; i < w.N; i++) w.Anim[i] = 0;
+            var keepAnim = (sbyte[])w.AnimV[0].Clone();
+            for (int i = 0; i < w.N; i++) w.AnimV[0][i] = 0;
             // Round-robin over the tiers rather than one tier at a time: the GPU clocks up
             // while this runs, and measuring tier by tier hands whichever tier went first the
             // slow clock. Interleaved, any drift lands on every tier alike, and the minimum per
@@ -330,7 +334,7 @@ namespace Parity
                 }
             for (int g = 0; g < best.Length; g++) best[g] /= w.N;
             System.Array.Copy(keepGeo, w.Geo, w.N);
-            System.Array.Copy(keepAnim, w.Anim, w.N);
+            System.Array.Copy(keepAnim, w.AnimV[0], w.N);
             Object.DestroyImmediate(probe);
             return best;
         }
@@ -350,7 +354,7 @@ namespace Parity
             Look = Look.Natural;
             for (int i = 0; i < w.N; i++)
             {
-                w.Anim[i] = 0; w.Walk[i] = 1f; w.Dmeas[i] = 0f;
+                w.AnimV[0][i] = 0; w.Walk[i] = 1f; w.Dmeas[i] = 0f;
                 w.JointBlend[i] = Mathf.Sin(1.7f * i);
                 w.Phase[i] = 0.9f * i;
             }
