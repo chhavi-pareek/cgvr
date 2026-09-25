@@ -186,6 +186,23 @@
   - **The design rule this produced, which generalises past fairness.** Aging enters the **objective**, never the mask. The mask overrides the frame budget by construction -- that is exactly what makes invariant 3 a safety property -- so anything placed there silently overspends. `bench/anticipate.py` put 574 of 600 frames over budget doing precisely that, and its apparent utility gain was an artefact of the overspend. **Hard constraints are for safety properties only; every preference belongs in the objective, where the allocator prices it against the budget and the cost is visible.** That rule is what made aging cost 0.07% instead of blowing the budget.
 - The four guarantees now stated: per-agent behavioural divergence (invariant 3), crowd joint-state divergence independent of N (aggregate budget), positional discontinuity (invariant 4), and bounded continuous degradation (corollary). Aging adds an empirical starvation-freedom on top; it is not proved.
 
+- **Step 0 of the speed plan: frame-skip configurations, priced honestly (`bench/tickmenu.py`). The learned surrogate is never selected once they exist.**
+  - MassLOD's entire speed advantage is ticking distant agents every 3rd/10th frame. PARITY has no such option -- its behaviour tiers are latent *width*, all running every frame -- which is why the Unity mix is bang-bang and PARITY loses on crowd work (2.2 ms vs 1.6 ms at N=2000).
+  - **The drift rates already existed**: `sim/surrogate.py` computes and stores `kl_tick` for periods (1, 3, 10). The **quality** did not, and crediting tick-k with full quality while charging it real drift would break the ledger in the opposite direction from the Unity bug that charged zero drift. Measured here as 1 - NMSE against the phase 2 **ground truth** (`latent/train.get_data()[1]`, the 19-dim head targets, `head_err`/`head_var` normalisation). Scoring it against `decode(d, 16)` instead -- the first attempt -- gives tick-3 a quality of 0.9751, *above* full latent16's 0.8680, which is impossible: two error sources measured against two different references is exactly the incommensurability invariant 2 exists to forbid. **Validation: tick-1 has no staleness and must reproduce latent-16's recorded quality; measured 0.8515 vs recorded 0.8680, 1.9% apart** (mine averages over the corpus subset, the recorded figure is held-out only).
+
+    | config | quality | us/agent | drift/frame | frames to cap |
+    |---|---|---|---|---|
+    | full latent16 | 0.8680 | 10.930 | 0 | never |
+    | latent8 | 0.7870 | 10.943 | 0 | never |
+    | latent4 | 0.5510 | 10.527 | 0 | never |
+    | surrogate | 0.0000 | 4.854 | 0.01323 | 300 |
+    | **tick-3** | 0.8319 | 6.310 | 0.01437 | 276 |
+    | **tick-10** | 0.7655 | 4.693 | 0.15174 | **26** |
+
+  - **tick-10 is cheaper than the surrogate (4.693 vs 4.854 us) and vastly better (quality 0.766 vs 0.000).** Across every budget from 0.1 to 0.85 the allocator picks full latent16, tick-3 and tick-10 -- **and never the surrogate, at any budget.** The nested autoencoder + Markov chain + Metropolis-Hastings correction is displaced by plain frame-skipping once both are priced and charged on the same scale. This is a large fraction of the project's machinery and it should be reported, not buried.
+  - **The cost it imposes: reconciliation churn.** tick-10 hits the cap in 26 frames, so the forced-restoration rate rises from today's measured **0.29 per agent per second to 1.52** at a tight budget -- a 5x increase, and 83.6% of reconciliations land on camera. This is viable **only because** coupled reconciliation now puts the p95 snap at 0.072 m, below an ordinary frame of walking. Without that work this addition would be a visible disaster, and the two changes have to ship together.
+  - **Caveats.** The tick-k cost is modelled as `CORE_US + (FULL_US - CORE_US)/k`, i.e. perfect amortisation -- real tick-k carries per-frame overhead, so measured cost will be higher and the advantage smaller. This is the behaviour axis in isolation; the four-axis interaction is untested. And the surrogate retains one property tick-k lacks: an 11x lower drift rate, which is what buys long uninterrupted degradation.
+
 ## DECISIONS
 - Repo root is `cgvr/`; `sim/`, `bench/`, `tests/` sit at root.
 - Tier index: 0=HIGH, 1=MED, 2=LOW, 3=OFF.
@@ -276,6 +293,8 @@
 - **Does the aggregate budget go into the main formulation, or stay a second contribution?** `alloc/dual.py` is standalone and does not touch `alloc/serial.py`, so nothing currently recorded is invalidated. Folding it into `sim/tiered.py` would mean a new sweep condition and a re-run. The cheap version: keep the per-agent allocator as the main path and present the aggregate formulation with its own small experiment, which is what `tests/test_dual.py` and `bench/aggregate.py` already support.
 
 - **Fix `Core.bind`'s per-corner residual?** One extra clamp iteration, or a per-segment clamp, would make the band exact on multi-waypoint routes (corridor currently overshoots 5.9%). It changes the core simulation, so it invalidates the recorded sweep exactly as the corrected ledger does -- worth batching the two if the sweep is re-run at all.
+
+- **Does the learned surrogate survive?** `bench/tickmenu.py` shows the allocator never selects it once tick-k rows exist at honest prices. Either (a) measure tick-k's real cost in Unity to see whether amortisation holds up and, if it does, report the surrogate as superseded by a simpler mechanism, or (b) find the regime where its 11x lower drift rate wins -- long uninterrupted degradation under a tight cap, which tick-10's 26-frame budget cannot provide. (b) is the honest defence and it is testable; do it before dropping the surrogate.
 
 ## NEXT
 - All runs are done: the 114-cell sweep, the T4 session, and all four figures. What is left is judgement, not compute.
