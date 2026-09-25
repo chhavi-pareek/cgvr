@@ -249,3 +249,51 @@ def admission_shortfall(calib, occupancy_floor=1e-6):
 #   600 frames over budget doing exactly that, and its apparent utility gain was an artefact.
 #   Hard constraints are for safety properties only; every preference belongs in the objective,
 #   where the allocator prices it against the budget and the cost is visible.
+
+
+def verify_deferred(err, rate, cap, ctx, pick, D0, l_max, latency, decide_every=1):
+    """Replay a schedule where a decision made at frame t is not APPLIED until t + latency[t].
+
+    unity/PORT_SPEC.md section 4: the engine cannot read the allocator's result back
+    synchronously, so the agent keeps accruing at its OLD configuration for L frames after the
+    decision was taken. The spec reserves that in advance by subtracting l_max * e_admit from
+    the headroom, with l_max = 2. Nothing had checked it.
+
+    `latency` may exceed `l_max` -- the spec allows it ("if a request errors, tiers hold and
+    the ledger keeps accruing"), which is exactly the case worth probing, since the reservation
+    is sized for l_max and not for a dropped frame.
+
+    Returns (ok, max_D, first_violation_frame).
+    """
+    err = np.asarray(err, np.float64)
+    rate = np.asarray(rate, np.float64)
+    if rate.ndim == 1:
+        rate = rate[:, None]
+    e_admit = float(err.max())
+    zero = int(np.argmin(err))          # a rate-0 configuration always exists by (A2)
+    D = np.array(D0, np.float64)
+    n, T = len(D), len(ctx)
+    held = np.full(n, zero, np.int64)
+    # PORT_SPEC section 4's ring: every frame, apply the NEWEST decision whose readback has
+    # landed and drop the older ones. Modelling this as a single pending slot is wrong -- it
+    # silently discards a decision whenever the next one is issued before it lands, which for
+    # any constant latency >= 1 means no decision ever applies at all.
+    inflight = []          # (decided_at, apply_at, assignment)
+    worst = 0.0
+    for t in range(T):
+        if t % decide_every == 0:
+            h = headroom(D, cap, l_max, e_admit)
+            mask = admissible(err, h)
+            if not mask.any(axis=1).all():
+                return False, float(D.max()), t
+            inflight.append((t, t + int(latency[t]), pick(t, mask, D, h)))
+        landed = [r for r in inflight if r[1] <= t]
+        if landed:
+            newest = max(landed, key=lambda r: r[0])
+            held = newest[2]
+            inflight = [r for r in inflight if r[0] > newest[0]]
+        D = D + rate[held, ctx[t]]
+        worst = max(worst, float(D.max()))
+        if D.max() > cap + 1e-9:
+            return False, worst, t
+    return True, worst, -1

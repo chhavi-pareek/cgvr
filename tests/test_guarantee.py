@@ -208,3 +208,59 @@ def test_continuous_degradation_is_bounded_but_duty_cycle_is_not():
     # and the thing the corollary does NOT cover, asserted so it is not mistaken for covered
     assert (at_sur / F).max() > 0.9, (
         "no agent was heavily starved in this run; the duty-cycle gap needs a longer horizon")
+
+
+@pytest.mark.parametrize("l_max", [0, 1, 2, 3])
+def test_portspec_latency_margin_is_tight(l_max):
+    """unity/PORT_SPEC.md section 4 reserves l_max * e_admit of headroom so a decision applied
+    L frames late cannot breach. Verify it holds for every L <= l_max and breaks at l_max + 1 --
+    a margin that held for arbitrary L would mean the reservation was simply oversized."""
+    from alloc.guarantee import verify_deferred
+    t, rate = _table()
+    order = np.argsort(-t.err)
+
+    def greedy(_t, mask, _D, _h):
+        out = np.empty(mask.shape[0], np.int64)
+        for i in range(mask.shape[0]):
+            for j in order:
+                if mask[i, j]:
+                    out[i] = j
+                    break
+        return out
+
+    n, T = 32, 900
+    rng = np.random.default_rng(4)
+    ctx = np.full(T, int(np.argmax(E_RATE)))          # worst context every frame
+    D0 = rng.uniform(0, CAP, n)
+    for L in range(l_max + 1):
+        ok, worst, fr = verify_deferred(t.err, rate, CAP, ctx, greedy, D0.copy(), l_max,
+                                        np.full(T, L))
+        assert ok, f"L={L} <= l_max={l_max} breached at frame {fr} (max D {worst:.4f})"
+    ok, worst, _ = verify_deferred(t.err, rate, CAP, ctx, greedy, D0.copy(), l_max,
+                                   np.full(T, l_max + 1))
+    assert not ok, f"L={l_max + 1} did not breach; the reservation is larger than claimed"
+
+
+def test_readback_ring_absorbs_an_isolated_late_frame():
+    """The ring applies the newest completed request and drops older ones, so one stalled
+    readback is skipped rather than held. That is why a burst does not breach."""
+    from alloc.guarantee import verify_deferred
+    t, rate = _table()
+    order = np.argsort(-t.err)
+
+    def greedy(_t, mask, _D, _h):
+        out = np.empty(mask.shape[0], np.int64)
+        for i in range(mask.shape[0]):
+            for j in order:
+                if mask[i, j]:
+                    out[i] = j
+                    break
+        return out
+
+    n, T, l_max = 32, 900, 2
+    rng = np.random.default_rng(5)
+    ctx = np.full(T, int(np.argmax(E_RATE)))
+    lat = np.where(np.arange(T) % 150 == 0, 8, l_max)   # one 8-frame stall every 150
+    ok, worst, fr = verify_deferred(t.err, rate, CAP, ctx, greedy, rng.uniform(0, CAP, n),
+                                    l_max, lat)
+    assert ok, f"an isolated stall breached at frame {fr} (max D {worst:.4f})"
