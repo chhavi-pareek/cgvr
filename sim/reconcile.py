@@ -47,12 +47,16 @@ def promote(idx, d, region, surrogate, core, a, phase, dist_at_demote, rng):
     idx = np.atleast_1d(idx)
     if idx.size == 0:
         return
-    # intent continuity: corpus point consistent with the surrogate's region and context
+    # intent continuity: corpus point consistent with the surrogate's region and context.
+    # Tabulated inverse-CDF rather than a per-agent rng.choice over the whole corpus; same
+    # law, O(log |R|) instead of O(M). See Surrogate.lift_tables.
+    cand, cdf = surrogate.lift_tables()
     for i in idx:
         if COUPLE and surrogate.coarse[d[i]] == region[i]:
             continue          # already a valid pi_ref(. | R, ctx) draw; keeping it is exact
-        w = surrogate.pi_d[core.ctx[i]] * (surrogate.coarse == region[i])
-        d[i] = rng.choice(len(w), p=w / w.sum())
+        R = int(region[i])
+        c = cdf[int(core.ctx[i])][R]
+        d[i] = cand[R][min(int(np.searchsorted(c, rng.random())), c.size - 1)]
     dec = surrogate.proc.decode(d[idx], 16)
     # gait phase from distance travelled under the core, not from elapsed time
     travelled = np.maximum(core.s[idx] - dist_at_demote[idx], 0.0)
@@ -61,22 +65,67 @@ def promote(idx, d, region, surrogate, core, a, phase, dist_at_demote, rng):
     p0 = core.point(core.s[idx], idx)
     t = core.tangent(idx)
     nrm = np.stack([-t[:, 1], t[:, 0]], 1)
-    others = np.ones(a.n, bool)
+    # Slot search. Two phases, because the cost here was never arithmetic -- it was numpy
+    # dispatch: the original did one O(n) np.linalg.norm per candidate per agent, 140 separate
+    # calls for a batch of 20, at 1-2 us of call overhead each (16.5 us/agent measured).
+    #
+    # Phase 1 tests clearance against the agents that are NOT reconciling. That set is fixed
+    # for the whole call and order-independent, so it is one vectorised test per slot -- at
+    # most 7 numpy calls total, regardless of batch size.
+    # Phase 2 tests only against reconciling agents already placed in this call. That part IS
+    # order-dependent (agent j must see where agent i < j was just put), so it stays
+    # sequential, but it runs on a handful of points in plain Python and never touches numpy.
+    static = np.ones(a.n, bool)
+    static[idx] = False
+    sp = a.pos[static]
+    clear2 = CLEAR * CLEAR
+
+    if COUPLE:
+        cur = ((a.pos[idx] - p0) * nrm).sum(1)
+        lim = max(LATERAL)
+        offs = np.concatenate([np.clip(cur, -lim, lim)[:, None],
+                               np.tile(LATERAL, (len(idx), 1))], 1)
+    else:
+        offs = np.tile(LATERAL, (len(idx), 1))
+
+    # ok_static[:, si] is computed lazily, vectorised across ALL agents at once, the first
+    # time any agent asks for slot si. The original recomputed `a.pos[others]` -- a boolean
+    # mask reallocating a fresh array -- once per candidate per agent; that allocation, not
+    # the arithmetic, was the 16.5 us. Evaluating every slot up front instead is worse: the
+    # loop nearly always succeeds on the first slot, so eager evaluation does 7x the work.
+    ok_static = np.zeros(offs.shape, bool)
+    done_col = np.zeros(offs.shape[1], bool)
+
+    def static_col(si):
+        if not done_col[si]:
+            if sp.size:
+                c = p0 + offs[:, si, None] * nrm
+                dx = c[:, None, :] - sp[None, :, :]
+                ok_static[:, si] = (dx * dx).sum(-1).min(1) >= clear2
+            else:
+                ok_static[:, si] = True
+            done_col[si] = True
+        return ok_static[:, si]
+
+    placed = np.empty((len(idx), 2), np.float64)
     for k, i in enumerate(idx):
-        others[i] = False
         pos = p0[k]
-        slots = LATERAL
-        if COUPLE:
-            # the agent's own current offset first, then the standard list as fallback
-            cur = float(np.dot(a.pos[i] - p0[k], nrm[k]))
-            cur = float(np.clip(cur, -max(LATERAL), max(LATERAL)))
-            slots = (cur,) + LATERAL
-        for off in slots:
-            cand = p0[k] + off * nrm[k]
-            dd = np.linalg.norm(a.pos[others] - cand, axis=1)
-            if dd.size == 0 or dd.min() >= CLEAR:
-                pos = cand
-                break
-        others[i] = True
+        for si in range(offs.shape[1]):
+            if not static_col(si)[k]:
+                continue
+            cx = p0[k, 0] + offs[k, si] * nrm[k, 0]
+            cy = p0[k, 1] + offs[k, si] * nrm[k, 1]
+            hit = False
+            for j in range(k):                               # tiny; plain Python beats numpy
+                ddx = placed[j, 0] - cx
+                ddy = placed[j, 1] - cy
+                if ddx * ddx + ddy * ddy < clear2:
+                    hit = True
+                    break
+            if hit:
+                continue
+            pos = np.array((cx, cy))
+            break
+        placed[k] = pos
         a.pos[i] = pos
     a.vel[idx] = t * (a.speed[idx] * speed_scale(dec))[:, None]

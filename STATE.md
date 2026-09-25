@@ -213,6 +213,21 @@
   - **The cost it imposes: reconciliation churn.** tick-10 hits the cap in 26 frames, so the forced-restoration rate rises from today's measured **0.29 per agent per second to 1.52** at a tight budget -- a 5x increase, and 83.6% of reconciliations land on camera. This is viable **only because** coupled reconciliation now puts the p95 snap at 0.072 m, below an ordinary frame of walking. Without that work this addition would be a visible disaster, and the two changes have to ship together.
   - **Caveats.** The tick-k cost is modelled as `CORE_US + (FULL_US - CORE_US)/k`, i.e. perfect amortisation -- real tick-k carries per-frame overhead, so measured cost will be higher and the advantage smaller. This is the behaviour axis in isolation; the four-axis interaction is untested. And the surrogate retains one property tick-k lacks: an 11x lower drift rate, which is what buys long uninterrupted degradation.
 
+- **Reconciliation optimised 2.4x, and doing so flipped the surrogate-vs-frame-skipping result back.** `sim/reconcile.py::promote` 39.3 -> 16.4 us/agent, from two fixes: a tabulated inverse-CDF for the latent draw (`Surrogate.lift_tables`, 64 precomputed distributions, **21.0 -> 1.83 us, 11.5x**) and a lazily-batched slot search (**16.5 -> ~14 us**; the cost was `a.pos[others]` reallocating a masked array per candidate, not arithmetic). A first attempt that evaluated all slots eagerly made it *worse* -- the loop nearly always succeeds on the first slot, so eager evaluation does 7x the work. 33 tests pass, including the coupled-reconciliation occupancy check, so the law is unchanged.
+- **The surrogate-vs-tick-k comparison is not robust; it turns on a constant factor.** Selection at a tight budget as reconciliation cost R varies (600 agents):
+
+  | R us/agent | surrogate | tick-10 | tick-3 |
+  |---|---|---|---|
+  | 0 | 0 | 377 | 220 |
+  | **16.4 (measured today)** | **1** | **489** | 110 |
+  | 25 | 99 | 496 | 5 |
+  | **39.3 (before optimisation)** | **320** | 208 | 72 |
+  | 60 | 361 | 0 | 239 |
+
+  The crossover sits at **R ~ 22-25 us**, and a single 2.4x optimisation moved the system across it. Both earlier conclusions -- "the surrogate is never selected" and "the surrogate survives" -- were correct for their own implementation and neither generalises. **This cannot be settled in the Python prototype.** In Burst-compiled C# reconciliation will plausibly be 1-3 us, which puts the engine firmly on the frame-skipping side.
+- **A modelling error in my own analysis, against the surrogate's favour.** The same R was charged to every drifting row. That is wrong: surrogate -> live needs full reconstruction (draw d from pi_ref, lateral slot, gait phase), while tick-10 -> live merely resumes an agent that already holds a valid but stale `d`. tick-k's true reconciliation cost is far below the surrogate's, which pushes the crossover further against the surrogate than the table above shows. Measuring the two transition costs separately is the correct next step and is not done.
+- Net effect on the cost model: `R * e / cap` belongs in it, R is per-transition-type not global, and the whole question is an engine measurement rather than a prototype one.
+
 ## DECISIONS
 - Repo root is `cgvr/`; `sim/`, `bench/`, `tests/` sit at root.
 - Tier index: 0=HIGH, 1=MED, 2=LOW, 3=OFF.

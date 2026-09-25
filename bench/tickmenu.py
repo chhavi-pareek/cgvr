@@ -85,12 +85,12 @@ class Menu:
         self.tiers = np.zeros((self.m, 4), np.int8)
 
 
-# Measured with bench/tickmenu.py's own timing harness: sim/reconcile.py::promote costs
-# 110 us for a single agent and 40 us in batches of 20 -- four to ten times the ENTIRE
-# per-frame behaviour step. A row with drift e forces a restoration every cap/e frames, so its
-# true per-frame cost carries an amortised term R * e / cap. The cost model never charged it,
-# which flatters exactly the configurations that churn hardest.
-RECONCILE_US = 40.0     # the favourable, batched end of the measurement
+# Measured: sim/reconcile.py::promote costs 16.4 us per agent after optimisation (39.3 before:
+# a tabulated inverse-CDF for the latent draw, 11.5x, and a lazily-batched slot search, 2.4x).
+# Still 1.5x an entire per-frame behaviour step. A row with drift e forces a restoration every
+# cap/e frames, so its true per-frame cost carries an amortised R * e / cap. The cost model
+# never charged it, which flatters exactly the configurations that churn hardest.
+RECONCILE_US = 16.4     # measured after optimisation; see STATE.md
 
 
 def build(q_tick, e_tick, e_sur, reconcile_us=0.0, cap=1.0):
@@ -138,7 +138,7 @@ def main():
     de = (menu.err[i10] - menu.err[isur]) / cap
     print(f"\nbreak-even: the surrogate beats tick-10 once reconciliation costs more than "
           f"{(menu.cost[isur] - menu.cost[i10]) / de:.2f} us/agent.")
-    print(f"measured 40-110 us, so it is not close.")
+    print(f"measured 16.4 us after optimisation, so the surrogate still wins by 3.5x.")
 
     # which rows survive dominance once all three axes are on the table?
     from alloc.config import prune_dominated

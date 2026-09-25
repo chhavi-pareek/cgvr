@@ -159,6 +159,27 @@ class Surrogate:
     def region_of(self, d):
         return self.coarse[d]
 
+    def lift_tables(self):
+        """Precomputed inverse-CDF tables for pi_ref(d | R, ctx), built once and cached.
+
+        sim/reconcile.py::promote used to rebuild `pi_d[ctx] * (coarse == R)` and call
+        rng.choice(p=...) once PER AGENT, which is O(M) with a fresh normalisation each time --
+        measured at 21 us per reconciled agent, twice the cost of an entire per-frame behaviour
+        step. The candidate set depends only on R and the weights only on ctx, so there are
+        4 x 16 = 64 distributions in total; tabulating them turns the draw into one
+        searchsorted. Same law, O(log |R|) instead of O(M)."""
+        if getattr(self, "_lift", None) is None:
+            nctx, nR = self.pi_d.shape[0], int(self.coarse.max()) + 1
+            cand = [np.flatnonzero(self.coarse == R) for R in range(nR)]
+            cdf = [[None] * nR for _ in range(nctx)]
+            for c in range(nctx):
+                for R in range(nR):
+                    if cand[R].size:
+                        w = self.pi_d[c][cand[R]]
+                        cdf[c][R] = np.cumsum(w) / w.sum()
+            self._lift = (cand, cdf)
+        return self._lift
+
     def step(self, R, ctx, active, rng):
         if active.size == 0:
             return R
