@@ -13,6 +13,7 @@ import numpy as np
 from .behaviour import CHOKEPOINT, NEAR_GOAL, QUEUED, WALKING
 
 BAND = 2.0  # metres of allowed fine-vs-core progress disagreement
+BIND = True  # invariant 4; bench/invariant4.py ablates it
 NEAR = 5.0  # metres of route remaining that count as near_goal
 CHOKE_AHEAD = 3.0  # metres before a chokepoint that count as chokepoint context
 MAX_WP = 3
@@ -127,7 +128,14 @@ class Core:
         return (self.s >= self.L - 1e-9) & ~self.queued
 
     def bind(self, pos, idx=None):
-        """Clamp fine positions into the progress band around the core (returns corrected pos)."""
+        """Clamp fine positions into the progress band around the core (returns corrected pos).
+
+        This is invariant 4 acting on agents at EVERY tier, not just the surrogate: the core is
+        simulated at fixed cost and the fine simulation is never allowed to disagree with it by
+        more than BAND. Set BIND = False to ablate it -- see bench/invariant4.py for what that
+        costs, which is the reconciliation snap losing its bound."""
+        if not BIND:
+            return pos
         idx = np.arange(self.n) if idx is None else np.atleast_1d(idx)
         sf = self.project(pos, idx)
         err = sf - self.s[idx]

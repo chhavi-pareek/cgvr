@@ -171,3 +171,45 @@ def admission_shortfall(calib, occupancy_floor=1e-6):
     current = float(e_rate[live].max()) if live.any() else float(e_rate.max())
     safe = safe_admission_rate(calib, occupancy_floor)
     return current, safe, safe / max(current, 1e-12)
+
+
+# -- the companion bound, from invariant 4 rather than invariant 3 -------------------------
+#
+# Everything above bounds BEHAVIOURAL divergence. It says nothing about position, and position
+# is where the visible artefact lives: a demoted agent's fine position is replaced by its core
+# point, and the size of that replacement is exactly how far the fine simulation had been
+# allowed to drift from the core.
+#
+# Invariant 4 bounds it. Core.bind clamps the fine position of agents at EVERY tier to within
+# BAND of core progress, so:
+#
+#   THEOREM (positional discontinuity). Under Core.bind with band B and lateral clip L, on a
+#   route whose progress values lie on a single segment, the position change at demotion into
+#   the surrogate is at most B + L.
+#
+#   Proof. Demotion sets pos <- core.point(s) + n * clip(lateral, -L, L). The along-route
+#   component of the change is |project(pos) - s|, which bind holds at <= B. The lateral
+#   component is |lateral - clip(lateral, -L, L)|, which is 0 when |lateral| <= L and at most
+#   |lateral| - L otherwise; the fine simulation's lateral excursion is itself bounded by the
+#   scene's clearance. []
+#
+#   The single-segment condition is not cosmetic, and writing the proof is what surfaced it.
+#   bind corrects by the rigid displacement point(target) - point(sf), which relocates the
+#   agent to the right progress only when both values sit on the same segment; across a corner
+#   the two route points are not colinear with the agent and one application leaves a residual.
+#   Measured over 600 frames: plaza and hub hold the band at exactly 2.0000 m (their routes are
+#   single-segment), while corridor -- the one scene with an intermediate waypoint -- reaches
+#   2.1182 m, an overshoot of 5.9%. So the bound in general is B(1 + eps) + L with eps the
+#   per-corner projection residual. Iterating the clamp to a fixed point, or clamping per
+#   segment, would remove it; neither is applied here because it changes the core simulation
+#   and would invalidate the recorded sweep.
+#
+# Measured (bench/invariant4.py), corridor, the scene with a real chokepoint:
+#
+#   bind on   fine-vs-core drift max  2.12 m    demote snap max   2.39 m
+#   bind off  fine-vs-core drift max 20.30 m    demote snap max  20.69 m
+#
+# and the ledger's bound is untouched either way (5.402 vs 5.454 nats against a 5.484 cap),
+# which is the point: these are two independent guarantees over two different quantities, and
+# neither implies the other. The error ledger bounds what an agent DOES; the core bounds where
+# it IS. Ablating invariant 4 leaves invariant 3 exactly intact and produces a 20 m teleport.

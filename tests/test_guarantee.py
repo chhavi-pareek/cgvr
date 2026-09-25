@@ -144,3 +144,39 @@ def test_bound_is_tight():
                                    lambda *_a: np.array([1]), D0)
     assert ok
     assert np.isclose(worst, CAP, atol=1e-9), f"expected to land exactly on the cap, got {worst}"
+
+
+# -- invariant 4's positional bound, which invariant 3 does not imply ----------------------
+
+
+@pytest.mark.parametrize("scene", ["plaza", "corridor"])
+def test_core_band_bounds_the_demotion_snap(scene):
+    """Demotion replaces the fine position with the core point, so the snap is exactly the
+    accumulated fine-vs-core drift. Core.bind holds that at BAND; without it a chokepoint
+    scene reaches 20 m. See alloc/guarantee.py and bench/invariant4.py."""
+    from bench.invariant4 import play
+    from sim.invariant import BAND
+    from sim.tiered import calibrate
+
+    cal = calibrate(scene, n=200, seed=0)
+    # long enough for the drift to actually reach the band; at 300 frames it does not, bind
+    # never engages, and the ablation is a no-op that proves nothing
+    on = play(scene, 200, 600, 0, "orbit", cal, True)
+    off = play(scene, 200, 600, 0, "orbit", cal, False)
+
+    LATERAL_CLIP = 1.8
+    # bind is exact on a single-segment route and leaves a per-corner residual otherwise; see
+    # the theorem in alloc/guarantee.py. Measured: plaza and hub 0%, corridor 5.9%.
+    EPS = 0.0 if scene in ("plaza", "hub") else 0.08
+    TOL = 1e-4          # 0.1 mm: projection arithmetic, not an overshoot
+    assert on["band"].max() <= BAND * (1 + EPS) + TOL, (
+        f"bind did not hold the band: {on['band'].max():.4f} > {BAND * (1 + EPS):.4f}")
+    assert on["dem"].max() <= BAND * (1 + EPS) + LATERAL_CLIP + TOL, (
+        f"demote snap {on['dem'].max():.4f} exceeded BAND + lateral clip")
+    # the clamp has to be binding for the ablation to mean anything -- state that rather than
+    # let a scene where it never engages pass silently
+    assert on["band"].max() >= BAND - 1e-2, (
+        f"bind never engaged ({on['band'].max():.4f} < {BAND}); this scene cannot test it")
+    assert off["band"].max() > on["band"].max() + 1e-6, "ablating bind changed nothing"
+    # the two guarantees are independent: invariant 3 survives invariant 4 being ablated
+    assert off["dmax"] <= off["cap"] + 1e-6, "ledger bound broke when the core band was removed"
