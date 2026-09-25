@@ -22,6 +22,7 @@ static class Program
         public float[] headroom { get; set; }
         public int fillMax { get; set; }
         public bool warm { get; set; }
+        public float[] view { get; set; }   // present: the two-salience allocator on the full table
     }
 
     static int Main(string[] args)
@@ -47,6 +48,28 @@ static class Program
             {
                 if (warmAlloc != null) warmAlloc.Dispose();
                 warmAlloc = new FidelityAllocator(table);
+            }
+            if (c.view != null)
+            {
+                var fac = FactoredAllocator.TryCreate(table);
+                var hm = new float[c.n];
+                for (int i = 0; i < c.n; i++) hm[i] = c.headroom != null ? c.headroom[i] : float.MaxValue;
+                var am = new int[c.n];
+                fac.SetCosts(c.rowCost);
+                var swf = System.Diagnostics.Stopwatch.StartNew();
+                var rf = fac.Solve(c.salience, c.view, hm, c.n, c.budget, am);
+                swf.Stop();
+                if (k > 0) sb.Append(',');
+                sb.Append("{\"assign\":[");
+                for (int i = 0; i < c.n; i++) { if (i > 0) sb.Append(','); sb.Append(am[i]); }
+                sb.Append("],\"cost\":").Append(F(rf.Cost))
+                  .Append(",\"utility\":").Append(F(rf.Utility))
+                  .Append(",\"lambda\":").Append(F(rf.Lambda))
+                  .Append(",\"evals\":").Append(rf.Evals)
+                  .Append(",\"infeasible\":").Append(rf.Infeasible ? "true" : "false")
+                  .Append(",\"ms\":").Append(F((float)swf.Elapsed.TotalMilliseconds))
+                  .Append('}');
+                continue;
             }
             var alloc = warmAlloc;
             alloc.FillMax = c.fillMax;

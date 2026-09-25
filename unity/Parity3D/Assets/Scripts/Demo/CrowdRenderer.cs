@@ -335,6 +335,73 @@ namespace Parity
             return best;
         }
 
+        /// <summary>The pixel judge: what each geometry tier costs in image quality, measured
+        /// rather than authored. A row of figures stands `dist` metres in front of `cam`, at
+        /// varied headings and mid-stride; each tier is rendered and compared pixel by pixel with
+        /// the full-detail render, and the difference is normalised by the difference that
+        /// removing the figures altogether makes. So quality 1 is indistinguishable from tier 0
+        /// and 0 is as wrong as drawing nobody. The set, the sky and the contact shadows are the
+        /// same in every render and cancel.</summary>
+        public double[] MeasureGeometryQuality(CrowdWorld w, Camera cam)
+        {
+            var rt = cam.targetTexture;
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
+            var keepLook = Look;
+            Look = Look.Natural;
+            for (int i = 0; i < w.N; i++)
+            {
+                w.Anim[i] = 0; w.Walk[i] = 1f; w.Dmeas[i] = 0f;
+                w.JointBlend[i] = Mathf.Sin(1.7f * i);
+                w.Phase[i] = 0.9f * i;
+            }
+            Color32[] Grab(bool draw)
+            {
+                if (draw) Draw(w, cam);
+                cam.Render();
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0, false);
+                tex.Apply(false);
+                RenderTexture.active = prev;
+                return tex.GetPixels32();
+            }
+            Grab(true);                                   // warm: shaders, shadow maps
+            var empty = Grab(false);
+            var img = new Color32[ParityTable.NTiers][];
+            for (int g = 0; g < img.Length; g++)
+            {
+                for (int i = 0; i < w.N; i++) w.Geo[i] = (sbyte)g;
+                img[g] = Grab(true);
+            }
+            double absent = Diff(empty, img[0]);
+            var q = new double[img.Length];
+            for (int g = 0; g < img.Length; g++)
+                q[g] = absent > 0.0 ? System.Math.Max(0.0, 1.0 - Diff(img[g], img[0]) / absent) : 1.0;
+            Look = keepLook;
+            Object.DestroyImmediate(tex);
+            return q;
+        }
+
+        static double Diff(Color32[] a, Color32[] b)
+        {
+            long s = 0;
+            for (int i = 0; i < a.Length; i++)
+                s += System.Math.Abs(a[i].r - b[i].r) + System.Math.Abs(a[i].g - b[i].g) + System.Math.Abs(a[i].b - b[i].b);
+            return s;
+        }
+
+        /// <summary>Lays a calibration world out as the judge's row of figures.</summary>
+        public static void JudgeLayout(CrowdWorld w, Vector2 at, Vector2 dir)
+        {
+            var side = new Vector2(dir.y, -dir.x);
+            for (int i = 0; i < w.N; i++)
+            {
+                int row = i / 6, col = i % 6;
+                w.Pos[i] = at + dir * (2.2f * row) + side * (1.3f * (col - 2.5f) + 0.6f * row);
+                w.Heading[i] = i * 0.9f;
+            }
+        }
+
         void RenderOnce(CrowdWorld w, Camera cam, Texture2D probe)
         {
             Draw(w, cam);

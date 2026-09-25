@@ -16,6 +16,7 @@
     <!-- the ported runtime, compiled unmodified straight out of the Unity project -->
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/ParityTable.cs" />
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/Allocator.cs" />
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/FactoredAllocator.cs" />
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/ErrorLedger.cs" />
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/RlsCostModel.cs" />
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/MassLodAssigner.cs" />

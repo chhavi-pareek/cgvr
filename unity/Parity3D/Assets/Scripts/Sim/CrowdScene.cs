@@ -24,6 +24,9 @@ namespace Parity
         public double[] ERate;
         public int DefaultAgents;
         public float CamHeight;
+        /// <summary>Where the pixel judge stands and looks: open floor in every set, so the row
+        /// of figures it measures is never behind a wall.</summary>
+        public Vector2 JudgeAt, JudgeDir;
 
         public float Cap => (float)(300.0 * ESur);
 
@@ -36,6 +39,7 @@ namespace Parity
                 // e_rate [0.00393 0.01033 0.05716 0.00393], ctx_freq [0 .938 .062 0]
                 ESur = ParityTable.PlazaESur, EMax = ParityTable.PlazaEMax, ERate = ParityTable.PlazaERate,
                 DefaultAgents = 1200, CamHeight = 14f,
+                JudgeAt = new Vector2(60f, 60f), JudgeDir = new Vector2(0f, 1f),
             },
             new SceneSpec
             {
@@ -44,6 +48,7 @@ namespace Parity
                 // ctx_freq [.028 .928 .045 0]
                 ESur = 0.01315, EMax = 0.06179, ERate = new[] { 0.0201, 0.0106, 0.06179, 0.00399 },
                 DefaultAgents = 800, CamHeight = 8.5f,
+                JudgeAt = new Vector2(32f, 26f), JudgeDir = new Vector2(1f, 0f),
             },
             new SceneSpec
             {
@@ -52,6 +57,7 @@ namespace Parity
                 // ctx_freq [0 .828 .093 .079]
                 ESur = 0.01828, EMax = 0.05098, ERate = new[] { 0.00431, 0.01202, 0.04615, 0.05098 },
                 DefaultAgents = 260, CamHeight = 11f,
+                JudgeAt = new Vector2(48f, 5f), JudgeDir = new Vector2(1f, 0f),
             },
         };
 

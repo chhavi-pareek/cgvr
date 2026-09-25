@@ -1,0 +1,198 @@
+"""Two saliences, one budget: the allocator for a view-dependent objective.
+
+Every other allocator here maximises  sum_i s_i * quality(row_i)  with ONE salience per agent.
+That weights an agent's geometry exactly as much as its behaviour, which is wrong in both
+directions: behaviour is simulation state and diverges whether or not anyone is looking, while
+geometry and animation are only ever *seen*, and how much they matter is the agent's projected
+size -- the screen-space error LOD has always been driven by (Funkhouser & Sequin 1993). Priced
+honestly (render time measured in the engine), a view-independent objective spreads mesh detail
+evenly over the crowd, including agents behind the camera, and the result is the wrong LOD.
+
+So the objective splits along the table's own seams:
+
+    sum_i  a_i * q_state(b_i, n_i)  +  b_i * q_view(a_i, g_i)
+
+with a_i the state salience (behaviour, navigation) and b_i the view salience (animation,
+geometry). With a_i = b_i it is the old objective exactly.
+
+The split costs nothing, because the table already factorises. `alloc.config.allowed` couples
+behaviour only with navigation (field navigation cannot carry gestures) and animation only with
+geometry (no IK under an impostor), row cost is additive per axis, and the error rate lives on
+the state axes. So the 180 rows are exactly 12 state pairs x 15 view pairs, and for a given
+multiplier lam each agent's best row is its best state pair plus its best view pair, chosen
+independently. Each half is a shared menu at shared prices -- the rank-one case alloc/hull.py
+solves by sorting -- so the whole problem is two hull problems summed under one multiplier.
+
+Two consequences worth stating:
+
+* Dominance pruning on the *combined* quality (alloc.config.prune_dominated) is invalid here. A
+  row with lower total quality but better view quality is the right choice for an agent in full
+  view. Each hull prunes its own half instead, which is exactly the pruning that stays valid.
+* The error mask acts on the state half only. Agents are grouped by feasible state set, as in
+  alloc/hull.py, so the number of hulls is bounded by the number of error levels, not by n.
+"""
+import numpy as np
+
+from alloc.config import AXIS_QUALITY, N_AXES, N_TIERS
+from alloc.hull import upper_hull, hull_thetas, HullAllocator
+from alloc.serial import Result
+
+STATE_AXES = (0, 1)  # behaviour, navigation
+VIEW_AXES = (2, 3)   # animation, geometry
+
+
+def split_quality(table):
+    """(q_state, q_view) per row, each the axis qualities / N_AXES, so q_state + q_view equals
+    the table's mean quality. Raises if the table's quality is not the axis mean."""
+    t = table.tiers.astype(np.int64)
+    q_s = sum(AXIS_QUALITY[ax, t[:, ax]] for ax in STATE_AXES) / N_AXES
+    q_v = sum(AXIS_QUALITY[ax, t[:, ax]] for ax in VIEW_AXES) / N_AXES
+    if not np.allclose(q_s + q_v, table.quality, atol=1e-12):
+        raise ValueError("table quality is not the per-axis mean; cannot split it")
+    return q_s, q_v
+
+
+class Factorisation:
+    """The table as (state pair) x (view pair), with costs split additively.
+
+    `row[s, v]` is the table row of state pair s with view pair v. Raises if the table is not
+    the full product (a pruned table is not), if the cost vector is not additive over the two
+    halves, or if the error rate depends on the view half."""
+
+    def __init__(self, table, cost, atol=1e-9):
+        t = table.tiers.astype(np.int64)
+        skey = t[:, STATE_AXES[0]] * N_TIERS + t[:, STATE_AXES[1]]
+        vkey = t[:, VIEW_AXES[0]] * N_TIERS + t[:, VIEW_AXES[1]]
+        self.skeys, si = np.unique(skey, return_inverse=True)
+        self.vkeys, vi = np.unique(vkey, return_inverse=True)
+        S, V = len(self.skeys), len(self.vkeys)
+        if S * V != table.m:
+            raise ValueError(f"table has {table.m} rows, not the full {S} x {V} product; "
+                             "the factored allocator needs the unpruned table")
+        self.row = np.full((S, V), -1, np.int64)
+        self.row[si, vi] = np.arange(table.m)
+        if (self.row < 0).any():
+            raise ValueError("table is not a product of state and view pairs")
+
+        q_s, q_v = split_quality(table)
+        self.q_state = q_s[self.row[:, 0]]
+        self.q_view = q_v[self.row[0, :]]
+        cost = np.asarray(cost, np.float64)
+        # the core (tier-independent) cost is carried by the state half
+        self.c_state = cost[self.row[:, 0]]
+        self.c_view = cost[self.row[0, :]] - cost[self.row[0, 0]]
+        recon = self.c_state[:, None] + self.c_view[None, :]
+        tol = atol + 1e-9 * np.abs(cost).max()
+        if np.abs(recon - cost[self.row]).max() > tol:
+            raise ValueError("row cost is not additive over the state and view halves")
+        e = np.asarray(table.err, np.float64)
+        self.e_state = e[self.row[:, 0]]
+        if np.abs(e[self.row] - self.e_state[:, None]).max() > 1e-12:
+            raise ValueError("error rate depends on the view half")
+
+
+class _Half:
+    """One shared-menu problem: agents sorted by salience, one hull per feasible group."""
+
+    def __init__(self, sal, q, c, groups):
+        self.parts = []
+        for idx, mask in groups:
+            menu = np.arange(len(q)) if mask is None else np.flatnonzero(mask)
+            h = menu[upper_hull(c[menu], q[menu])]
+            order = idx[np.argsort(-sal[idx], kind="stable")]
+            self.parts.append((order, sal[order], h, hull_thetas(c, q, h)))
+        self.c = c
+
+    def total(self, lam):
+        t = 0.0
+        for order, ss, h, th in self.parts:
+            bounds, verts = HullAllocator._blocks(lam, ss, th)
+            t += float((np.diff(bounds) * self.c[h[verts]]).sum())
+        return t
+
+    def choose(self, lam, n):
+        pick = np.empty(n, np.int64)
+        for order, ss, h, th in self.parts:
+            bounds, verts = HullAllocator._blocks(lam, ss, th)
+            for k in range(len(verts)):
+                lo, hi = int(bounds[k]), int(bounds[k + 1])
+                if hi > lo:
+                    pick[order[lo:hi]] = h[verts[k]]
+        return pick
+
+
+class FactoredAllocator:
+    """allocate(state_salience, cost, budget, headroom, view_salience) over the FULL table.
+
+    view_salience=None means view = state salience, which is the single-salience objective of
+    every other allocator here, solved the same way alloc/hull.py solves it."""
+
+    def __init__(self, table, rtol=1e-4, btol=1e-3, max_iter=64, fill=True):
+        self.table = table
+        self.rtol, self.btol, self.max_iter = rtol, btol, max_iter
+        self.lam = None
+        self._fac = None
+
+    def _factor(self, cost):
+        f = self._fac
+        if f is None or not np.array_equal(f[0], cost):
+            f = (cost.copy(), Factorisation(self.table, cost))
+            self._fac = f
+        return f[1]
+
+    def allocate(self, salience, cost, budget, headroom=None, view_salience=None):
+        a = np.asarray(salience, np.float64)
+        b = a if view_salience is None else np.asarray(view_salience, np.float64)
+        if (a < 0).any() or (b < 0).any():
+            raise ValueError("salience must be non-negative")
+        cost = np.asarray(cost, np.float64)
+        n = len(a)
+        F = self._factor(cost)
+
+        if headroom is None:
+            sgroups = [(np.arange(n), None)]
+        else:
+            hr = np.asarray(headroom, np.float64)
+            levels = np.unique(F.e_state)
+            g = np.searchsorted(levels, hr, side="right")
+            if (g == 0).any():
+                raise ValueError("agent with no feasible configuration")
+            sgroups = [(np.flatnonzero(g == gv), F.e_state <= levels[gv - 1] + 1e-12) for gv in np.unique(g)]
+        state = _Half(a, F.q_state, F.c_state, sgroups)
+        view = _Half(b, F.q_view, F.c_view, [(np.arange(n), None)])
+
+        def total(lam):
+            return state.total(lam) + view.total(lam)
+
+        if total(0.0) <= budget:
+            lam = 0.0
+        else:
+            hi = 1.0
+            while total(hi) > budget and hi < 1e18:
+                hi *= 4.0
+            lo = 0.0
+            for _ in range(self.max_iter):
+                if hi - lo <= self.rtol * max(hi, 1e-12):
+                    break
+                mid = 0.5 * (lo + hi)
+                if total(mid) <= budget:
+                    hi = mid
+                else:
+                    lo = mid
+            lam = hi
+        self.lam = lam
+
+        sp, vp = state.choose(lam, n), view.choose(lam, n)
+        assign = F.row[sp, vp]
+        tot = float(cost[assign].sum())
+        util = float((a * F.q_state[sp] + b * F.q_view[vp]).sum())
+        return Result(assign, tot, util, lam, self.max_iter, tot > budget * (1 + 1e-9), 0)
+
+
+def view_salience(dist, in_view, d0=10.0):
+    """Projected-area salience for the visual axes: 1 inside d0 metres, (d0 / d)^2 beyond, and 0
+    for an agent the camera cannot see. Area rather than height because the geometry quality it
+    multiplies is a count of wrong pixels measured at d0 (the engine's pixel judge), and a
+    figure's pixel count falls as 1 / d^2."""
+    d = np.maximum(np.asarray(dist, np.float64), 1e-6)
+    return np.where(np.asarray(in_view, bool), np.minimum(1.0, (d0 / d) ** 2), 0.0)

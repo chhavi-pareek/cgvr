@@ -43,6 +43,9 @@ namespace Parity
         public float OrbitSeconds = 40f;
         public Look Look = Look.Natural;
         public bool Shadows = true;
+        /// <summary>Two saliences (alloc/factored.py): behaviour by significance, meshes and
+        /// gait by projected size. Off falls back to the single-salience allocator.</summary>
+        public bool ViewAware = true;
         public bool Post = true;
         public bool Paused;
 
@@ -77,6 +80,9 @@ namespace Parity
         public int PrunedRows;
         /// <summary>Measured ms per agent to draw each geometry tier, for the HUD.</summary>
         public double[] GeoMs;
+        /// <summary>Measured image quality of each geometry tier (the pixel judge), replacing the
+        /// table's placeholder column.</summary>
+        public double[] GeoQ;
 
         // Recompiling while in Play mode triggers a domain reload. UnityEngine.Object refs (the
         // cameras, the set, the sun) are re-serialised and survive; plain C# objects -- the
@@ -116,9 +122,15 @@ namespace Parity
             Table = ParityTable.Build(Spec.EMax);
             CrowdWorld.CalibrateAxes(Spec, Table, 400, out CalibFloor);
             BaseTheta = CrowdWorld.MeasureAxes(Spec, Table, 400, Policy.Baseline, out BaseFloor);
-            GeoMs = null;
+            GeoMs = null; GeoQ = null;
             if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Null && rendL != null) CalibrateGeometry();
-            AllocTable = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta, out PrunedRows);
+            // the table the allocator scores with carries the measured geometry column; the
+            // timings above do not depend on quality, so they stay valid
+            if (GeoQ != null) Table = ParityTable.Build(Spec.EMax, GeoQ);
+            // the two-salience allocator needs the full product table; pruning on the combined
+            // quality would drop rows it uses, and its hulls prune each half themselves
+            var pruned = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta, out PrunedRows);
+            AllocTable = ViewAware ? Table : pruned;
         }
 
         void CalibrateGeometry()
@@ -146,9 +158,25 @@ namespace Parity
                 BaseTheta[ParityTable.NAxes - 1, t] = g;
             }
             w.Dispose();
+
+            // and what each tier costs in image quality, judged at the view-salience distance
+            var jw = new CrowdWorld(Policy.Parity, 12, Spec, 5u, Table);
+            GeoQ = MeasureQuality(rendL, jw, cam, Spec);
+            jw.Dispose();
+
             cam.targetTexture = null;
             Destroy(rt);
             Destroy(cam.gameObject);
+        }
+
+        /// <summary>The pixel judge, from a standing eye height at the view-salience distance.</summary>
+        public static double[] MeasureQuality(CrowdRenderer r, CrowdWorld jw, Camera cam, SceneSpec s)
+        {
+            CrowdRenderer.JudgeLayout(jw, s.JudgeAt, s.JudgeDir);
+            var eye = s.JudgeAt - s.JudgeDir * jw.ViewD0;
+            cam.transform.position = new Vector3(eye.x, 1.6f, eye.y);
+            cam.transform.LookAt(new Vector3(s.JudgeAt.x, 0.9f, s.JudgeAt.y) + new Vector3(s.JudgeDir.x, 0f, s.JudgeDir.y));
+            return r.MeasureGeometryQuality(jw, cam);
         }
 
         public void Rebuild(int n)
@@ -159,6 +187,7 @@ namespace Parity
             Par = new CrowdWorld(Policy.Parity, Agents, Spec, 1u, AllocTable, TargetMs, Cap);
             Base.ApplyCalibration(BaseFloor, BaseTheta);
             Par.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
+            Par.ViewAware = ViewAware;
             System.Array.Clear(TraceBase, 0, TraceBase.Length);
             System.Array.Clear(TracePar, 0, TracePar.Length);
             System.Array.Clear(TraceOne, 0, TraceOne.Length);

@@ -74,9 +74,18 @@ namespace Parity
         /// <summary>[M] summed per-frame divergence rate.</summary>
         public float[] Err { get; private set; }
 
+        /// <summary>[NAxes, NTiers] the per-axis qualities this table was built from: AxisQuality,
+        /// unless a measured geometry column replaced the placeholder (see Build).</summary>
+        public double[,] AxisQ { get; private set; } = AxisQuality;
+
         /// <param name="eMax">measured surrogate KL rate used for admission; see RowErr.</param>
-        public static ParityTable Build(double eMax = PlazaEMax)
+        /// <param name="geometryQuality">measured per-tier geometry quality (the engine's pixel
+        /// judge) replacing the placeholder column; null keeps the Python table exactly.</param>
+        public static ParityTable Build(double eMax = PlazaEMax, double[] geometryQuality = null)
         {
+            var axq = (double[,])AxisQuality.Clone();
+            if (geometryQuality != null)
+                for (int t = 0; t < NTiers; t++) axq[NAxes - 1, t] = geometryQuality[t];
             var tiers = new List<byte>();
             var quality = new List<float>();
             var err = new List<float>();
@@ -90,7 +99,7 @@ namespace Parity
                 if (!Allowed(b, n, a, g)) continue;
                 int[] t = { b, n, a, g };
                 double q = 0.0;
-                for (int ax = 0; ax < NAxes; ax++) q += AxisQuality[ax, t[ax]];
+                for (int ax = 0; ax < NAxes; ax++) q += axq[ax, t[ax]];
                 double e = RowErr(b, eMax);
                 for (int ax = 0; ax < NAxes; ax++) tiers.Add((byte)t[ax]);
                 quality.Add((float)(q / NAxes));
@@ -102,6 +111,7 @@ namespace Parity
                 Tiers = tiers.ToArray(),
                 Quality = quality.ToArray(),
                 Err = err.ToArray(),
+                AxisQ = axq,
             };
         }
 
@@ -141,6 +151,7 @@ namespace Parity
                 Tiers = new byte[keep.Count * NAxes],
                 Quality = new float[keep.Count],
                 Err = new float[keep.Count],
+                AxisQ = AxisQ,
             };
             for (int k = 0; k < keep.Count; k++)
             {

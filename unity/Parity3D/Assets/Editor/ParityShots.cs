@@ -59,8 +59,14 @@ public static class ParityShots
         for (int t = 0; t < 3; t++)
             CrowdWorld.CalibratedTheta[3, t] = baseTheta[3, t] = Math.Max(geo[t] - geo[3], 0.0);
         Log($"{spec.Name}: geometry us/agent  {geo[0] * 1e3:F2}  {geo[1] * 1e3:F2}  {geo[2] * 1e3:F2}  {geo[3] * 1e3:F2}");
+        var jw = new CrowdWorld(Policy.Parity, 12, spec, 5u, table);
+        var gq = Director.MeasureQuality(rend, jw, cam, spec);
+        jw.Dispose();
+        Log($"{spec.Name}: geometry quality (pixel judge)  {gq[0]:F3}  {gq[1]:F3}  {gq[2]:F3}  {gq[3]:F3}");
+        table = ParityTable.Build(spec.EMax, gq);
         int kept;
-        var alloc = CrowdWorld.PricedAndPruned(table, floor, CrowdWorld.CalibratedTheta, out kept);
+        CrowdWorld.PricedAndPruned(table, floor, CrowdWorld.CalibratedTheta, out kept);
+        var alloc = table;   // full table: the demo's default two-salience allocator
 
         int n = spec.DefaultAgents;
         var bas = new CrowdWorld(Policy.Baseline, n, spec, 1u, alloc);

@@ -51,6 +51,17 @@ namespace Parity
         public readonly ParityTable Table;
         public readonly MassLodAssigner MassLod = new MassLodAssigner();
         public FidelityAllocator Alloc;
+        /// <summary>The two-salience allocator (alloc/factored.py). Null unless the table is the
+        /// full state x view product; a pruned table falls back to the single-salience one.</summary>
+        public FactoredAllocator Factored;
+        /// <summary>Weight animation and geometry by projected AREA instead of by the one
+        /// salience behaviour uses: 1 within ViewD0 metres, (ViewD0 / d)^2 beyond, 0 out of view.
+        /// Area, because the geometry quality it multiplies is the pixel judge's count of wrong
+        /// pixels at ViewD0, and a figure's pixel count falls as 1 / d^2.</summary>
+        public bool ViewAware = true;
+        public float ViewD0 = 10f;
+        float[] stateSalM, viewSalM, headroomM;
+        int[] assignM;
         public ErrorLedger Ledger;
         public readonly RlsCostModel Cost = new RlsCostModel();
 
@@ -155,6 +166,8 @@ namespace Parity
             if (Mode == Policy.Parity)
             {
                 Alloc = new FidelityAllocator(Table);
+                Factored = FactoredAllocator.TryCreate(Table);
+                stateSalM = new float[n]; viewSalM = new float[n]; headroomM = new float[n]; assignM = new int[n];
                 Ledger = new ErrorLedger(n, Cap, 7u);
                 salience = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
                 headroom = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
@@ -296,22 +309,40 @@ namespace Parity
 
             Ledger.Cap = Cap;
             Ledger.Refresh(N);
+            bool factored = ViewAware && Factored != null;
             for (int i = 0; i < N; i++)
             {
-                salience[i] = 1f / (1f + Sig[i] / 20f);
+                float s = 1f / (1f + Sig[i] / 20f);
+                salience[i] = s;
                 headroom[i] = Ledger.Headroom[i];
+                if (factored)
+                {
+                    stateSalM[i] = s;
+                    headroomM[i] = headroom[i];
+                    // in view, Sig is the camera distance
+                    float r = ViewD0 / Mathf.Max(Sig[i], 1e-3f);
+                    viewSalM[i] = InView[i] ? Mathf.Min(1f, r * r) : 0f;
+                }
             }
 
             float t0 = Time.realtimeSinceStartup;
-            Alloc.SetCosts(Table, rowCost);
-            Last = Alloc.Solve(salience, headroom, N, BudgetMs, assign);
+            if (factored)
+            {
+                Factored.SetCosts(rowCost);
+                Last = Factored.Solve(stateSalM, viewSalM, headroomM, N, BudgetMs, assignM);
+            }
+            else
+            {
+                Alloc.SetCosts(Table, rowCost);
+                Last = Alloc.Solve(salience, headroom, N, BudgetMs, assign);
+            }
             AllocatableMs = Last.Cost;
             AllocMs = (Time.realtimeSinceStartup - t0) * 1000f;
 
             Promotes = 0; Demotes = 0;
             for (int i = 0; i < N; i++)
             {
-                int row = assign[i];
+                int row = factored ? assignM[i] : assign[i];
                 Row[i] = row;
                 sbyte nb = (sbyte)Table.TierOf(row, 0);
                 if (Beh[i] == 3 && nb < 3)

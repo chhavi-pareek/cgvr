@@ -63,7 +63,7 @@ namespace Parity
 
             Box(new Rect(half - 1, 0, 2, h), new Color(0, 0, 0, 0.55f));
             Panels(d, half);
-            float ch = 8 * line + 3 * 26 + 2 * pad + 52;
+            float ch = 9 * line + 3 * 26 + 2 * pad + 52;
             float cw = Mathf.Min(380, half - 24);
             Controls(new Rect(12, h - ch - 10, cw, ch), d);
             Trace(new Rect(w - TraceW - 34, h - 196, TraceW + 22, 186), d);
@@ -204,15 +204,26 @@ namespace Parity
             }
             if (GUI.Button(new Rect(x + bw3 + 6, y, bw3, 22), d.Post ? "bloom + tone on" : "bloom + tone off"))
                 d.Post = !d.Post;
-            if (d.GeoMs != null)
-                GUI.Label(new Rect(x + 2 * (bw3 + 6), y + 3, bw3 + 20, line), "geometry, measured:", small);
+            if (GUI.Button(new Rect(x + 2 * (bw3 + 6), y, bw3, 22), d.ViewAware ? "LOD: by view" : "LOD: uniform"))
+            {
+                d.ViewAware = !d.ViewAware;
+                d.PendingRestage = true;   // a different table: full product vs pruned
+            }
             y += 26;
             if (d.GeoMs != null)
             {
                 var g = d.GeoMs;
                 GUI.Label(new Rect(x, y, w, line),
-                          $"mesh tier  {g[0] * 1000,5:F2} {g[1] * 1000,5:F2} {g[2] * 1000,5:F2} {g[3] * 1000,5:F2}  us/agent", mono);
-                y += line + 4;
+                          $"mesh cost    {g[0] * 1000,5:F2} {g[1] * 1000,5:F2} {g[2] * 1000,5:F2} {g[3] * 1000,5:F2} us/agent", mono);
+                y += line;
+                if (d.GeoQ != null)
+                {
+                    var q = d.GeoQ;
+                    GUI.Label(new Rect(x, y, w, line),
+                              $"mesh quality {q[0],5:F2} {q[1],5:F2} {q[2],5:F2} {q[3],5:F2}  pixel judge", mono);
+                    y += line;
+                }
+                y += 4;
             }
             var bm = BenchmarkRunner.Instance;
             if (bm != null && GUI.Button(new Rect(x, y, w, 22),

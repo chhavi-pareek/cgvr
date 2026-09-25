@@ -108,6 +108,8 @@ public static class ParitySmoke
             bas.Dispose(); par.Dispose();
 
             // long enough to cross: up to 77 m of hall, or 28 m past the door, at ~1.3 m/s
+            // the same plaza crowd again, through the two-salience allocator on the full table
+            failures += Scene(SceneKind.Plaza, 2000, 360);
             failures += Scene(SceneKind.Hub, 800, 3600);
             failures += Scene(SceneKind.Corridor, 260, 3600);
         }
@@ -132,12 +134,16 @@ public static class ParitySmoke
         CrowdWorld.CalibrateAxes(spec, table, 200, out floor);
         var baseTheta = CrowdWorld.MeasureAxes(spec, table, 200, Policy.Baseline, out baseFloor);
         int kept;
-        var alloc = CrowdWorld.PricedAndPruned(table, floor, CrowdWorld.CalibratedTheta, out kept);
+        CrowdWorld.PricedAndPruned(table, floor, CrowdWorld.CalibratedTheta, out kept);
+        // the full table, so PARITY runs the two-salience allocator the demo defaults to
+        var alloc = table;
         var worlds = new[] { new CrowdWorld(Policy.Baseline, n, spec, 1u, alloc), new CrowdWorld(Policy.Parity, n, spec, 1u, alloc) };
+        if (worlds[1].Factored == null) { Err($"{spec.Name}: full table did not factorise"); return 1; }
         // cost-matched, as the demo runs by default: PARITY gets exactly the baseline's spend
         worlds[0].ApplyCalibration(baseFloor, baseTheta);
         worlds[1].ApplyCalibration(floor, CrowdWorld.CalibratedTheta);
         int wall = 0, outside = 0, nan = 0, maskViol = 0, overBudget = 0;
+        float worstAlloc = 0f;
         var exits = new int[2];
         float r = 0.45f * Mathf.Min(spec.Size.x, spec.Size.y);
         for (int f = 0; f < frames; f++)
@@ -161,6 +167,7 @@ public static class ParitySmoke
                 if (w.Mode == Policy.Parity)
                 {
                     if (!w.Last.Infeasible && w.Last.Cost > w.BudgetMs * 1.0001f) overBudget++;
+                    if (f > 10) worstAlloc = Mathf.Max(worstAlloc, w.AllocMs);
                     for (int i = 0; i < w.N; i++)
                         if (alloc.Err[w.Row[i]] > w.Ledger.Headroom[i] + 1e-4f) { maskViol++; break; }
                 }
@@ -173,6 +180,7 @@ public static class ParitySmoke
         Log($"  baseline  worst divergence {worlds[0].MaxDivergence():F2}   left the scene {exits[0]}");
         Log($"  PARITY    worst divergence {par.MaxDivergence():F2}   left the scene {exits[1]}" +
             $"   restorations {par.Ledger.Restorations}" + (kind == SceneKind.Hub ? $"   queue {queued}" : ""));
+        Log($"  two-salience allocator: worst {worstAlloc:F2} ms, last {par.AllocMs:F2} ms of a {par.StepMs:F2} ms step");
         failures += Check($"{spec.Name} NaN positions", nan, 0);
         failures += Check($"{spec.Name} agents outside the walkable area", outside, 0);
         failures += Check($"{spec.Name} agents inside the partition", wall, 0);
@@ -180,7 +188,11 @@ public static class ParitySmoke
         failures += Check($"{spec.Name} error-mask violations", maskViol, 0);
         failures += Check($"{spec.Name} cap breaches (invariant 3)", par.CapBreaches, 0);
         if (par.MaxDivergence() > par.Cap + 1e-3f) { Err($"{spec.Name} PARITY exceeded its cap"); failures++; }
-        if (exits[0] == 0 || exits[1] == 0) { Err($"{spec.Name}: nobody left the scene, the crowd is stuck"); failures++; }
+        if (kind != SceneKind.Plaza && (exits[0] == 0 || exits[1] == 0))
+        {
+            Err($"{spec.Name}: nobody left the scene, the crowd is stuck");
+            failures++;
+        }
         if (kind == SceneKind.Hub && queued == 0) { Err("hub: the ticket queue emptied and never refilled"); failures++; }
         foreach (var w in worlds) w.Dispose();
         return failures;

@@ -16,6 +16,7 @@ import numpy as np
 
 from alloc.config import build_table
 from alloc.costmodel import row_costs_from_theta
+from alloc.factored import FactoredAllocator, split_quality
 from alloc.serial import SerialAllocator
 from sim.tiered import phase7_table
 
@@ -110,6 +111,7 @@ def main():
 
     ok &= warm_path(env)
     ok &= capped_fill(env)
+    ok &= factored(env)
     print("\nC# port agrees with alloc/serial.py" if ok else "\nC# PORT DISAGREES -- investigate")
     sys.exit(0 if ok else 1)
 
@@ -153,6 +155,58 @@ def warm_path(env):
     print(f"  evals per frame  first {evals[0]}, then median {int(np.median(evals[1:]))}, max {max(evals[1:])}")
     ok = diff == 0 and over == 0
     print("  ->", "warm path agrees" if ok else "WARM PATH DISAGREES")
+    return ok
+
+
+def factored(env):
+    """The two-salience allocator (alloc/factored.py) on the full table: state salience for
+    behaviour and navigation, projected-size salience for animation and geometry, 30% of the
+    crowd out of view. Same acceptance as the cold path."""
+    q_s, q_v = split_quality(TABLE)
+    cases, meta = [], []
+    for seed in range(4):
+        for n in (64, 200, 700, 3000):
+            for mask in (False, True):
+                s, cost, hr = instance(seed, n, mask)
+                rng = np.random.default_rng(100 + seed)
+                v = np.where(rng.random(n) < 0.3, 0.0, np.minimum(1.0, 10.0 / rng.uniform(2, 120, n)))
+                top = FactoredAllocator(TABLE).allocate(s, cost, np.inf, headroom=hr, view_salience=v).cost
+                for frac in (0.12, 0.3, 0.55, 0.8, 1.05):
+                    b = float(frac * top)
+                    cases.append(dict(n=n, budget=b, salience=[float(x) for x in s], view=[float(x) for x in v],
+                                      rowCost=[float(x) for x in cost],
+                                      headroom=None if hr is None else [float(x) for x in hr],
+                                      fillMax=0, warm=False))
+                    meta.append((n, s, v, cost, hr, b))
+    got = _run(cases, env, "factored")
+    verdict = over = mask_v = diff = 0
+    tot = 0
+    worst = 0.0
+    ms = []
+    for (n, s, v, cost, hr, b), g in zip(meta, got):
+        py = FactoredAllocator(TABLE).allocate(s, cost, b, headroom=hr, view_salience=v)
+        cs = np.asarray(g["assign"], np.int64)
+        tot += n
+        verdict += int(bool(py.infeasible) != bool(g["infeasible"]))
+        if not g["infeasible"] and float(cost[cs].sum()) > b * (1 + 1e-5):
+            over += 1
+        if hr is not None and np.any(TABLE.err[cs] > np.asarray(hr) + 1e-6):
+            mask_v += 1
+        diff += int((cs != py.assign).sum())
+        u = float((s * q_s[cs] + v * q_v[cs]).sum())
+        if py.utility:
+            worst = max(worst, (py.utility - u) / abs(py.utility))
+        if n == 3000:
+            ms.append(g["ms"])
+    print(f"\nfactored (two saliences, full table): {len(meta)} cases, {tot} agent-decisions")
+    print(f"  infeasibility verdict disagreements : {verdict}")
+    print(f"  budget overruns (C#)                : {over}")
+    print(f"  error-mask violations (C#)          : {mask_v}")
+    print(f"  differing agent assignments         : {diff}  ({100*diff/tot:.4f}%)")
+    print(f"  worst utility gap vs fp64 oracle    : {worst*100:.5f}%")
+    print(f"  C# solve at N=3000                  : median {np.median(ms):.3f} ms")
+    ok = verdict == 0 and over == 0 and mask_v == 0 and worst < 1e-3
+    print("  ->", "factored port agrees with alloc/factored.py" if ok else "FACTORED PORT DISAGREES")
     return ok
 
 
