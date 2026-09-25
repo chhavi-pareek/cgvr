@@ -213,3 +213,39 @@ def admission_shortfall(calib, occupancy_floor=1e-6):
 # which is the point: these are two independent guarantees over two different quantities, and
 # neither implies the other. The error ledger bounds what an agent DOES; the core bounds where
 # it IS. Ablating invariant 4 leaves invariant 3 exactly intact and produces a 20 m teleport.
+
+
+# -- what the ledger gives for free, and what it does not ---------------------------------
+#
+#   COROLLARY (bounded continuous degradation). An agent cannot remain on the surrogate for
+#   more than cap / min_k e_rate[k] frames.
+#
+#   Proof. While degraded the agent accrues at least min_k e_rate[k] per frame and never
+#   resets, so after that many frames its headroom is below every surrogate row's admission
+#   rate and the mask excludes them. []
+#
+#   Measured on plaza (1800 frames): the longest unbroken surrogate run is 379 frames for the
+#   median agent, the p95 agent AND the worst agent -- every agent hits the same ceiling, which
+#   is the ledger biting at cap / e_rate[ctx=1] ~ 384. The loose bound above, using the slowest
+#   context, is 1010 frames.
+#
+# What it does NOT give is a bound on the long-run SHARE of frames an agent spends at full
+# fidelity. Nothing stops an agent being restored for one frame and demoted on the next, so the
+# duty cycle can approach zero. Measured: 15 of 200 agents sit on the surrogate more than 99%
+# of the time and the median agent is there 77.6%. This is the standard distinction in
+# scheduling between a deadline and a rate guarantee, and the ledger is only the former -- it
+# is structurally a token bucket, which is exactly the object network QoS says cannot prevent
+# starvation on its own.
+#
+# bench/fairness.py supplies the missing half with priority aging, the mechanism OS schedulers
+# use for the same problem: effective salience is scaled by time-since-full-fidelity, so a
+# starved agent's rank rises until it is served. Measured at alpha = 4: agents above 99%
+# degraded 15 -> 0, worst continuous degradation 6.3 s -> 2.7 s, utility cost 0.07%, never over
+# budget, ledger bound untouched.
+#
+#   DESIGN RULE, learned the hard way. Aging enters the OBJECTIVE, never the mask. The mask
+#   overrides the frame budget by construction -- that is what makes invariant 3 a safety
+#   property -- so anything placed there silently overspends: bench/anticipate.py put 574 of
+#   600 frames over budget doing exactly that, and its apparent utility gain was an artefact.
+#   Hard constraints are for safety properties only; every preference belongs in the objective,
+#   where the allocator prices it against the budget and the cost is visible.

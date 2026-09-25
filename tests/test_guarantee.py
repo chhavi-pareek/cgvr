@@ -180,3 +180,31 @@ def test_core_band_bounds_the_demotion_snap(scene):
     assert off["band"].max() > on["band"].max() + 1e-6, "ablating bind changed nothing"
     # the two guarantees are independent: invariant 3 survives invariant 4 being ablated
     assert off["dmax"] <= off["cap"] + 1e-6, "ledger bound broke when the core band was removed"
+
+
+def test_continuous_degradation_is_bounded_but_duty_cycle_is_not():
+    """The corollary and its limit, together: the ledger bounds how LONG an agent can stay
+    degraded but not what SHARE of the time it is. See alloc/guarantee.py."""
+    import numpy as np
+    from bench.camerapaths import camera
+    from sim.tiered import Run, calibrate
+
+    cal = calibrate("plaza", n=200, seed=0)
+    F = 900
+    r = Run("plaza", 200, "parity", seed=0, cam=camera("plaza", "orbit", F), calib=cal)
+    e_min = float(np.min(r.sur.e_rate[r.sur.ctx_freq > 0.01]))
+    bound = r.cap / e_min
+    at_sur = np.zeros(r.n)
+    longest = np.zeros(r.n)
+    cur = np.zeros(r.n)
+    for f in range(F):
+        r.step(f)
+        s = r.tier == 3
+        at_sur += s
+        cur = np.where(s, cur + 1, 0)
+        longest = np.maximum(longest, cur)
+    assert longest.max() <= bound + 1e-6, (
+        f"continuous degradation {longest.max():.0f} frames exceeded cap/min_rate {bound:.0f}")
+    # and the thing the corollary does NOT cover, asserted so it is not mistaken for covered
+    assert (at_sur / F).max() > 0.9, (
+        "no agent was heavily starved in this run; the duty-cycle gap needs a longer horizon")
