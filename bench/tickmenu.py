@@ -85,7 +85,15 @@ class Menu:
         self.tiers = np.zeros((self.m, 4), np.int8)
 
 
-def build(q_tick, e_tick, e_sur):
+# Measured with bench/tickmenu.py's own timing harness: sim/reconcile.py::promote costs
+# 110 us for a single agent and 40 us in batches of 20 -- four to ten times the ENTIRE
+# per-frame behaviour step. A row with drift e forces a restoration every cap/e frames, so its
+# true per-frame cost carries an amortised term R * e / cap. The cost model never charged it,
+# which flatters exactly the configurations that churn hardest.
+RECONCILE_US = 40.0     # the favourable, batched end of the measurement
+
+
+def build(q_tick, e_tick, e_sur, reconcile_us=0.0, cap=1.0):
     beh = AXIS_QUALITY[0]
     rows = [("full latent16", beh[0], FULL_US, 0.0),
             ("latent8", beh[1], 10.943, 0.0),
@@ -94,6 +102,8 @@ def build(q_tick, e_tick, e_sur):
     for k in BASELINE_PERIODS[1:]:
         # the full step every k frames, the core every frame; the core is never allocated
         rows.append((f"tick-{k}", q_tick[k], CORE_US + (FULL_US - CORE_US) / k, e_tick[k]))
+    if reconcile_us > 0.0:
+        rows = [(n, q, c + reconcile_us * e / cap, e) for (n, q, c, e) in rows]
     return Menu(rows)
 
 
@@ -111,19 +121,31 @@ def main():
     print(f"  validation: tick-1 has no staleness, so it must reproduce latent-16's recorded "
           f"quality.\n    measured {q_tick[1]:.4f}  recorded {recorded:.4f}  "
           f"delta {q_tick[1] - recorded:+.4f}")
-    menu = build(q_tick, e_tick, e_sur)
-
-    print(f"\n{'config':16} {'quality':>8} {'us/agent':>9} {'drift/frame':>12} {'frames to cap':>14}")
     cap = 300.0 * e_sur
+    menu = build(q_tick, e_tick, e_sur)
+    charged = build(q_tick, e_tick, e_sur, RECONCILE_US, cap)
+
+    print(f"\n{'config':16} {'quality':>8} {'steady us':>10} {'+reconcile':>11} "
+          f"{'true us':>9} {'drift/frame':>12} {'to cap':>8}")
     for i, nm in enumerate(menu.names):
         ttc = cap / menu.err[i] if menu.err[i] > 0 else float("inf")
-        print(f"{nm:16} {menu.quality[i]:>8.4f} {menu.cost[i]:>9.3f} {menu.err[i]:>12.5f} "
-              f"{(f'{ttc:.0f}' if np.isfinite(ttc) else 'never'):>14}")
+        extra = charged.cost[i] - menu.cost[i]
+        print(f"{nm:16} {menu.quality[i]:>8.4f} {menu.cost[i]:>10.3f} {extra:>11.3f} "
+              f"{charged.cost[i]:>9.3f} {menu.err[i]:>12.5f} "
+              f"{(f'{ttc:.0f}' if np.isfinite(ttc) else 'never'):>8}")
+    # where does the ranking flip?
+    i10 = menu.names.index("tick-10"); isur = menu.names.index("surrogate")
+    de = (menu.err[i10] - menu.err[isur]) / cap
+    print(f"\nbreak-even: the surrogate beats tick-10 once reconciliation costs more than "
+          f"{(menu.cost[isur] - menu.cost[i10]) / de:.2f} us/agent.")
+    print(f"measured 40-110 us, so it is not close.")
 
     # which rows survive dominance once all three axes are on the table?
     from alloc.config import prune_dominated
-    keep = prune_dominated(menu, menu.cost)
-    print(f"\nnon-dominated rows: {[menu.names[i] for i in keep]}")
+    print(f"\nnon-dominated, steady cost only : "
+          f"{[menu.names[i] for i in prune_dominated(menu, menu.cost)]}")
+    print(f"non-dominated, reconcile charged: "
+          f"{[charged.names[i] for i in prune_dominated(charged, charged.cost)]}")
 
     # and what does the allocator actually pick, across budgets?
     rng = np.random.default_rng(0)
@@ -134,16 +156,14 @@ def main():
     print(f"\ntoday's measured reconciliation rate: {cur:.3f} per agent per second")
     print(f"\n{'budget':>8}  selection (count per config)")
     for bf in (0.1, 0.25, 0.4, 0.55, 0.7, 0.85):
-        B = len(s) * (menu.cost.min() + bf * (menu.cost.max() - menu.cost.min()))
-        r = SerialAllocator(menu).allocate(s, menu.cost, B, headroom=hr)
-        cnt = np.bincount(r.assign, minlength=menu.m)
-        picked = "  ".join(f"{menu.names[i]}={cnt[i]}" for i in range(menu.m) if cnt[i])
-        # an agent on a drifting row is forced off it after cap/rate frames, so the
-        # reconciliation rate is the sum of those reciprocals
-        churn = sum(cnt[i] * menu.err[i] / cap for i in range(menu.m) if menu.err[i] > 0)
-        print(f"{bf:>8.2f}  {picked}")
-        print(f"{'':8}  forced restorations/frame {churn:6.2f}  "
-              f"({60 * churn / max(len(s_), 1):.2f} per agent per second)")
+        for tag, mu in (("steady only     ", menu), ("reconcile charged", charged)):
+            B = len(s) * (mu.cost.min() + bf * (mu.cost.max() - mu.cost.min()))
+            r = SerialAllocator(mu).allocate(s, mu.cost, B, headroom=hr)
+            cnt = np.bincount(r.assign, minlength=mu.m)
+            picked = "  ".join(f"{mu.names[i]}={cnt[i]}" for i in range(mu.m) if cnt[i])
+            churn = sum(cnt[i] * mu.err[i] / cap for i in range(mu.m) if mu.err[i] > 0)
+            lead = f"{bf:>8.2f}" if tag.startswith("steady") else " " * 8
+            print(f"{lead}  {tag}  {picked}   [churn {churn:.2f}/frame]")
 
 
 if __name__ == "__main__":
