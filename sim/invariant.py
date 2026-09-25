@@ -14,6 +14,7 @@ from .behaviour import CHOKEPOINT, NEAR_GOAL, QUEUED, WALKING
 
 BAND = 2.0  # metres of allowed fine-vs-core progress disagreement
 BIND = True  # invariant 4; bench/invariant4.py ablates it
+BIND_ITERS = 4  # v2: re-project after correcting, so a corner cannot leave the band; 1 = v1
 NEAR = 5.0  # metres of route remaining that count as near_goal
 CHOKE_AHEAD = 3.0  # metres before a chokepoint that count as chokepoint context
 MAX_WP = 3
@@ -137,17 +138,40 @@ class Core:
         if not BIND:
             return pos
         idx = np.arange(self.n) if idx is None else np.atleast_1d(idx)
-        sf = self.project(pos, idx)
-        err = sf - self.s[idx]
-        over = np.abs(err) > BAND
-        if not over.any():
-            return pos
-        target = self.s[idx] + np.clip(err, -BAND, BAND)
-        p_t = self.point(target, idx)
-        p_f = self.point(sf, idx)
         pos = pos.copy()
-        pos[over] += p_t[over] - p_f[over]
+        # The corrected position is the target point plus the agent's PERPENDICULAR offset from
+        # the route. v1 translated by (point at target - point at projection), which keeps the
+        # whole offset, including any component ALONG the route. For an interior projection that
+        # component is zero, but past a route end (projection clamped to L) or across a corner it
+        # is not, and the translated point stays outside the band -- the corridor's 5.9%
+        # overshoot, and an agent 1 cm past its end-point that v1 could never pull back.
+        # Dropping the along-route part and re-projecting converges within a couple of steps.
+        for _ in range(BIND_ITERS):
+            sf = self.project(pos, idx)
+            err = sf - self.s[idx]
+            over = np.abs(err) > BAND * (1.0 + 1e-9)
+            if not over.any():
+                break
+            target = self.s[idx] + np.clip(err, -BAND, BAND)
+            off = pos - self.point(sf, idx)
+            if BIND_ITERS > 1:
+                t = self._tangent_at(target, idx)
+                off = off - (off * t).sum(1)[:, None] * t
+            pos[over] = (self.point(target, idx) + off)[over]
         return pos
+
+    def _tangent_at(self, s, idx):
+        """Unit tangent of the route segment containing arc length s."""
+        wp, seg = self.wp[idx], self.seg_len[idx]
+        k = np.zeros(len(idx), np.int64)
+        cum = seg[:, 0].copy()
+        for j in range(1, MAX_WP - 1):         # past the end of segment j-1, onto a real segment j
+            k = np.where((s > cum) & (seg[:, j] > 0), j, k)
+            cum = cum + seg[:, j]
+        rows = np.arange(len(idx))
+        d = wp[rows, k + 1] - wp[rows, k]
+        nrm = np.linalg.norm(d, axis=1, keepdims=True)
+        return np.where(nrm > 0, d / np.maximum(nrm, 1e-12), np.array([1.0, 0.0]))
 
 
 def partition():

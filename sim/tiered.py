@@ -291,6 +291,13 @@ class Run:
             # rate so the feasibility mask is conservative for every context
             e_sur = float(self.sur.e_rate @ self.sur.ctx_freq)
             e_max = float(self.sur.e_rate[self.sur.ctx_freq > 0.01].max())
+            self.v2 = hasattr(self.sur, "kl_coarse_ucb")
+            if self.v2:
+                # corrected ledger: admit against the worst region an agent can occupy and
+                # charge its own region's bound, so D >= D_meas and the cap bounds what is plotted
+                occ = self.sur.pi_c > 1e-6
+                e_max = float(self.sur.kl_coarse_ucb[occ].max())
+                self.e_charge = float(self.sur.e_rate_ucb @ self.sur.ctx_freq)
             self.table = phase7_table(e_max)
             if quality is not None:  # ablation of invariant 2: authored per-axis quality
                 self.table.quality = np.asarray(quality, np.float64)
@@ -299,10 +306,15 @@ class Run:
             th = np.zeros((4, 4))
             th[0, :3] = np.maximum(self.theta_beh[:3] - self.theta_beh[3], 0.0)
             self.cost = row_costs_from_theta(self.table, CORE_US + self.theta_beh[3], th) * 1e-3
+            self.e_sur = e_sur
+            self.cap = cap if cap is not None else cap_scale * (
+                float(self.sur.cap_nats) if self.v2 else 300.0 * e_sur)
+            if self.v2 and np.isfinite(self.cap) and self.cap < 1e8:
+                # a surrogate row forces a reconciliation every cap / e frames; charge it amortised
+                sur_rows = self.table.tiers[:, 0] == 3
+                self.cost = self.cost + sur_rows * RECONCILE_US * self.e_charge / self.cap * 1e-3
             self.budget = n * (self.cost.min() + budget_frac * (self.cost.max() - self.cost.min()))
             self.alloc = alloc_cls(self.table)
-            self.e_sur = e_sur
-            self.cap = cap if cap is not None else cap_scale * 300.0 * e_sur
             self.ledger = ErrorLedger(n, self.cap, self.rng)
             self.assign = None
             self.infeasible = 0
@@ -468,7 +480,10 @@ class Run:
         self._fine_core()
         if self.cond == "parity":
             sur = self.tier == 3
-            self.ledger.accrue(np.where(sur, self.sur.e_rate[self.core.ctx], 0.0))
+            if self.v2:
+                self.ledger.accrue(np.where(sur, self.sur.kl_coarse_ucb[self.core.ctx, self.region], 0.0))
+            else:
+                self.ledger.accrue(np.where(sur, self.sur.e_rate[self.core.ctx], 0.0))
             assert np.all(self.ledger.D <= self.cap + 1e-9)
             self.D_meas[sur] += self.sur.kl_coarse[self.core.ctx[sur], self.region[sur]]
             self.band_max = max(self.band_max, float(np.abs(self.core.project(a.pos) - self.core.s).max()))
@@ -501,15 +516,34 @@ class Run:
         return row
 
 
-def calibrate(scene, n=200, frames=6000, seed=0, force=False):
-    """Full-fidelity free run: fit the surrogate, mbar, kappa; measure behaviour tier costs."""
-    path = _logs(scene, "calib.npz")
+CALIB_VERSION = 2   # 1 reproduces the recorded v1 sweep (plug-in rates, context-mean ledger)
+RECONCILE_US = 16.4  # measured cost of one reconciliation after optimisation (bench/tickmenu.py)
+
+
+def calibrate(scene, n=200, frames=6000, seed=0, force=False, version=None):
+    """Full-fidelity free run: fit the surrogate, mbar, kappa; measure behaviour tier costs.
+
+    Version 2 also runs an independent calibration (seed + 1) and re-estimates every divergence
+    table on it with the noise inflation removed (Surrogate.held_out_tables): one estimator for
+    both policies, plus an element-wise upper bound for the ledger. The cap in nats is the v1 cap
+    (300 x the in-sample mean rate), so a lower charged rate shows up as fewer restorations for
+    the same bound rather than as a smaller bound."""
+    version = CALIB_VERSION if version is None else version
+    path = _logs(scene, "calib.npz" if version == 1 else f"calib_v{version}.npz")
     if os.path.exists(path) and not force:
         t = np.load(path)
         return {"surrogate": path, "kappa": float(t["kappa"]), "theta_beh": t["theta_beh"]}
     r = Run(scene, n, "calib", seed=seed).run(frames, log=False)
     ctx_log, d_log = np.stack(r.ctx_log), np.stack(r.d_log)
     r.sur.fit(ctx_log[300:], d_log[300:])
+    if version >= 2:
+        r.sur.cap_nats = 300.0 * float(r.sur.e_rate @ r.sur.ctx_freq)
+        held = Run(scene, n, "calib", seed=seed + 1).run(frames, log=False)
+        other = type(r.sur)(r.proc).fit(np.stack(held.ctx_log)[300:], np.stack(held.d_log)[300:])
+        t = r.sur.held_out_tables(other.Cf)
+        for k in ("kl_coarse", "kl_coarse_ucb", "kl_frozen", "e_rate", "e_rate_ucb"):
+            setattr(r.sur, k, t[k])
+        r.sur.kl_tick = t["kl_tick"]
     kappa = r.crossings / max(frames - 300, 1) if scene == "corridor" else np.inf
     theta = measure_costs(scene, n, r.sur, kappa)
     r.sur.save(path)

@@ -50,7 +50,14 @@ def test_surrogate_fit_matches_reference_occupancy(calib):
     s = Surrogate(Run("corridor", 8, "calib").proc).load(calib["surrogate"])
     for c in range(4):
         assert np.abs(s.pi_c[c] @ s.P_sur[c] - s.pi_c[c]).max() < 1e-12
-    assert (s.kl_coarse >= 0).all() and (s.kl_frozen > 0).all()
+    assert (s.kl_coarse >= 0).all()
+    if hasattr(s, "kl_coarse_ucb"):
+        # v2: noise inflation removed, which can take a pure-noise frozen cell to 0; the ledger's
+        # bound sits on or above the estimate that is plotted
+        assert (s.kl_frozen >= 0).all() and (s.kl_frozen > 0).mean() > 0.9
+        assert (s.kl_coarse_ucb >= s.kl_coarse - 1e-12).all()
+    else:
+        assert (s.kl_frozen > 0).all()
     assert s.e_rate[s.ctx_freq > 0.01].min() > 0
 
 

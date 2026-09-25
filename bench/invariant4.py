@@ -32,10 +32,13 @@ def play(scene, n, frames, seed, cam, cal, bind):
         r = Run(scene, n, "parity", seed=seed, cam=camera(scene, cam, frames), calib=cal)
         demote_jump, promote_jump, band = [], [], []
         for f in range(frames):
-            prev_tier, prev_pos = r.tier.copy(), r.a.pos.copy()
+            prev_tier, prev_pos, prev_s = r.tier.copy(), r.a.pos.copy(), r.core.s.copy()
             r.step(f)
-            dem = np.flatnonzero((prev_tier < 3) & (r.tier == 3))
-            pro = np.flatnonzero((prev_tier == 3) & (r.tier < 3))
+            # an agent whose trip ended this frame was respawned at the route start, core and
+            # all -- a new trip, not a reconciliation snap -- so it is not counted
+            same_trip = r.core.s >= prev_s
+            dem = np.flatnonzero((prev_tier < 3) & (r.tier == 3) & same_trip)
+            pro = np.flatnonzero((prev_tier == 3) & (r.tier < 3) & same_trip)
             if dem.size:
                 demote_jump.append(np.linalg.norm(r.a.pos[dem] - prev_pos[dem], axis=1))
             if pro.size:

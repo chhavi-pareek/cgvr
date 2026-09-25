@@ -263,10 +263,68 @@ class Surrogate:
         return dict(plug=plug, corrected=corrected, upper=upper, kl_coarse=kc,
                     inflation=boot.mean(0) - plug)
 
+    def held_out_tables(self, Cf_eval, delta=0.05, draws=200, rng=None):
+        """Every divergence table re-estimated on independent counts, noise inflation removed.
+
+        One estimator for both policies: the surrogate's drift (kl_coarse), the baseline's
+        frame-skip drift (kl_tick) and frozen drift (kl_frozen) are all KL rates against a
+        reference kernel estimated from finite counts, all inflated by that kernel's noise
+        (Jensen), and all corrected the same way -- the basic-bootstrap bias correction
+        2 * plug-in - mean(bootstrap). Measuring one policy with corrected rates and the other
+        with inflated ones would be unfair, so nothing plotted keeps the plug-in.
+
+        The ledger additionally gets kl_coarse_ucb, an element-wise upper bound (Bonferroni over
+        the 64 (context, region) cells): charged >= corrected, and >= the true rate with
+        probability 1 - delta, so the cap bounds both what is plotted and what is true."""
+        rng = np.random.default_rng(0) if rng is None else rng
+        Cf_eval = np.asarray(Cf_eval, np.float64)
+        part = self.part
+        lift_f = np.empty((N_CTX, K_FINE, K_FINE))
+        eye = np.eye(K_FINE)
+        for c in range(N_CTX):
+            stay = self.P_sur[c, part, part]
+            move = self.P_lift[c, part, :] - stay[:, None] * self.pi_f_given_c[c, part, :]
+            lift_f[c] = move + stay[:, None] * eye
+
+        def tables(C):
+            P = _ctx_rows(C)
+            kc = np.einsum("cRr,cr->cR", self.pi_f_given_c, kl_rows(lift_f, P))
+            tick = {k: kl_rows(np.stack([np.linalg.matrix_power(P[c], k) for c in range(N_CTX)]), P)
+                    for k in BASELINE_PERIODS}
+            frozen = -np.log(P[:, np.arange(K_FINE), np.arange(K_FINE)])
+            return kc, tick, frozen
+
+        kc0, tick0, frozen0 = tables(Cf_eval)
+        P_hat = _ctx_rows(Cf_eval)
+        n_row = Cf_eval.sum(-1).astype(np.int64)
+        kcs = np.empty((draws,) + kc0.shape)
+        ticks = {k: np.zeros_like(v) for k, v in tick0.items()}
+        frozens = np.zeros_like(frozen0)
+        for b in range(draws):
+            Cs = np.zeros_like(Cf_eval)
+            for c in range(N_CTX):
+                for r in range(K_FINE):
+                    if n_row[c, r]:
+                        Cs[c, r] = rng.multinomial(n_row[c, r], P_hat[c, r])
+            kc, tick, frozen = tables(Cs)
+            kcs[b] = kc
+            for k in ticks:
+                ticks[k] += tick[k] / draws
+            frozens += frozen / draws
+        corr = lambda plug, mean: np.maximum(2.0 * plug - mean, 0.0)  # noqa: E731
+        kl_coarse = corr(kc0, kcs.mean(0))
+        ucb = np.maximum(2.0 * kc0 - np.quantile(kcs, delta / kc0.size, axis=0), kl_coarse)
+        return dict(kl_coarse=kl_coarse, kl_coarse_ucb=ucb,
+                    kl_tick={k: corr(tick0[k], ticks[k]) for k in tick0},
+                    kl_frozen=corr(frozen0, frozens),
+                    e_rate=np.einsum("cR,cR->c", self.pi_c, kl_coarse),
+                    e_rate_ucb=np.einsum("cR,cR->c", self.pi_c, ucb))
+
     def save(self, path):
         np.savez(path, **{k: getattr(self, k) for k in ("P_ref", "pi_f", "pi_c", "pi_d", "ctx_freq", "P_sur",
                                                           "pi_f_given_c", "P_lift", "kl_lift", "kl_coarse", "kl_frozen",
                                                           "dec_region", "mbar", "e_rate", "part")},
+                 **{k: getattr(self, k) for k in ("kl_coarse_ucb", "e_rate_ucb", "cap_nats") if hasattr(self, k)},
                  kl_tick=np.stack([self.kl_tick[k] for k in BASELINE_PERIODS]))
 
     def load(self, path):

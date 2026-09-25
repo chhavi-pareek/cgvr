@@ -22,6 +22,7 @@ from sim.tiered import Run, calibrate
 
 
 def play(scene, n, frames, seed, cam, cal, couple):
+    keep = reconcile.COUPLE
     reconcile.COUPLE = couple
     r = Run(scene, n, "parity", seed=seed, cam=camera(scene, cam, frames), calib=cal)
     jumps, changed, steps = [], [], []
@@ -41,7 +42,7 @@ def play(scene, n, frames, seed, cam, cal, couple):
             steps.append(np.linalg.norm(r.a.pos[stay] - prev_pos[stay], axis=1))
         s = 1.0 / (1.0 + r.a.sig / 20.0)
         util.append(float((s * r.table.quality[r.assign]).sum()))
-    reconcile.COUPLE = False
+    reconcile.COUPLE = keep
     j = np.concatenate(jumps)
     return dict(j=j, step=np.concatenate(steps), changed=float(np.concatenate(changed).mean()),
                 total=total, seen=seen, util=float(np.mean(util)),

@@ -26,6 +26,7 @@ LATERAL_CLIP = 1.8
 
 
 def _run(frames=600, seed=0, couple=False, alpha=0.0, n=200):
+    keep = reconcile.COUPLE
     reconcile.COUPLE = couple
     try:
         r = AgedRun("plaza", n, "parity", seed=seed, cam=camera("plaza", "orbit", frames), calib=CAL)
@@ -35,12 +36,13 @@ def _run(frames=600, seed=0, couple=False, alpha=0.0, n=200):
         longest = np.zeros(n)
         cur = np.zeros(n)
         for f in range(frames):
-            prev_tier, prev_pos = r.tier.copy(), r.a.pos.copy()
+            prev_tier, prev_pos, prev_s = r.tier.copy(), r.a.pos.copy(), r.core.s.copy()
             r.step(f)
-            dem = np.flatnonzero((prev_tier < 3) & (r.tier == 3))
+            same_trip = r.core.s >= prev_s          # a respawn is a new trip, not a snap
+            dem = np.flatnonzero((prev_tier < 3) & (r.tier == 3) & same_trip)
             if dem.size:
                 snap.append(np.linalg.norm(r.a.pos[dem] - prev_pos[dem], axis=1))
-            pro = np.flatnonzero((prev_tier == 3) & (r.tier < 3))
+            pro = np.flatnonzero((prev_tier == 3) & (r.tier < 3) & same_trip)
             if pro.size:
                 psnap.append(np.linalg.norm(r.a.pos[pro] - prev_pos[pro], axis=1))
             band.append(float(np.abs(r.core.project(r.a.pos) - r.core.s).max()))
@@ -54,7 +56,7 @@ def _run(frames=600, seed=0, couple=False, alpha=0.0, n=200):
                     psnap=np.concatenate(psnap) if psnap else np.zeros(1),
                     spend=np.array(spend), frac=at_sur / frames, longest=longest)
     finally:
-        reconcile.COUPLE = False
+        reconcile.COUPLE = keep
 
 
 def _assert_all_bounds(o):

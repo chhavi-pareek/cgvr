@@ -34,7 +34,7 @@ CLEAR = 0.7  # metres of clearance for a lateral slot to count as free
 #            == R the retained d is distributed as pi_ref(. | R, ctx) -- exactly what the
 #            redraw would have sampled. The mixture is therefore pi_ref either way, and the
 #            marginal is preserved exactly rather than approximately.
-COUPLE = False
+COUPLE = True   # v2 sweep; False reproduces the recorded v1 sweep
 
 
 def demote(idx, d, region, surrogate, core, phase, dist_at_demote):
@@ -132,4 +132,7 @@ def promote(idx, d, region, surrogate, core, a, phase, dist_at_demote, rng, s_at
             break
         placed[k] = pos
         a.pos[i] = pos
+    # a lateral slot next to a corner can project onto the other segment, past the band; the
+    # restored agent is bound like every other fine position (invariant 4)
+    a.pos[idx] = core.bind(a.pos[idx].astype(np.float64), idx)
     a.vel[idx] = t * (a.speed[idx] * speed_scale(dec))[:, None]

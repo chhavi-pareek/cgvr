@@ -15,6 +15,7 @@ CAL = calibrate("plaza", n=200, seed=0)
 
 
 def _run(seed, couple, frames=360):
+    keep = reconcile.COUPLE
     reconcile.COUPLE = couple
     try:
         r = Run("plaza", 200, "parity", seed=seed, cam=camera("plaza", "orbit", frames), calib=CAL)
@@ -28,7 +29,7 @@ def _run(seed, couple, frames=360):
             np.add.at(occ, r.d, 1)          # latent occupancy over the whole run
         return np.concatenate(jumps), occ, r
     finally:
-        reconcile.COUPLE = False
+        reconcile.COUPLE = keep
 
 
 @pytest.mark.parametrize("seed", [0, 1])

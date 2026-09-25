@@ -43,8 +43,13 @@ def style():
     })
 
 
+TAG = ""   # --tag: read sweep_*{TAG}.csv and write fig*{TAG}.*, so a re-run sits beside the record
+
+
 def load(name, required):
     """Read a CSV from bench/logs; refuse (return None) if absent or missing a column."""
+    if name.startswith("sweep_"):
+        name = name.replace(".csv", f"{TAG}.csv")
     path = os.path.join(LOGS, name)
     if not os.path.exists(path):
         print(f"  SKIP: {name} not found ({path})")
@@ -69,9 +74,9 @@ def panel_letter(ax, letter):
 def save(fig, stem):
     os.makedirs(OUT, exist_ok=True)
     for ext in ("pdf", "png"):
-        fig.savefig(os.path.join(OUT, f"{stem}.{ext}"))
+        fig.savefig(os.path.join(OUT, f"{stem}{TAG}.{ext}"))
     plt.close(fig)
-    print(f"  wrote {OUT}/{stem}.pdf and .png")
+    print(f"  wrote {OUT}/{stem}{TAG}.pdf and .png")
 
 
 # ---------------------------------------------------------------- figure 1
@@ -460,7 +465,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", nargs="+", type=int, choices=[1, 2, 3, 4])
     ap.add_argument("--target", type=float, default=None, help="figure 3 target frame time (ms)")
+    ap.add_argument("--tag", default="", help="sweep tag, e.g. _v2")
     a = ap.parse_args()
+    global TAG
+    TAG = a.tag
     style()
     want = a.only or [1, 2, 3, 4]
     for i in want:
