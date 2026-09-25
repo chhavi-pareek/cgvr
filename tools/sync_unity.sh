@@ -3,6 +3,7 @@
 #
 #   tools/sync_unity.sh                 # sync + compile, print errors
 #   tools/sync_unity.sh --no-compile    # sync only
+#   tools/sync_unity.sh --smoke         # sync + compile + run the headless sim smoke test
 #
 # Batchmode compilation is the whole point: the editor does not have to be open, and script
 # errors come back here instead of having to be read off the Console by hand.
@@ -26,13 +27,17 @@ rsync -a --delete \
       "$REPO/unity/Parity3D/Assets/Scripts/" "$PROJ/Assets/Scripts/"
 rsync -a --delete \
       "$REPO/unity/Parity3D/Assets/Shaders/" "$PROJ/Assets/Shaders/"
+rsync -a --delete \
+      "$REPO/unity/Parity3D/Assets/Editor/" "$PROJ/Assets/Editor/"
 
 [ "${1:-}" = "--no-compile" ] && { echo "synced (compile skipped)"; exit 0; }
 
 mkdir -p "$PROJ/Logs"
-echo "compiling headlessly (first run imports the whole project, so it is slow) ..."
+EXTRA=""
+if [ "${1:-}" = "--smoke" ]; then EXTRA="-executeMethod ParitySmoke.Run"; fi
+echo "compiling headlessly${EXTRA:+ + smoke test} (first run imports everything, so it is slow) ..."
 "$UNITY" -batchmode -quit -nographics \
-         -projectPath "$PROJ" \
+         -projectPath "$PROJ" $EXTRA \
          -logFile "$LOG" >/dev/null 2>&1
 rc=$?
 
@@ -47,5 +52,8 @@ if [ $rc -ne 0 ]; then
     echo "--- unity exited $rc with no CS errors; tail of $LOG ---"
     tail -25 "$LOG"
     exit $rc
+fi
+if [ "${1:-}" = "--smoke" ]; then
+    grep -F "[ParitySmoke]" "$LOG" | sed 's/^/  /'
 fi
 echo "compiled clean"

@@ -61,7 +61,7 @@ namespace Parity
             {
                 var a = world.Last;
                 GUILayout.Label($"crowd step {world.StepMs,6:F2} ms     allocator {world.AllocMs,5:F2} ms" +
-                                $"     budget {d.BudgetMs,4:F1} ms", mono);
+                                $"     budget {world.BudgetMs,5:F1} ms", mono);
                 GUILayout.Label($"lambda {a.Lambda,9:G4}   evals {a.Evals,2}   fill {a.FillSteps,2}" +
                                 $"   slack {a.Slack,6:F2} ms{(a.Infeasible ? "   INFEASIBLE" : "")}" +
                                 $"{(a.Forced ? "   forced" : "")}", mono);
@@ -118,8 +118,17 @@ namespace Parity
             n = (n / 100) * 100;
             if (n != d.Agents) d.PendingAgents = n;
 
-            GUILayout.Label($"frame budget  {d.BudgetMs:F1} ms", mono);
-            d.BudgetMs = GUILayout.HorizontalSlider(d.BudgetMs, 0.5f, 30f);
+            if (d.AbsoluteBudget)
+            {
+                GUILayout.Label($"frame budget  {d.TargetMs:F1} ms absolute  (spent {d.Par.Last.Cost:F1})", mono);
+                d.TargetMs = GUILayout.HorizontalSlider(d.TargetMs, 0.5f, 40f);
+            }
+            else
+            {
+                GUILayout.Label($"frame budget  {100 * d.BudgetFrac:F0}% of the tier span" +
+                                $"  = {d.Par.BudgetMs:F1} ms", mono);
+                d.BudgetFrac = GUILayout.HorizontalSlider(d.BudgetFrac, 0.02f, 1f);
+            }
 
             GUILayout.Label($"divergence cap  {d.Cap:F2} nats", mono);
             d.Cap = GUILayout.HorizontalSlider(d.Cap, 0.5f, 20f);
@@ -129,6 +138,7 @@ namespace Parity
             if (GUILayout.Button(d.Orbit ? "stop cam" : "orbit")) d.Orbit = !d.Orbit;
             if (GUILayout.Button(d.ColourByDivergence ? "colour: error" : "colour: tier"))
                 d.ColourByDivergence = !d.ColourByDivergence;
+            if (GUILayout.Button(d.AbsoluteBudget ? "budget: ms" : "budget: %")) d.AbsoluteBudget = !d.AbsoluteBudget;
             GUILayout.EndHorizontal();
             var b = BenchmarkRunner.Instance;
             if (b != null && GUILayout.Button(b.Running ? $"benchmarking  {b.Progress}" : "run benchmark sweep -> CSV"))

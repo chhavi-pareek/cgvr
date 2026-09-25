@@ -25,8 +25,10 @@ namespace Parity
         static readonly Vector2 Focus = new Vector2(60f, 60f);                // bench/camerapaths.py FOCUS
 
         public int Agents = 1200;
-        public float BudgetMs = 6.0f;
-        public float Cap = 4.0f;
+        public float BudgetFrac = 0.25f;   // sim/tiered.py's budget_frac
+        public bool AbsoluteBudget;
+        public float TargetMs = 16.7f;
+        public float Cap = (float)(300.0 * ParityTable.PlazaESur);   // 3.969, as sim/tiered.py builds it
         public bool Orbit = true;
         public float OrbitSeconds = 40f;
         public float CamHeight = 14f;
@@ -43,14 +45,23 @@ namespace Parity
         CrowdRenderer rendL, rendR;
         float orbitT;
         float lastBaseMs, lastParMs;
+        public float RenderBaseMs, RenderParMs;
 
         public float[] TraceBase = new float[600];
         public float[] TracePar = new float[600];
         public int TraceHead;
 
+        public ParityTable AllocTable;
+        public double CalibFloor;
+        public int PrunedRows;
+
         void Awake()
         {
             Table = ParityTable.Build();
+            // measured once, not authored (invariant 1), then the rows nothing would ever pick
+            // are dropped so the allocator's inner loop is 5-6x shorter
+            CrowdWorld.CalibrateAxes(SceneSize, Table, 400, out CalibFloor);
+            AllocTable = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta, out PrunedRows);
             BuildStage();
             Rebuild(Agents);
         }
@@ -59,8 +70,10 @@ namespace Parity
         {
             Agents = Mathf.Clamp(n, 50, 30000);
             Base?.Dispose(); Par?.Dispose();
-            Base = new CrowdWorld(Policy.Baseline, Agents, SceneSize, 1u, Table, BudgetMs, Cap);
-            Par = new CrowdWorld(Policy.Parity, Agents, SceneSize, 1u, Table, BudgetMs, Cap);
+            Base = new CrowdWorld(Policy.Baseline, Agents, SceneSize, 1u, AllocTable, TargetMs, Cap);
+            Par = new CrowdWorld(Policy.Parity, Agents, SceneSize, 1u, AllocTable, TargetMs, Cap);
+            Base.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
+            Par.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
             System.Array.Clear(TraceBase, 0, TraceBase.Length);
             System.Array.Clear(TracePar, 0, TracePar.Length);
             TraceHead = 0;
@@ -124,13 +137,19 @@ namespace Parity
             // the LOD camera is the render camera: what drives the tiers is what you see
             float yaw = Mathf.Atan2(look.z - camXZ.y, look.x - camXZ.x);
 
-            Base.BudgetMs = BudgetMs; Base.Cap = Cap;
-            Par.BudgetMs = BudgetMs; Par.Cap = Cap;
+            foreach (var w in new[] { Base, Par })
+            {
+                w.BudgetFrac = BudgetFrac; w.AbsoluteBudget = AbsoluteBudget;
+                w.TargetMs = TargetMs; w.Cap = Cap;
+            }
 
+            // The cost model is fed sim + render time for that crowd. Without the render half
+            // the geometry axis has no measurable cost at all, the RLS correctly prices it at
+            // zero, and the allocator hands every agent the best mesh for free.
             Base.Step(camXZ, yaw, lastBaseMs);
             Par.Step(camXZ, yaw, lastParMs);
-            lastBaseMs = Base.StepMs;
-            lastParMs = Par.StepMs;
+            lastBaseMs = Base.StepMs + RenderBaseMs;
+            lastParMs = Par.StepMs + RenderParMs;
 
             TraceBase[TraceHead] = Base.MaxDivergence();
             TracePar[TraceHead] = Par.MaxDivergence();
@@ -143,8 +162,12 @@ namespace Parity
         {
             rendL.ColourByDivergence = ColourByDivergence; rendL.Cap = Cap;
             rendR.ColourByDivergence = ColourByDivergence; rendR.Cap = Cap;
+            float t = Time.realtimeSinceStartup;
             rendL.Draw(Base, Vector3.zero);
+            RenderBaseMs = (Time.realtimeSinceStartup - t) * 1000f;
+            t = Time.realtimeSinceStartup;
             rendR.Draw(Par, Vector3.zero);
+            RenderParMs = (Time.realtimeSinceStartup - t) * 1000f;
         }
 
         public float TraceCap() { return Cap; }

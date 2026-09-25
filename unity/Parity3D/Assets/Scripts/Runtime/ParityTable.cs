@@ -25,14 +25,32 @@ namespace Parity
             { 1.0, 0.75, 0.5, 0.25 },     // placeholder: screen-space geometric error
         };
 
-        // per-frame state-divergence rate; the visual axes do not diverge simulation state
-        public static readonly double[,] AxisErr =
-        {
-            { B0, B1, B2, 1.0 },
-            { 0.0, 0.05, 0.2, 0.4 },      // placeholder: measured nav deviation
-            { 0.0, 0.0, 0.0, 0.0 },
-            { 0.0, 0.0, 0.0, 0.0 },
-        };
+        // Error column, following sim/tiered.py::phase7_table rather than alloc/config.py's
+        // raw AXIS_ERR. This is the distinction that makes invariant 3 work at all:
+        //
+        //   behaviour tiers 0-2 run the LIVE process, so they diverge by nothing -- 0, not the
+        //     phase 2 truncation NMSE, which measures something else entirely;
+        //   behaviour tier 3 is the surrogate, and diverges at the MEASURED KL rate;
+        //   navigation does not execute in phase 7 (a stated limitation), so its column is 0;
+        //   the two visual axes never diverge simulation state.
+        //
+        // Consequence: rate-0 rows always exist, so the feasibility mask can never empty out
+        // however little headroom an agent has left. Using the NMSE column instead gives every
+        // row a nonzero rate, every agent's ledger runs to the cap, and the mask empties --
+        // which is exactly what the headless smoke test caught.
+        //
+        // The admission rate is e_max (the worst context above 1% occupancy), while the cap is
+        // built from e_sur (the occupancy-weighted mean): reserve the worst case, spend the
+        // actual. Plaza calibration, bench/logs/phase7_plaza_calib.npz:
+        //   e_rate per context [0.00393, 0.01033, 0.05716, 0.00393], occupancy [0, .938, .062, 0]
+        //   e_sur 0.01323 -> cap 300 * e_sur = 3.969;  e_max 0.05716
+        public const double PlazaESur = 0.01323;   // occupancy-weighted mean, sets the cap
+        public const double PlazaEMax = 0.05716;   // worst live context, sets the admission rate
+        public static readonly double[] PlazaERate = { 0.00393, 0.01033, 0.05716, 0.00393 };
+
+        /// <summary>Per-frame divergence rate of a row: only a behaviour-tier-3 surrogate
+        /// diverges, and it is admitted against the conservative rate.</summary>
+        public static double RowErr(int behTier, double eMax) { return behTier == 3 ? eMax : 0.0; }
 
         const int Impostor = 3;
         const int FullIk = 0;
@@ -56,7 +74,8 @@ namespace Parity
         /// <summary>[M] summed per-frame divergence rate.</summary>
         public float[] Err { get; private set; }
 
-        public static ParityTable Build()
+        /// <param name="eMax">measured surrogate KL rate used for admission; see RowErr.</param>
+        public static ParityTable Build(double eMax = PlazaEMax)
         {
             var tiers = new List<byte>();
             var quality = new List<float>();
@@ -70,12 +89,9 @@ namespace Parity
             {
                 if (!Allowed(b, n, a, g)) continue;
                 int[] t = { b, n, a, g };
-                double q = 0.0, e = 0.0;
-                for (int ax = 0; ax < NAxes; ax++)
-                {
-                    q += AxisQuality[ax, t[ax]];
-                    e += AxisErr[ax, t[ax]];
-                }
+                double q = 0.0;
+                for (int ax = 0; ax < NAxes; ax++) q += AxisQuality[ax, t[ax]];
+                double e = RowErr(b, eMax);
                 for (int ax = 0; ax < NAxes; ax++) tiers.Add((byte)t[ax]);
                 quality.Add((float)(q / NAxes));
                 err.Add((float)e);
@@ -90,6 +106,66 @@ namespace Parity
         }
 
         public int TierOf(int row, int axis) => Tiers[row * NAxes + axis];
+
+        /// <summary>Port of alloc/config.py::prune_dominated. Drops rows beaten on quality,
+        /// cost and error by some other row, with at least one strict. Nothing the allocator
+        /// would ever pick is removed, so the result is identical and the inner loop shrinks --
+        /// on the calibrated cost vector, 180 rows down to about 32.
+        ///
+        /// Two properties have to survive the prune or the whole mechanism breaks: at least one
+        /// rate-0 row (or the feasibility mask can empty) and at least one surrogate row (or the
+        /// ledger can never engage). Build() asserts both.</summary>
+        public ParityTable PruneDominated(float[] cost, out int[] keptRows)
+        {
+            var keep = new List<int>();
+            for (int i = 0; i < M; i++)
+            {
+                bool dominated = false;
+                for (int j = 0; j < M; j++)
+                {
+                    // j == i fails the strictness clause, so a row never dominates itself and
+                    // exact duplicates both survive -- same as the NumPy version.
+                    if (Quality[j] >= Quality[i] && cost[j] <= cost[i] && Err[j] <= Err[i] &&
+                        (Quality[j] > Quality[i] || cost[j] < cost[i] || Err[j] < Err[i]))
+                    {
+                        dominated = true;
+                        break;
+                    }
+                }
+                if (!dominated) keep.Add(i);
+            }
+            keptRows = keep.ToArray();
+            var t = new ParityTable
+            {
+                M = keep.Count,
+                Tiers = new byte[keep.Count * NAxes],
+                Quality = new float[keep.Count],
+                Err = new float[keep.Count],
+            };
+            for (int k = 0; k < keep.Count; k++)
+            {
+                for (int ax = 0; ax < NAxes; ax++) t.Tiers[k * NAxes + ax] = Tiers[keep[k] * NAxes + ax];
+                t.Quality[k] = Quality[keep[k]];
+                t.Err[k] = Err[keep[k]];
+            }
+            return t;
+        }
+
+        /// <summary>Rows with no divergence rate. Must be nonzero: the mask can never empty.</summary>
+        public int RateZeroRows()
+        {
+            int c = 0;
+            for (int i = 0; i < M; i++) if (Err[i] <= 0f) c++;
+            return c;
+        }
+
+        /// <summary>Rows running the surrogate. Must be nonzero or the ledger never engages.</summary>
+        public int SurrogateRows()
+        {
+            int c = 0;
+            for (int i = 0; i < M; i++) if (TierOf(i, 0) == 3) c++;
+            return c;
+        }
 
         /// <summary>Row index of the cheapest-fidelity configuration (all axes at tier 3).</summary>
         public int FloorRow()

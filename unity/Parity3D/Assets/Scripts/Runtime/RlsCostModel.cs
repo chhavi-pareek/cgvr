@@ -75,6 +75,20 @@ namespace Parity
             return err;
         }
 
+        /// <summary>Write a directly-calibrated cost vector, as sim/tiered.py does with
+        /// measure_costs() rather than with the online recursion. Pinning every agent at one
+        /// tier and timing it measures each tier in isolation; regressing 13 collinear
+        /// tier-count features out of a mixture does not, and produces coefficients that are
+        /// individually meaningless even when the total prediction is fine.</summary>
+        public void SetCalibrated(double coreMsPerAgent, double[,] axisMsPerAgent)
+        {
+            Theta[0] = coreMsPerAgent;
+            int f = 1;
+            for (int ax = 0; ax < ParityTable.NAxes; ax++)
+                for (int t = 0; t < ParityTable.NTiers - 1; t++)
+                    Theta[f++] = axisMsPerAgent[ax, t];
+        }
+
         public double ThetaCore => Theta[0] > 0.0 ? Theta[0] : 0.0;
 
         /// <summary>[NAxes, NTiers] incremental ms per agent, tier 3 = 0, clamped at 0.</summary>

@@ -42,13 +42,17 @@ namespace Parity
             sb.AppendLine("n,policy,step_ms_mean,step_ms_p95,alloc_ms_mean,evals_mean,fill_mean," +
                           "budget_met_frac,kl_max_end,restorations,beh0,beh1,beh2,beh3");
 
-            var table = d.Table;
+            var table = d.AllocTable;
             foreach (int n in Sizes)
             {
                 foreach (Policy pol in new[] { Policy.Baseline, Policy.Parity })
                 {
                     Progress = $"N={n} {pol}";
-                    var w = new CrowdWorld(pol, n, Director.SceneSize, 1u, table, d.BudgetMs, d.Cap);
+                    var w = new CrowdWorld(pol, n, Director.SceneSize, 1u, table, d.TargetMs, d.Cap)
+                    {
+                        BudgetFrac = d.BudgetFrac, AbsoluteBudget = d.AbsoluteBudget, TargetMs = d.TargetMs,
+                    };
+                    w.ApplyCalibration(d.CalibFloor, CrowdWorld.CalibratedTheta);
                     var step = new List<float>(MeasureFrames);
                     var alloc = new List<float>(MeasureFrames);
                     long evals = 0, fill = 0, met = 0;

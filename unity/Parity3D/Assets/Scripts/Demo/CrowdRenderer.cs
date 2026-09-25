@@ -116,7 +116,9 @@ namespace Parity
                 Quaternion rot = Quaternion.Euler(0f, yaw, 0f);
                 Color col = Tint(w, i);
                 // a frozen gait is what animation tier 3 looks like; Phase simply stops moving
-                float swing = w.Anim[i] < 3 ? Mathf.Sin(w.Phase[i]) : 0f;
+                // the decoded gait, not a raw sine: a lower animation tier blends fewer
+                // joints, so the swing visibly coarsens before it freezes at tier 3
+                float swing = w.Anim[i] < 3 ? w.JointBlend[i] : 0f;
                 float bob = w.Anim[i] < 3 ? Mathf.Abs(Mathf.Cos(w.Phase[i])) * 0.045f : 0f;
 
                 for (int k = 0; k < parts.Length; k++)

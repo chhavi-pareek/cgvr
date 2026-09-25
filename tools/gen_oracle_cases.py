@@ -17,6 +17,7 @@ import numpy as np
 from alloc.config import build_table
 from alloc.costmodel import row_costs_from_theta
 from alloc.serial import SerialAllocator
+from sim.tiered import phase7_table
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJ = os.path.join(HERE, "unity", "OracleCheck")
@@ -24,7 +25,11 @@ CASES = os.path.join(PROJ, "cases.json")
 RESULTS = os.path.join(PROJ, "results.json")
 FILL_MAX = 100000  # match Python's unbounded fill so the two run the same algorithm
 
-TABLE = build_table()
+# The C# port carries the phase-7 error column (only the surrogate diverges), not
+# alloc/config.py's raw truncation NMSE, so the oracle has to be the same table or the
+# feasibility masks differ and every comparison is meaningless.
+E_MAX = 0.05716  # ParityTable.PlazaEMax; bench/logs/phase7_plaza_calib.npz
+TABLE = phase7_table(E_MAX)
 
 
 def instance(seed, n, mask):

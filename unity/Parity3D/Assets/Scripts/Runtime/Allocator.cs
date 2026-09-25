@@ -29,6 +29,8 @@ namespace Parity
         public float Utility;
         public int Evals;
         public int FillSteps;
+        /// <summary>Agents the mask left with no feasible row. Must be 0; see EvalJob.</summary>
+        public int Starved;
         public float Slack;
         public bool Infeasible;  // budget below the error-feasible floor; mask still honoured
         public bool Forced;      // hit EvalMax before the stopping rule
@@ -42,7 +44,7 @@ namespace Parity
         [ReadOnly] public NativeArray<float> Salience, Headroom, Q, C, E;
         [ReadOnly] public float Lam;
         [ReadOnly] public int M;
-        [WriteOnly] public NativeArray<int> Assign;
+        [WriteOnly] public NativeArray<int> Assign, Starved;
         [WriteOnly] public NativeArray<float> ChosenCost, ChosenUtil;
 
         public void Execute(int i)
@@ -62,6 +64,16 @@ namespace Parity
                     best = j; bestScore = score; bestCost = C[j]; bestUtil = u;
                 }
             }
+            if (best < 0)
+            {
+                // alloc/serial.py raises "agent with no feasible configuration" here. Rate-0
+                // rows always exist (ParityTable.RowErr), so reaching this means the error
+                // column is wrong, not that the crowd is too big. Fall back to the cheapest
+                // row and let the caller count it rather than write -1 and corrupt the result.
+                best = 0; bestCost = C[0]; bestUtil = s * Q[0];
+                Starved[i] = 1;
+            }
+            else Starved[i] = 0;
             Assign[i] = best; ChosenCost[i] = bestCost; ChosenUtil[i] = bestUtil;
         }
     }
@@ -110,7 +122,7 @@ namespace Parity
         NativeArray<float> q, c, e;         // table columns in (cost asc, quality desc) order
         NativeArray<int> rowOf;             // sorted index -> original row index
         NativeArray<float> chosenCost, chosenUtil, fillRatio;
-        NativeArray<int> fillRow;
+        NativeArray<int> fillRow, starved;
         NativeArray<int> assignSorted;
         int capacity;
         float warmLam = -1f;                // < 0 means cold
@@ -131,12 +143,14 @@ namespace Parity
             if (capacity >= n) return;
             Dispose(chosenCost); Dispose(chosenUtil); Dispose(fillRatio);
             if (fillRow.IsCreated) fillRow.Dispose();
+            if (starved.IsCreated) starved.Dispose();
             if (assignSorted.IsCreated) assignSorted.Dispose();
             capacity = n;
             chosenCost = new NativeArray<float>(n, Alloc.Persistent);
             chosenUtil = new NativeArray<float>(n, Alloc.Persistent);
             fillRatio = new NativeArray<float>(n, Alloc.Persistent);
             fillRow = new NativeArray<int>(n, Alloc.Persistent);
+            starved = new NativeArray<int>(n, Alloc.Persistent);
             assignSorted = new NativeArray<int>(n, Alloc.Persistent);
         }
 
@@ -170,6 +184,7 @@ namespace Parity
             {
                 Salience = s, Headroom = hr, Q = q, C = c, E = e, Lam = lam, M = m,
                 Assign = outAssign, ChosenCost = chosenCost, ChosenUtil = chosenUtil,
+                Starved = starved,
             }.Schedule(n, 128).Complete();
             double tc = 0.0, tu = 0.0;
             for (int i = 0; i < n; i++) { tc += chosenCost[i]; tu += chosenUtil[i]; }
@@ -286,11 +301,13 @@ namespace Parity
                     slack -= dc; util += du;
                 }
             }
-            for (int i = 0; i < n; i++) assign[i] = rowOf[assignSorted[i]];
+            int nStarved = 0;
+            for (int i = 0; i < n; i++) { assign[i] = rowOf[assignSorted[i]]; nStarved += starved[i]; }
             return new AllocResult
             {
                 Lambda = lam, Cost = budget - slack, Utility = util, Evals = evals,
                 FillSteps = steps, Slack = slack, Infeasible = infeasible, Forced = forced,
+                Starved = nStarved,
             };
         }
 
@@ -302,6 +319,7 @@ namespace Parity
             if (rowOf.IsCreated) rowOf.Dispose();
             Dispose(chosenCost); Dispose(chosenUtil); Dispose(fillRatio);
             if (fillRow.IsCreated) fillRow.Dispose();
+            if (starved.IsCreated) starved.Dispose();
             if (assignSorted.IsCreated) assignSorted.Dispose();
         }
     }
