@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>OracleCheck</AssemblyName>
+    <RootNamespace>OracleCheck</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="UnityShim.cs" />
+    <Compile Include="Program.cs" />
+    <!-- the ported runtime, compiled unmodified straight out of the Unity project -->
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/ParityTable.cs" />
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/Allocator.cs" />
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/ErrorLedger.cs" />
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/RlsCostModel.cs" />
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/MassLodAssigner.cs" />
+  </ItemGroup>
+</Project>

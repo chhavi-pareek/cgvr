@@ -6,3 +6,7 @@ latent/cache/
 *.dylib
 .venv/
 figures/out/
+unity/OracleCheck/bin/
+unity/OracleCheck/obj/
+unity/OracleCheck/cases.json
+unity/OracleCheck/results.json

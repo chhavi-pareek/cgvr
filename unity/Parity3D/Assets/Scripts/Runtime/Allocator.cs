@@ -181,7 +181,6 @@ namespace Parity
                                  int n, float budgetMs, NativeArray<int> assign)
         {
             Ensure(n);
-            var res = new AllocResult();
             int evals = 0;
 
             // lam = 0 first: if the crowd already fits, nothing has to be priced.
