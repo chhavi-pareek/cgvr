@@ -11,7 +11,7 @@ if [ "${1:-}" = quick ]; then
 else
   for k in 1 2 3; do
     echo "seed $k of 3 ..."
-    "$BIN" $MODE $COMMON -seed $k -targets 8,10,12,14,17,20 -policies masslod,timeslice,knapsack,knapsack_fullsim,parity,parity_sw0 -tag seed$k -logFile Results/seed$k.log
+    "$BIN" $MODE $COMMON -seed $k -targets 10,13,16,20,24,30,38 -policies masslod,timeslice,knapsack,knapsack_fullsim,parity,parity_sw0 -tag seed$k -logFile Results/seed$k.log
     [ $k -lt 3 ] && { echo "cooling down for 3 minutes ..."; sleep 180; }
   done
 fi
