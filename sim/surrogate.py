@@ -263,7 +263,7 @@ class Surrogate:
         return dict(plug=plug, corrected=corrected, upper=upper, kl_coarse=kc,
                     inflation=boot.mean(0) - plug)
 
-    def held_out_tables(self, Cf_eval, delta=0.05, draws=200, rng=None):
+    def held_out_tables(self, Cf_eval, delta=0.05, draws=200, rng=None, min_count=50):
         """Every divergence table re-estimated on independent counts, noise inflation removed.
 
         One estimator for both policies: the surrogate's drift (kl_coarse), the baseline's
@@ -314,9 +314,13 @@ class Surrogate:
         corr = lambda plug, mean: np.maximum(2.0 * plug - mean, 0.0)  # noqa: E731
         kl_coarse = corr(kc0, kcs.mean(0))
         ucb = np.maximum(2.0 * kc0 - np.quantile(kcs, delta / kc0.size, axis=0), kl_coarse)
+        # per fine row, the correction is only as good as the row's counts: below min_count
+        # transitions it amplifies noise (a hub cell went 0.20 -> 0.68), so keep the plug-in there
+        thin = n_row < min_count
+        rowwise = lambda plug, mean: np.where(thin, plug, corr(plug, mean))  # noqa: E731
         return dict(kl_coarse=kl_coarse, kl_coarse_ucb=ucb,
-                    kl_tick={k: corr(tick0[k], ticks[k]) for k in tick0},
-                    kl_frozen=corr(frozen0, frozens),
+                    kl_tick={k: rowwise(tick0[k], ticks[k]) for k in tick0},
+                    kl_frozen=rowwise(frozen0, frozens),
                     e_rate=np.einsum("cR,cR->c", self.pi_c, kl_coarse),
                     e_rate_ucb=np.einsum("cR,cR->c", self.pi_c, ucb))
 

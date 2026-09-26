@@ -540,10 +540,17 @@ def calibrate(scene, n=200, frames=6000, seed=0, force=False, version=None):
         r.sur.cap_nats = 300.0 * float(r.sur.e_rate @ r.sur.ctx_freq)
         held = Run(scene, n, "calib", seed=seed + 1).run(frames, log=False)
         other = type(r.sur)(r.proc).fit(np.stack(held.ctx_log)[300:], np.stack(held.d_log)[300:])
+        # the surrogate's drift must be judged on counts it was not fitted to: held-out only
         t = r.sur.held_out_tables(other.Cf)
-        for k in ("kl_coarse", "kl_coarse_ucb", "kl_frozen", "e_rate", "e_rate_ucb"):
+        for k in ("kl_coarse", "kl_coarse_ucb", "e_rate", "e_rate_ucb"):
             setattr(r.sur, k, t[k])
-        r.sur.kl_tick = t["kl_tick"]
+        # MassLOD's frame-skip and frozen drift describe the reference alone, with nothing
+        # fitted, so both runs are pooled: on the held-out run alone a rarely-visited context
+        # (hub, 2.8% occupancy) has rows with ZERO transitions, whose "estimate" is the prior,
+        # and the single worst baseline agent read 186 nats against 51 for that reason alone
+        pooled = r.sur.held_out_tables(r.sur.Cf + other.Cf)
+        r.sur.kl_frozen = pooled["kl_frozen"]
+        r.sur.kl_tick = pooled["kl_tick"]
     kappa = r.crossings / max(frames - 300, 1) if scene == "corridor" else np.inf
     theta = measure_costs(scene, n, r.sur, kappa)
     r.sur.save(path)
