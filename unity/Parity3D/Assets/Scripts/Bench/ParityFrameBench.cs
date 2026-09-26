@@ -219,8 +219,25 @@ public static class ParityFrameBench
             Log($"N={n} navigation quality (share of full ORCA's effect kept): {nq[0]:F3} {nq[1]:F3} {nq[2]:F3} {nq[3]:F3}");
             CrowdWorld.CalibrateAxes(spec, table, n, out floor);
             baseTheta = CrowdWorld.MeasureAxes(spec, table, n, Policy.Baseline, out baseFloor);
+            // Geometry at the size it is used at too. At 400 agents the scene's fixed cost can
+            // swamp the per-agent differences, and noise then decides their sign: on one laptop
+            // a tier-1 mesh measured cheaper than an impostor, was priced at 0, went to everyone,
+            // and no budget could take it back. A richer tier is never priced below a cheaper one.
+            Orbit(cam, spec, 0f, out _, out _);
+            var gw = new CrowdWorld(Policy.Parity, n, spec, 99u, table);
+            var geoN = rend.MeasureGeometry(gw, cam);
+            var gcpuN = rend.GeometryCpu;
+            int drawnN = rend.Drawn;
+            gw.Dispose();
+            var thGeo = new double[ParityTable.NTiers];
+            for (int t = ParityTable.NTiers - 2; t >= 0; t--) thGeo[t] = Math.Max(geoN[t] - geoN[3], thGeo[t + 1]);
             for (int t = 0; t < 3; t++)
-                CrowdWorld.CalibratedTheta[3, t] = baseTheta[3, t] = Math.Max(geo[t] - geo[3], 0.0);
+            {
+                CrowdWorld.CalibratedTheta[3, t] = baseTheta[3, t] = thGeo[t];
+                CrowdWorld.GeoGpuTheta[t] = Math.Min(Math.Max((geoN[t] - gcpuN[t]) - (geoN[3] - gcpuN[3]), 0.0), thGeo[t]);
+            }
+            Log($"N={n} geometry us per drawn agent over the impostor: {thGeo[0] * 1000:F2}/{thGeo[1] * 1000:F2}/{thGeo[2] * 1000:F2}" +
+                $" (raw {geoN[0] * 1000:F2} {geoN[1] * 1000:F2} {geoN[2] * 1000:F2} {geoN[3] * 1000:F2}, drawn {drawnN} of {n})");
             if (options != null)
             {
                 AnchorOptions(options, rawOptTheta, gq, spec, table, n, rend, cam, applyOption, probe, rt);

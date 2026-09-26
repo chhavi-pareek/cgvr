@@ -98,10 +98,24 @@ class DriftBound:
     #              m calibration replies bought for uniformly random decisions and kept out of the
     #              predictor. Too few of them to form the quantile and the charge is E_MAX, so the
     #              bound degrades to the worst case rather than to a guess.
-    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5):
+    #   crc        the same prediction plus a margin from conformal risk control (Angelopoulos et
+    #              al. 2022) on the SIZE of the under-charge, not its probability -- a ledger adds
+    #              decisions up, and per-decision coverage says nothing about how far the misses
+    #              go. The margin is the smallest lam with (m/(m+1)) R(lam) + E_MAX/(m+1) <= 0 for
+    #              the loss (true - charged)+ - eps * charged (non-increasing in lam, at most
+    #              E_MAX), so for an exchangeable decision E[(true - charged)+] <= eps E[charged].
+    #              Over a stretch (a stopping time of i.i.d. decisions, by Wald) the expected
+    #              under-charge is at most eps times what was charged, at most eps * cap'; with the
+    #              ledger run to cap' = cap / (1 + eta), Markov bounds the chance that a stretch's
+    #              TRUE drift passes the cap by eps / eta = delta. delta = 1 is the expectation
+    #              version: a stretch's expected true drift is within the cap. The margin needs
+    #              about E_MAX / (eps E[charge]) calibration replies to exist at all, so a small
+    #              delta is only affordable when the model serves a large share of decisions.
+    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25):
         self.p = {}                    # context -> LLM distribution, from paid replies
         self.exact = {}
         self.novel, self.bound, self.alpha, self.tau = novel, bound, alpha, tau
+        self.delta, self.eta = delta, eta
         self.train, self.cal = [], []  # (ctx, p) of paid replies; cal = the random ones
         self.charge = np.full(N_CTX, E_MAX)
         self.q_hat = np.inf
@@ -138,6 +152,9 @@ class DriftBound:
             self.charge = np.clip(pred, 0.0, E_MAX)
             return
         m = len(self.cal)
+        if self.bound == "crc":
+            self._risk_control(sur, pred)
+            return
         k = int(np.ceil((m + 1) * (1 - self.alpha)))
         if k > m:
             self.q_hat = np.inf
@@ -146,6 +163,24 @@ class DriftBound:
         cc = np.array([x for x, _ in self.cal])
         cd = kl(sur(cc), np.vstack([p for _, p in self.cal]))
         self.q_hat = float(np.sort(cd - pred[cc])[k - 1])
+        self.charge = np.clip(pred + self.q_hat, 0.0, E_MAX)
+
+    def _risk_control(self, sur, pred):
+        m = len(self.cal)
+        if m == 0:
+            return
+        eps = self.delta * self.eta
+        cc = np.array([x for x, _ in self.cal])
+        cd = kl(sur(cc), np.vstack([p for _, p in self.cal]))
+        lam = np.linspace(0.0, E_MAX, 922)
+        charged = np.minimum(pred[cc][None, :] + lam[:, None], E_MAX)
+        risk = (np.maximum(cd[None, :] - charged, 0.0) - eps * charged).mean(1)
+        ok = (m / (m + 1)) * risk + E_MAX / (m + 1) <= 0.0
+        if not ok.any():                      # fewer than ~1/eps calibration replies yet
+            self.q_hat = np.inf
+            self.charge = np.full(N_CTX, E_MAX)
+            return
+        self.q_hat = float(lam[np.argmax(ok)])
         self.charge = np.clip(pred + self.q_hat, 0.0, E_MAX)
 
     def __call__(self, c):
@@ -161,7 +196,8 @@ class Run:
     """policy: parity | view_lod | round_robin | surrogate_only | reference"""
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
-                 calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1):
+                 calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
+                 delta=0.05, eta=0.25):
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
         self.rng = np.random.default_rng(seed)
         self.st = Station(n, np.random.default_rng(seed + 1))
@@ -169,14 +205,22 @@ class Run:
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
         self.sur = Distilled() if surrogate == "distilled" else Marginal()
-        self.drift = DriftBound(novel, bound, alpha)
+        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta)
+        # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
+        # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
+        # cannot under-charge) still runs to the cap -- else before calibration nothing fits
+        self.cap_eff = cap / (1 + eta) if novel and bound == "crc" else cap
         # novel contexts: this share of the call budget goes to uniformly random decisions, whose
         # replies calibrate the conformal margin (and still serve those decisions)
-        self.explore = explore if novel and bound == "conformal" else 0.0
+        self.explore = explore if novel and bound in ("conformal", "crc") else 0.0
         self.calib_req = set()
         self.refit_every, self.seen = refit_every, 0
         self.L = np.zeros(n)                                  # charged ledger
         self.D = np.zeros(n)                                  # true drift since last LLM decision
+        self.nsur = np.zeros(n, np.int64)                     # surrogate decisions in this stretch
+        self.Ls = np.zeros(n)                                 # the estimated (non-E_MAX) part of L
+        self.over = np.zeros(n, bool)                         # true drift passed the cap in it
+        self.gen_seen = self.st.gen.copy()
         self.inflight = np.zeros(n, bool)
         self.pending = {}                                     # agent -> (ctx, p, generation)
         self.stalled = set()                                  # agents waiting for the model
@@ -186,7 +230,7 @@ class Run:
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
-                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0)
+                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0)
         self.dmax_t = []
         if policy not in ("reference",):
             # a warm-up batch so the surrogate and the drift bound start from something
@@ -207,6 +251,26 @@ class Run:
             self.sur.fit()
         self.drift.refresh(self.sur)
 
+    def _close(self, idx):
+        """End the stretches of these slots: an LLM decision, or a new person in the slot (who
+        starts with a clean ledger -- the last person's drift is not theirs)."""
+        idx = np.atleast_1d(idx)
+        had = idx[self.nsur[idx] > 0]
+        self.stats["stretches"] += int(had.size)
+        self.stats["overflowed"] += int(self.over[had].sum())
+        self.L[idx] = 0.0; self.Ls[idx] = 0.0; self.D[idx] = 0.0; self.nsur[idx] = 0; self.over[idx] = False
+
+    def _respawned(self):
+        new = np.flatnonzero(self.st.gen != self.gen_seen)
+        if new.size:
+            self._close(new)
+            self.gen_seen[new] = self.st.gen[new]
+
+    def _limit(self, i, e):
+        """The ledger limit a surrogate decision charged e must fit under."""
+        est = (np.asarray(e) < E_MAX) | (self.Ls[i] > 0)
+        return np.where(est, self.cap_eff, self.cap)
+
     # -- one second ----------------------------------------------------------------------
     def salience(self, step):
         view = (step // VIEW_PERIOD) % N_Z
@@ -215,6 +279,7 @@ class Run:
     def step(self, t):
         st = self.st
         st.tick(t)
+        self._respawned()
         for agent, c, p in self.server.poll(t):
             self.inflight[agent] = False
             if self.req_dec.get(agent, -1) == self.ndec[agent]:
@@ -240,6 +305,7 @@ class Run:
                     acts.append(a); go.append(i)
             if go:
                 st.apply(np.array(go), np.array(acts), t)
+                self._respawned()
         self._schedule(t)
         self.stats["agent_s"] += self.n
         self.stats["view_s"] += int((self.salience(t) == 1.0).sum())
@@ -258,8 +324,7 @@ class Run:
             self.stats["stale"] += 1
         if rep is not None and rep[0] == c:
             self.stats["llm"] += 1
-            self.D[i] = 0.0
-            self.L[i] = 0.0
+            self._close(i)
             self.stalled.discard(i)
             self.ndec[i] += 1
             return int(rng.choice(N_ACT, p=rep[1]))
@@ -268,7 +333,7 @@ class Run:
             # was on its way); acting on it would be drift nobody charged, so it is discarded
             self.stats["stale"] += 1
         e = float(self.drift(c)[0])
-        if self.policy == "parity" and self.L[i] + e > self.cap:
+        if self.policy == "parity" and self.L[i] + e > self._limit(i, e):
             # the ledger cannot absorb another surrogate decision: wait for the model
             self.st.busy_until[i] = t + 1
             self.stats["stall"] += 1
@@ -283,7 +348,11 @@ class Run:
         q = self.sur(c)[0]
         d = float(kl(q, P[c])[0])
         self.L[i] += e
+        if e < E_MAX:
+            self.Ls[i] += e
         self.D[i] += d
+        self.nsur[i] += 1
+        self.over[i] |= self.D[i] > self.cap + 1e-9
         self.stats["covered"] += int(d <= e + 1e-12)
         self.stats["sur"] += 1
         self.stats["kl"] += d
@@ -336,7 +405,7 @@ class Run:
             e = self.drift(xhat)
             # an agent whose ledger cannot take its next surrogate decision is asked for now,
             # even too late to avoid a wait; anyone else only if the reply can arrive in time
-            must = self.L[cand] + e > self.cap
+            must = self.L[cand] + e > self._limit(cand, e)
             val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
             order = list(np.flatnonzero(must)) + [j for j in np.argsort(-val) if not must[j] and val[j] >= 0]
             for j in order:
@@ -383,6 +452,9 @@ class Run:
     def summary(self):
         s, st = self.stats, self.st
         hours = s["agent_s"] / 3600.0
+        open_ = self.nsur > 0
+        stretches = s["stretches"] + int(open_.sum())
+        overflowed = s["overflowed"] + int(self.over[open_].sum())
         dec = s["llm"] + s["sur"]
         return dict(policy=self.policy, n=self.n, llm_frac=s["llm"] / max(dec, 1),
                     calls_per_s=self.server.calls / max(len(self.dmax_t), 1), kl_per_agent_h=s["kl"] / max(hours, 1e-9),
@@ -390,4 +462,5 @@ class Run:
                     dmax=s["dmax"], over_cap_frac=s["over_cap"] / max(s["agent_s"], 1),
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
+                    stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
                     boarded=st.boarded, missed=st.missed, left=st.left, turned=st.turned_away)
