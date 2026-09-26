@@ -104,9 +104,12 @@ def build(n=5000, seed=0):
     return texts, ids, np.array(sal, np.float32), make_targets(ids, rng)
 
 
-def load():
-    texts = [json.loads(l)["text"] for l in (DATA / "corpus.jsonl").open()]
-    t = np.load(DATA / "targets.npz")
+def load(corpus="template"):
+    """corpus: "template" (this module's grammar) or "llm" (latent/llm_corpus.py: the same field
+    combinations described and salience-rated by a language model)."""
+    suffix = "" if corpus == "template" else f"_{corpus}"
+    texts = [json.loads(l)["text"] for l in (DATA / f"corpus{suffix}.jsonl").open()]
+    t = np.load(DATA / f"targets{suffix}.npz")
     return texts, {k: t[k] for k in GROUPS}, t["salience"]
 
 

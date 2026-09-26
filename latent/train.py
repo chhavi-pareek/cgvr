@@ -25,8 +25,8 @@ class AE(nn.Module):
         return out
 
 
-def get_data():
-    texts, tg, _ = load()
+def get_data(corpus="template"):
+    texts, tg, _ = load(corpus)
     x = torch.from_numpy(embed(texts))
     y = {k: torch.from_numpy(v) for k, v in tg.items()}
     perm = np.random.default_rng(SPLIT_SEED).permutation(len(x))
@@ -42,9 +42,9 @@ def head_err(pred, y, idx, names, var):
     return sum(((pred[k] - y[k][idx]) ** 2).sum(1).mean() for k in names) / var
 
 
-def train(seed, nested, epochs=200, bs=256, lr=2e-3):
+def train(seed, nested, epochs=200, bs=256, lr=2e-3, corpus="template"):
     torch.manual_seed(seed)
-    x, y, tr, _ = get_data()
+    x, y, tr, _ = get_data(corpus)
     m = AE(x.shape[1])
     opt = torch.optim.Adam(m.parameters(), lr=lr)
     xv = x[tr].var(0).sum()
@@ -70,7 +70,8 @@ def train(seed, nested, epochs=200, bs=256, lr=2e-3):
     else:
         order, fill = torch.argsort(z.var(0), descending=True), z.mean(0)
     CACHE.mkdir(exist_ok=True)
-    torch.save({"state": m.state_dict(), "order": order, "fill": fill}, CACHE / f"ae_{'nested' if nested else 'plain'}_s{seed}.pt")
+    tag = "" if corpus == "template" else f"_{corpus}"
+    torch.save({"state": m.state_dict(), "order": order, "fill": fill}, CACHE / f"ae_{'nested' if nested else 'plain'}{tag}_s{seed}.pt")
     return m, order, fill
 
 
