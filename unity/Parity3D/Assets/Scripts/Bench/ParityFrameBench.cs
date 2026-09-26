@@ -55,6 +55,9 @@ public static class ParityFrameBench
         Log($"{build}, decisions {(Pipelined ? "pipelined" : "serial")}");
         Log($"machine: {SystemInfo.processorType} x{SystemInfo.processorCount}, {SystemInfo.systemMemorySize} MB; " +
             $"{SystemInfo.graphicsDeviceName} ({SystemInfo.graphicsDeviceType}, {SystemInfo.graphicsMemorySize} MB); {SystemInfo.operatingSystem}");
+        // anything else in the scene is rendered by the bench's cameras too, so say what is there
+        Log($"scene at start: {UnityEngine.Object.FindObjectsByType<Light>(FindObjectsSortMode.None).Length} lights, " +
+            $"demo director {(GameObject.Find("PARITY Director") != null ? "PRESENT" : "absent")}");
         if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
             Debug.LogError("[FrameBench] no graphics device: run without -nographics (and without -batchmode if this persists)");
         int failures = 0;

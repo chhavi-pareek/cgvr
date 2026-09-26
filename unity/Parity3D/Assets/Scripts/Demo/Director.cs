@@ -24,6 +24,9 @@ namespace Parity
         static void Boot()
         {
             if (Instance != null) return;
+            // a standalone bench run (ParityFrameBench, -parityBench) builds its own set: a demo set
+            // and sun here too would be rendered by every bench frame
+            if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-parityBench") >= 0) return;
             var go = new GameObject("PARITY Director");
             DontDestroyOnLoad(go);
             Instance = go.AddComponent<Director>();
