@@ -139,6 +139,19 @@ namespace Parity
         public int RowOf(int s, int v) => rowOf[s * nV + v];
 
         /// <summary>Split an additive row cost into state (carrying the core) and view halves.</summary>
+        /// <summary>Re-prices the view half with a geometry column other than the table's (a
+        /// global render setting changes how each geometry tier looks); null restores the table's.</summary>
+        public void SetGeometryQuality(ParityTable t, double[] geometryQuality)
+        {
+            for (int k = 0; k < keyToV.Length; k++)
+            {
+                int v = keyToV[k];
+                if (v < 0) continue;
+                int a = k / ParityTable.NTiers, g = k % ParityTable.NTiers;
+                qV[v] = (t.AxisQ[2, a] + (geometryQuality != null ? geometryQuality[g] : t.AxisQ[3, g])) / ParityTable.NAxes;
+            }
+        }
+
         public void SetCosts(float[] rowCost)
         {
             // against the CHEAPEST view pair: a view cost is a non-negative increment over the

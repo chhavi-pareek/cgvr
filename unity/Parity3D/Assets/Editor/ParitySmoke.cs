@@ -21,11 +21,11 @@ public static class ParitySmoke
         int failures = 0;
         try
         {
-            var table = ParityTable.Build(surrogateNav: true);
+            var table = ParityTable.Build(python: true);
             Log($"table rows m = {table.M} (expected 180)");
             if (table.M != 180) { Err($"table has {table.M} rows, not 180"); failures++; }
             int engineRows = ParityTable.Build().M;
-            if (engineRows != 135) { Err($"engine table has {engineRows} rows, not 135"); failures++; }
+            if (engineRows != 117) { Err($"engine table has {engineRows} rows, not 117"); failures++; }
 
             var size = SceneSpec.Get(SceneKind.Plaza);
             double floor;

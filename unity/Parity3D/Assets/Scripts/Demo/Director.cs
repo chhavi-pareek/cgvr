@@ -50,7 +50,7 @@ namespace Parity
         /// agent, each viewer's own mesh detail, one budget (alloc/factored.py, V = 2).</summary>
         public bool CoOp;
         public bool PopLedger = true;
-        public bool SwitchCost = true;
+        public bool SwitchCost = false;
         public bool Occlusion = true;
         public bool Post = true;
         public bool Paused;
@@ -176,13 +176,26 @@ namespace Parity
         }
 
         /// <summary>The pixel judge, from a standing eye height at the view-salience distance.</summary>
-        public static double[] MeasureQuality(CrowdRenderer r, CrowdWorld jw, Camera cam, SceneSpec s)
+        public static double[] MeasureQuality(CrowdRenderer r, CrowdWorld jw, Camera cam, SceneSpec s) =>
+            MeasureQuality(r, jw, cam, s, null, 0.0, out _, out _);
+
+        public static double[] MeasureQuality(CrowdRenderer r, CrowdWorld jw, Camera cam, SceneSpec s, Color32[] reference,
+                                              double referenceAbsent, out Color32[] ownReference, out double ownAbsent)
         {
             CrowdRenderer.JudgeLayout(jw, s.JudgeAt, s.JudgeDir);
             var eye = s.JudgeAt - s.JudgeDir * jw.ViewD0;
             cam.transform.position = new Vector3(eye.x, 1.6f, eye.y);
             cam.transform.LookAt(new Vector3(s.JudgeAt.x, 0.9f, s.JudgeAt.y) + new Vector3(s.JudgeDir.x, 0f, s.JudgeDir.y));
-            return r.MeasureGeometryQuality(jw, cam);
+            return r.MeasureGeometryQuality(jw, cam, reference, referenceAbsent, out ownReference, out ownAbsent);
+        }
+
+        public static double[,] MeasureViewGrid(CrowdRenderer r, CrowdWorld jw, Camera cam, SceneSpec s)
+        {
+            CrowdRenderer.JudgeLayout(jw, s.JudgeAt, s.JudgeDir);
+            var eye = s.JudgeAt - s.JudgeDir * jw.ViewD0;
+            cam.transform.position = new Vector3(eye.x, 1.6f, eye.y);
+            cam.transform.LookAt(new Vector3(s.JudgeAt.x, 0.9f, s.JudgeAt.y) + new Vector3(s.JudgeDir.x, 0f, s.JudgeDir.y));
+            return r.MeasureViewQuality(jw, cam);
         }
 
         public void Rebuild(int n)

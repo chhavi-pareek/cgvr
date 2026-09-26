@@ -361,7 +361,13 @@ namespace Parity
         /// removing the figures altogether makes. So quality 1 is indistinguishable from tier 0
         /// and 0 is as wrong as drawing nobody. The set, the sky and the contact shadows are the
         /// same in every render and cancel.</summary>
-        public double[] MeasureGeometryQuality(CrowdWorld w, Camera cam)
+        public double[] MeasureGeometryQuality(CrowdWorld w, Camera cam) =>
+            MeasureGeometryQuality(w, cam, null, 0.0, out _, out _);
+
+        /// <summary>As above, judged against another reference (a full-setting tier-0 image and its
+        /// crowd mass) when one is given; returns this setting's own tier-0 image and mass.</summary>
+        public double[] MeasureGeometryQuality(CrowdWorld w, Camera cam, Color32[] reference, double referenceAbsent,
+                                               out Color32[] ownReference, out double ownAbsent)
         {
             var rt = cam.targetTexture;
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
@@ -392,10 +398,61 @@ namespace Parity
                 for (int i = 0; i < w.N; i++) w.Geo[i] = (sbyte)g;
                 img[g] = Grab(true);
             }
-            double absent = Diff(empty, img[0]);
+            ownReference = img[0];
+            ownAbsent = Diff(empty, img[0]);
+            var against = reference ?? img[0];
+            double absent = reference != null ? referenceAbsent : ownAbsent;
             var q = new double[img.Length];
             for (int g = 0; g < img.Length; g++)
-                q[g] = absent > 0.0 ? System.Math.Max(0.0, 1.0 - Diff(img[g], img[0]) / absent) : 1.0;
+                q[g] = absent > 0.0 ? System.Math.Max(0.0, 1.0 - Diff(img[g], against) / absent) : 1.0;
+            Look = keepLook;
+            Object.DestroyImmediate(tex);
+            return q;
+        }
+
+        /// <summary>The pixel judge over every (animation, geometry) pair, against animation 0 and
+        /// geometry 0, averaged over a few gait phases: [a, g], NaN where the table forbids the
+        /// pair. A diagnostic for the animation column, which stays in the latent's unit
+        /// (invariant 2).</summary>
+        public double[,] MeasureViewQuality(CrowdWorld w, Camera cam, int phases = 3)
+        {
+            var rt = cam.targetTexture;
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
+            var keepLook = Look;
+            Look = Look.Natural;
+            for (int i = 0; i < w.N; i++) { w.Walk[i] = 1f; w.Dmeas[i] = 0f; }
+            Color32[] Grab(bool draw)
+            {
+                if (draw) Draw(w, cam);
+                cam.Render();
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0, false);
+                tex.Apply(false);
+                RenderTexture.active = prev;
+                return tex.GetPixels32();
+            }
+            void Set(int a, int g)
+            {
+                for (int i = 0; i < w.N; i++) { w.AnimV[0][i] = (sbyte)a; w.Geo[i] = (sbyte)g; }
+                w.Pose(a);
+            }
+            var q = new double[ParityTable.NTiers, ParityTable.NTiers];
+            Grab(true);
+            var empty = Grab(false);
+            for (int p = 0; p < phases; p++)
+            {
+                for (int i = 0; i < w.N; i++) w.Phase[i] = 0.9f * i + 2.1f * p;
+                Set(0, 0);
+                var reference = Grab(true);
+                double absent = Diff(empty, reference);
+                for (int a = 0; a < ParityTable.NTiers; a++)
+                    for (int g = 0; g < ParityTable.NTiers; g++)
+                    {
+                        Set(a, g);
+                        q[a, g] += (absent > 0.0 ? System.Math.Max(0.0, 1.0 - Diff(Grab(true), reference) / absent) : 1.0) / phases;
+                    }
+            }
             Look = keepLook;
             Object.DestroyImmediate(tex);
             return q;

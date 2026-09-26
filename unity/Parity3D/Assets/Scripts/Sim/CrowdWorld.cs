@@ -82,8 +82,10 @@ namespace Parity
         public bool PopLedger = true;
         /// <summary>Price on changing an agent's view pair, per unit of its view salience
         /// (alloc/factored.py switch_cost): a preference in the objective that lowers the average
-        /// pop rate, where the pop ledger only bounds the worst. 0 turns it off.</summary>
-        public float SwitchCost = 0.12f;
+        /// pop rate, where the pop ledger only bounds the worst. 0 turns it off. Off by default:
+        /// judged in pixels (ParityFrameBench image and pop), it bought few pops for much image,
+        /// where the ledger alone cut pops ~17x for far less.</summary>
+        public float SwitchCost = 0f;
         /// <summary>The same price on changing an agent's state pair, per unit of its state
         /// salience (alloc/factored.py state_switch_cost): frame-time noise moves the budget every
         /// frame, and this keeps marginal agents from flipping with it. Off by default: in the dense
@@ -95,6 +97,10 @@ namespace Parity
         int[] prevS;
         /// <summary>View salience from visible pixels in a coverage buffer instead of distance alone.</summary>
         public bool Occlusion = true;
+        /// <summary>View salience is the agent's visible pixels in units of one agent's footprint
+        /// at ViewD0 -- a nearer agent is worth its larger image, as Funkhouser's benefit and the
+        /// pixel judge both count it. The cap is a numeric guard only.</summary>
+        public float SalienceCap = 64f;
         public readonly CoverageBuffer Coverage = new CoverageBuffer();
         readonly Matrix4x4[] viewProj = new Matrix4x4[MaxViewers];
         readonly Vector2[] proj = new Vector2[MaxViewers];
@@ -168,6 +174,31 @@ namespace Parity
         public readonly SceneSpec Spec;
         public readonly CrowdScene Scene;
         public AllocResult Last;
+
+        /// <summary>A global render setting (shadows, say) priced in the same Lagrangian as the
+        /// per-agent tiers. Everything is measured against option 0, the full setting: its frame
+        /// cost, and by the pixel judge its geometry quality and its loss on the scene alone.</summary>
+        public sealed class GlobalOption
+        {
+            public string Name;
+            public float FixedMs;          // scene cost over option 0's, ms per frame
+            public float DrawnMs;          // cost over option 0's per drawn agent at the cheapest tier
+            public double[] GeoTheta;      // ms per drawn agent of geometry tiers over tier 3
+            public double[] GeoQuality;    // per geometry tier, against option 0's tier 0
+            public float SceneLoss;        // the scene's pixels lost, in objective units
+        }
+
+        /// <summary>Null: no global choice. Else PARITY picks Option every frame.</summary>
+        public GlobalOption[] Options;
+        public int Option;
+        public float OptionHysteresis = 0.01f;
+        /// <summary>The option is set from outside (a fixed setting, or a baseline's own scaler);
+        /// only that one is solved.</summary>
+        public bool OptionExternal;
+        public long[] OptionFrames;
+        int decidedOption;
+        float[] optCost;
+        readonly double[,] optTheta = new double[ParityTable.NAxes, ParityTable.NTiers];
         public float AllocMs, StepMs;
         /// <summary>Predicted cost of the tier work the budget actually governs. The rest of
         /// StepMs is the assigner and the spatial grid, which are tier-independent and which
@@ -638,7 +669,7 @@ namespace Parity
                         ALap(8);
                         for (int i = 0; i < N; i++)
                         {
-                            vs[i] = Mathf.Min(1f, VisiblePx[k][i] / refPx);
+                            vs[i] = Mathf.Min(SalienceCap, VisiblePx[k][i] / refPx);
                             if (seen[i])
                             {
                                 float r = ViewD0 / Mathf.Max(sigK[i], 1e-3f);
@@ -651,7 +682,7 @@ namespace Parity
                         {
                             // in view, Sig is the camera distance
                             float r = ViewD0 / Mathf.Max(sigK[i], 1e-3f);
-                            vs[i] = seen[i] ? Mathf.Min(1f, r * r) : 0f;
+                            vs[i] = seen[i] ? Mathf.Min(SalienceCap, r * r) : 0f;
                         }
                     for (int i = 0; i < N; i++)
                     {
@@ -690,7 +721,49 @@ namespace Parity
                 }
                 var lockS = Mode == Policy.Baseline ? stateLock : null;
                 var sprev = StateSwitchCost > 0f ? prevS : null;
-                if (!dual)
+                if (!dual && Options != null)
+                {
+                    // B: the budget the controller leaves covers row costs plus the applied
+                    // option's fixed cost, so each option gets it less its own fixed cost, is
+                    // solved with its own geometry costs and quality, and is scored net of what
+                    // it loses on the scene. The winner (with a little hysteresis, a global
+                    // switch being a pop of the whole frame) is solved last so asg holds it.
+                    var seen0 = SeenBy(0);
+                    int drawn = 0;
+                    for (int i = 0; i < N; i++) if (seen0[i]) drawn++;
+                    float basis = BudgetMs;
+                    if (optCost == null || optCost.Length != rowCost.Length) optCost = new float[rowCost.Length];
+                    AllocResult SolveOption(int o)
+                    {
+                        var op = Options[o];
+                        System.Array.Copy(thetaAxis, optTheta, thetaAxis.Length);
+                        for (int t = 0; t < ParityTable.NTiers; t++) optTheta[3, t] = t < op.GeoTheta.Length ? op.GeoTheta[t] : 0.0;
+                        Cost.RowCosts(Table, optTheta, optCost);
+                        Factored.SetCosts(optCost);
+                        Factored.SetGeometryQuality(Table, op.GeoQuality);
+                        float fixedMs = op.FixedMs + drawn * op.DrawnMs;
+                        BudgetMs = Mathf.Max(basis - fixedMs, 0f);
+                        var r = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg, prevs, SwitchCost,
+                                               sprev, StateSwitchCost, lockS);
+                        r.Cost += fixedMs;
+                        return r;
+                    }
+                    int cur = Mathf.Clamp(Option, 0, Options.Length - 1), best = cur, solved = -1;
+                    double bestJ = double.NegativeInfinity, curJ = 0.0;
+                    for (int o = 0; o < Options.Length; o++)
+                    {
+                        if (OptionExternal && o != cur) continue;
+                        Last = SolveOption(o); solved = o;
+                        double j = Last.Utility - Options[o].SceneLoss;
+                        if (o == cur) curJ = j;
+                        if (j > bestJ) { bestJ = j; best = o; }
+                    }
+                    if (best != cur && bestJ <= curJ + OptionHysteresis * System.Math.Abs(curJ)) best = cur;
+                    if (best != solved) Last = SolveOption(best);
+                    BudgetMs = basis;
+                    decidedOption = best;
+                }
+                else if (!dual)
                     Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg, prevs, SwitchCost,
                                           sprev, StateSwitchCost, lockS);
                 else
@@ -744,6 +817,12 @@ namespace Parity
         void ApplyDecision()
         {
             bool factored = decidedFactored;
+            if (Options != null)
+            {
+                Option = decidedOption;
+                if (OptionFrames == null || OptionFrames.Length != Options.Length) OptionFrames = new long[Options.Length];
+                OptionFrames[Option]++;
+            }
             int V = decidedViewers;
             Promotes = 0; Demotes = 0;
             for (int i = 0; i < N; i++)
@@ -819,11 +898,17 @@ namespace Parity
         static readonly int[] DecodeDims = { LatentDim, 8, 4, 0 };
         static readonly int[] JointCount = { 12, 8, 3, 0 };
 
-        /// <summary>Every agent's gait decoded at the top animation tier: the reference pose an
-        /// image judge compares a policy's frame against.</summary>
-        public void FullPose()
+        /// <summary>Every agent's gait decoded at one animation tier (0: the reference pose an
+        /// image judge compares a policy's frame against).</summary>
+        public void Pose(int tier)
         {
-            for (int i = 0; i < N; i++) Joints(i, JointCount[0]);
+            for (int i = 0; i < N; i++) Joints(i, JointCount[tier]);
+        }
+
+        /// <summary>Each agent's gait decoded at its own tier.</summary>
+        public void Pose(sbyte[] tiers)
+        {
+            for (int i = 0; i < N; i++) Joints(i, JointCount[tiers[i]]);
         }
         static readonly int[] NavBudget = { 24, 8, 0, 0 };
 

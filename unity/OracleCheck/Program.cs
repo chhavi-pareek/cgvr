@@ -35,7 +35,7 @@ static class Program
 
     static int Main(string[] args)
     {
-        var table = ParityTable.Build(surrogateNav: true);
+        var table = ParityTable.Build(python: true);
         Console.WriteLine($"C# table: m = {table.M}");
         if (args.Length < 2) { Console.Error.WriteLine("usage: <cases.json> <results.json>"); return 2; }
 
