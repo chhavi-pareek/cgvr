@@ -142,3 +142,31 @@ def test_risk_control_is_the_worst_case_until_calibrated():
     sur.observe(np.arange(40), P[:40]); sur.fit()
     d.refresh(sur)
     assert np.all(d(np.arange(N_CTX)) == E_MAX)
+
+
+LAT15 = np.full(50, 0.175)      # a 1.5B-sized call, a quarter of the 7B one
+
+
+def test_menu_uses_a_small_model_where_it_is_closer_than_the_surrogate():
+    # a small model close to the reference everywhere: worth a quarter of a call, so PARITY
+    # spends on it and, once past the opening burst, drifts less than with the reference and the
+    # surrogate alone (over the whole run it does not yet: an LLM reply also trains the surrogate
+    # and resets the ledger, which the per-decision choice does not value -- see STATE.md)
+    P15 = 0.9 * P + 0.1 / N_ACT
+    two = Run(300, "parity", P, LAT, seed=0, cap=10.0).run(900).summary()
+    three = Run(300, "parity", P, LAT, seed=0, cap=10.0, small=(P15, LAT15)).run(900).summary()
+    assert three["small_frac"] > 0.05
+    assert three["kl_steady_per_agent_h"] < two["kl_steady_per_agent_h"]
+    assert three["over_cap_frac"] == 0.0 and three["dmax"] <= 10.0 + 1e-9
+
+
+def test_menu_stops_probing_a_small_model_that_never_helps():
+    # a degenerate small model (always the first action): after the first probes show it is
+    # rarely closer than the surrogate, probing stops, and it serves only the few situations
+    # where the reference itself all but always picks that action
+    P15 = np.full_like(P, 1e-4)
+    P15[:, 0] = 1.0
+    P15 /= P15.sum(1, keepdims=True)
+    s = Run(300, "parity", P, LAT, seed=0, cap=10.0, small=(P15, LAT15)).run(900).summary()
+    assert s["small_frac"] < 0.01 and s["probes"] <= 35
+    assert s["over_cap_frac"] == 0.0 and s["dmax"] <= 10.0 + 1e-9

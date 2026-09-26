@@ -37,34 +37,46 @@ FAR_SALIENCE = 0.25
 
 
 class Server:
-    def __init__(self, P, latency, rng):
-        self.P, self.lat, self.rng = P, np.asarray(latency), rng
+    """One GPU serving requests in order. Model 0 is the reference (7B); model 1, when given, a
+    smaller one (1.5B) whose calls take its own measured latencies."""
+
+    def __init__(self, P, latency, rng, small=None):
+        self.P = [P] + ([small[0]] if small else [])
+        self.lat = [np.asarray(latency)] + ([np.asarray(small[1])] if small else [])
+        self.rng = rng
         self.q = deque()
         self.busy_until = 0.0
+        self.busy_s = 0.0                   # model-seconds used
         self.done = []
-        self.calls = 0
+        self.calls = 0                      # reference-model calls
+        self.small_calls = 0
 
-    def submit(self, agent, ctx, step):
-        self.q.append((int(agent), int(ctx), float(step)))
-        self.calls += 1
+    def submit(self, agent, ctx, step, model=0):
+        self.q.append((int(agent), int(ctx), float(step), int(model)))
+        if model == 0:
+            self.calls += 1
+        else:
+            self.small_calls += 1
 
     def backlog(self, step):
         """Seconds until a request made now would be answered, on average."""
-        return max(self.busy_until - step, 0.0) + len(self.q) * float(self.lat.mean())
+        return max(self.busy_until - step, 0.0) + sum(float(self.lat[m].mean()) for *_, m in self.q)
 
     def poll(self, step):
-        """Replies complete by the end of this step, as (agent, ctx, p)."""
+        """Replies complete by the end of this step, as (agent, ctx, p, model)."""
         out = []
         while self.q and max(self.busy_until, self.q[0][2]) <= step + 1:
-            agent, ctx, t_req = self.q.popleft()
+            agent, ctx, t_req, model = self.q.popleft()
             start = max(self.busy_until, t_req)
-            self.busy_until = start + float(self.rng.choice(self.lat))
-            self.done.append((self.busy_until, agent, ctx))
+            dt = float(self.rng.choice(self.lat[model]))
+            self.busy_until = start + dt
+            self.busy_s += dt
+            self.done.append((self.busy_until, agent, ctx, model))
         keep = []
         for item in self.done:
-            t, agent, ctx = item
+            t, agent, ctx, model = item
             if t <= step + 1:
-                out.append((agent, ctx, self.P[ctx]))
+                out.append((agent, ctx, self.P[model][ctx], model))
             else:
                 keep.append(item)
         self.done = keep
@@ -114,6 +126,7 @@ class DriftBound:
     def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25):
         self.p = {}                    # context -> LLM distribution, from paid replies
         self.exact = {}
+        self.p15, self.exact15 = {}, {}  # the small model's answers, and its exact drift from the LLM
         self.novel, self.bound, self.alpha, self.tau = novel, bound, alpha, tau
         self.delta, self.eta = delta, eta
         self.train, self.cal = [], []  # (ctx, p) of paid replies; cal = the random ones
@@ -128,6 +141,18 @@ class DriftBound:
     def observe(self, c, p, calib=False):
         self.p[int(c)] = p
         (self.cal if calib else self.train).append((int(c), p))
+        if int(c) in self.p15:
+            self.exact15[int(c)] = float(kl(self.p15[int(c)], p)[0])
+
+    def observe_small(self, c, q):
+        self.p15[int(c)] = q
+        if int(c) in self.p:
+            self.exact15[int(c)] = float(kl(q, self.p[int(c)])[0])
+
+    def small_charge(self, c):
+        """A small-model decision at c: its drift from the LLM, exact once both have answered at c,
+        else the worst case."""
+        return np.array([self.exact15.get(int(x), E_MAX) for x in np.atleast_1d(c)])
 
     def refresh(self, sur):
         if not self.p:
@@ -197,11 +222,17 @@ class Run:
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
-                 delta=0.05, eta=0.25):
+                 delta=0.05, eta=0.25, small=None):
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
+        # small = (P, latency) of a second, cheaper model: a three-option menu per decision
+        self.small = small is not None
+        self.P15 = small[0] if small else None
+        self.cost15 = float(np.mean(small[1]) / np.mean(latency)) if small else 1.0
+        self.probed = set()
+        self.probe_q = deque()
         self.rng = np.random.default_rng(seed)
         self.st = Station(n, np.random.default_rng(seed + 1))
-        self.server = Server(P, latency, np.random.default_rng(seed + 2))
+        self.server = Server(P, latency, np.random.default_rng(seed + 2), small)
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
         self.sur = Distilled() if surrogate == "distilled" else Marginal()
@@ -230,8 +261,12 @@ class Run:
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
-                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0)
+                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0,
+                          small=0, probes=0)
         self.dmax_t = []
+        # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
+        # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
+        self.steady_from, self.kl_at, self.agent_s_at = 300, None, None
         if policy not in ("reference",):
             # a warm-up batch so the surrogate and the drift bound start from something
             c = self.st.context(0)[self.rng.choice(n, min(calib_calls, n), replace=False)]
@@ -280,12 +315,30 @@ class Run:
         st = self.st
         st.tick(t)
         self._respawned()
-        for agent, c, p in self.server.poll(t):
+        for agent, c, p, model in self.server.poll(t):
+            if model == 1:
+                # the small model's answer: learned for its drift, and a decision if one asked
+                self.drift.observe_small(c, p)
+                if agent >= 0:
+                    self.inflight[agent] = False
+                    if self.req_dec.get(agent, -1) == self.ndec[agent]:
+                        self.pending[agent] = (c, p, self.req_gen.get(agent, -1), 1)
+                    else:
+                        self.late += 1
+                continue
             self.inflight[agent] = False
             if self.req_dec.get(agent, -1) == self.ndec[agent]:
-                self.pending[agent] = (c, p, self.req_gen.get(agent, -1))
+                self.pending[agent] = (c, p, self.req_gen.get(agent, -1), 0)
             else:
                 self.late += 1                # the decision it was for has already been made
+            if self.small and c not in self.drift.p15 and c not in self.probed:
+                # a probe: the small model at a context the LLM has now answered makes the small
+                # model's drift there exact, so the scheduler knows where it can stand in. Probes
+                # wait for budget no decision wanted (_probe): paid into debt, even 30 of them
+                # cost ~13% more drift, all of it in the first minute, when every call is worth
+                # most (the surrogate is untrained and every agent is deciding)
+                self.probed.add(c)
+                self.probe_q.append(c)
             fresh = c not in self.drift.p
             calib = agent in self.calib_req
             self.calib_req.discard(agent)
@@ -307,6 +360,8 @@ class Run:
                 st.apply(np.array(go), np.array(acts), t)
                 self._respawned()
         self._schedule(t)
+        if t == self.steady_from:
+            self.kl_at, self.agent_s_at = self.stats["kl"], self.stats["agent_s"]
         self.stats["agent_s"] += self.n
         self.stats["view_s"] += int((self.salience(t) == 1.0).sum())
         self.stats["dmax"] = max(self.stats["dmax"], float(self.D.max()))
@@ -322,12 +377,29 @@ class Run:
         if rep is not None and rep[2] != self.st.gen[i]:
             rep = None                         # asked for the person who used to be in this slot
             self.stats["stale"] += 1
-        if rep is not None and rep[0] == c:
+        if rep is not None and rep[0] == c and rep[3] == 0:
             self.stats["llm"] += 1
             self._close(i)
             self.stalled.discard(i)
             self.ndec[i] += 1
             return int(rng.choice(N_ACT, p=rep[1]))
+        if rep is not None and rep[0] == c and rep[3] == 1:
+            # a small-model decision: not a reset, charged its drift from the LLM like any other
+            e = float(self.drift.small_charge(c)[0])
+            if self.policy != "parity" or self.L[i] + e <= self.cap:
+                d = float(kl(rep[1], P[c])[0])
+                self.L[i] += e
+                self.D[i] += d
+                self.nsur[i] += 1
+                self.over[i] |= self.D[i] > self.cap + 1e-9
+                self.stats["small"] += 1
+                self.stats["kl"] += d
+                if self.salience(t)[i] == 1.0:
+                    self.stats["kl_view"] += d
+                self.stalled.discard(i)
+                self.ndec[i] += 1
+                return int(rng.choice(N_ACT, p=rep[1]))
+            rep = None
         if rep is not None:
             # the reply answers a situation the agent is no longer in (the queue changed while it
             # was on its way); acting on it would be drift nobody charged, so it is discarded
@@ -371,7 +443,7 @@ class Run:
         cand = np.array([i for i in cand if i not in self.pending], np.int64)
         # aim each reply to land just before its decision: sooner than `earliest` it cannot
         # arrive in time (a wasted call), much later and the prediction goes stale
-        earliest = t + self.server.backlog(t) + float(self.server.lat.max())
+        earliest = t + self.server.backlog(t) + float(self.server.lat[0].max())
         if cand.size:
             when = st.next_decision_step(t, cand)
             keep = when <= earliest + 3
@@ -381,6 +453,25 @@ class Run:
         in_time = when >= earliest
         zone, ticket = st.next_state(cand)
         xhat = st.context(t, cand, zone=zone, ticket=ticket, at_step=when)
+        if self.small:
+            in15 = when >= t + self.server.backlog(t) + float(self.server.lat[1].max())
+            if self.policy == "parity":
+                self._schedule3(t, cand, xhat, in_time, in15)
+                self._probe(t)
+                return
+            if self.policy == "view_lod":
+                # model LOD, the MassLOD idea with models as tiers: the big model for the agents
+                # the viewer can see, the small one for the rest, soonest decision first; no ledger
+                sal = self.salience(t)[cand]
+                near = np.flatnonzero((sal == 1.0) & in_time)
+                far = np.flatnonzero((sal < 1.0) & in15)
+                for j, m in [(j, 0) for j in near[np.argsort(when[near])]] + [(j, 1) for j in far[np.argsort(when[far])]]:
+                    cost = 1.0 if m == 0 else self.cost15
+                    if self.tokens < cost:
+                        continue
+                    self._request(cand[j], xhat[j], t, m)
+                    self.tokens -= cost
+                return
         if self.policy == "parity":
             # calibration draws on the call budget like any request, except while there is no
             # margin at all: then every surrogate decision costs E_MAX, every agent's next
@@ -444,6 +535,75 @@ class Run:
                 self.tokens -= 1
                 self.rr = (cand[j] + 1) % self.n
 
+    def _probe(self, t):
+        """Probes from the budget left after this step's decisions, while they might pay."""
+        while self.probe_q and self.tokens >= self.cost15 and self._worth_probing():
+            self.server.submit(-1, self.probe_q.popleft(), t, model=1)
+            self.tokens -= self.cost15
+            self.stats["probes"] += 1
+
+    def _worth_probing(self, first=30, share=0.10):
+        """Probe while the small model might pay: always for the first probes, then only while it
+        beat the surrogate at a useful share of the contexts it was probed at."""
+        known = self.drift.exact15
+        if len(known) < first:
+            return True
+        better = sum(1 for c, e in known.items() if e < self.drift.exact.get(c, E_MAX))
+        return better >= share * len(known)
+
+    def _request(self, i, x, t, model):
+        self.server.submit(i, x, t, model)
+        self.req_gen[int(i)] = int(self.st.gen[i])
+        self.req_dec[int(i)] = int(self.ndec[i])
+        self.inflight[i] = True
+
+    def _schedule3(self, t, cand, xhat, in_time, in15):
+        """PARITY over a three-option menu per decision -- the LLM (cost 1, charge 0, resets the
+        ledger), the small model (cost15, its exact drift where learned) and the surrogate (free,
+        its charge) -- as a multiple-choice knapsack: every candidate's options on their upper
+        hull, the upgrades taken in order of salience-weighted drift saved per unit of model time.
+        A candidate whose ledger cannot take its surrogate decision gets the cheapest option that
+        keeps it under the cap first, over budget if need be."""
+        e_s = self.drift(xhat)
+        e_m = self.drift.small_charge(xhat)
+        sal = self.salience(t)[cand]
+        L = self.L[cand]
+        ok_s = L + e_s <= self._limit(cand, e_s)
+        ok_m = (L + e_m <= self.cap) & in15
+        steps = []
+        for j in range(len(cand)):
+            if not ok_s[j]:
+                m = 1 if ok_m[j] and e_m[j] < e_s[j] and not in_time[j] else 0
+                m = 1 if ok_m[j] and self.tokens < 1 else m
+                cost = self.cost15 if m == 1 else 1.0
+                if self.tokens < cost:
+                    self.stats["overrun"] += 1
+                self._request(cand[j], xhat[j], t, m)
+                self.tokens -= cost
+                continue
+            opts = [(0.0, e_s[j], -1)]
+            if ok_m[j] and e_m[j] < e_s[j]:
+                opts.append((self.cost15, e_m[j], 1))
+            if in_time[j]:
+                opts.append((1.0, 0.0, 0))
+            hull = [opts[0]]
+            for o in opts[1:]:
+                while len(hull) >= 2 and (hull[-1][1] - o[1]) * (hull[-1][0] - hull[-2][0]) >= (hull[-2][1] - hull[-1][1]) * (o[0] - hull[-1][0]):
+                    hull.pop()
+                hull.append(o)
+            for k, (a, b) in enumerate(zip(hull, hull[1:])):
+                steps.append((sal[j] * (a[1] - b[1]) / (b[0] - a[0]), j, k, b[0] - a[0], b[2]))
+        steps.sort(key=lambda x: -x[0])
+        level, choice = {}, {}
+        for eff, j, k, dc, m in steps:
+            if level.get(j, 0) != k or self.tokens < dc:
+                continue
+            self.tokens -= dc
+            level[j] = k + 1
+            choice[j] = m
+        for j, m in choice.items():
+            self._request(cand[j], xhat[j], t, m)
+
     def run(self, seconds):
         for t in range(seconds):
             self.step(t)
@@ -456,8 +616,13 @@ class Run:
         stretches = s["stretches"] + int(open_.sum())
         overflowed = s["overflowed"] + int(self.over[open_].sum())
         dec = s["llm"] + s["sur"]
-        return dict(policy=self.policy, n=self.n, llm_frac=s["llm"] / max(dec, 1),
+        dec += s["small"]
+        steady = ((s["kl"] - self.kl_at) / max((s["agent_s"] - self.agent_s_at) / 3600.0, 1e-9)
+                  if self.kl_at is not None else float("nan"))
+        return dict(policy=self.policy, n=self.n, llm_frac=s["llm"] / max(dec, 1), small_frac=s["small"] / max(dec, 1),
+                    model_util=self.server.busy_s / max(len(self.dmax_t), 1), probes=s["probes"],
                     calls_per_s=self.server.calls / max(len(self.dmax_t), 1), kl_per_agent_h=s["kl"] / max(hours, 1e-9),
+                    kl_steady_per_agent_h=steady,
                     kl_view_per_agent_h=s["kl_view"] / max(s["view_s"] / 3600.0, 1e-9),
                     dmax=s["dmax"], over_cap_frac=s["over_cap"] / max(s["agent_s"], 1),
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
