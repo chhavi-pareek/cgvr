@@ -1,6 +1,7 @@
 // Frame-time benchmark, headless on the GPU: the proposal's H1 in the engine.
 //
 //   Unity -batchmode -quit -projectPath <p> -executeMethod ParityFrameBench.Run
+//   ParityBench.exe -batchmode -parityBench [-out <dir>] [-tag <name>] ...   (standalone build)
 //
 // Every frame is timed end to end -- crowd step, allocator, draw submission, render, and a
 // 1-pixel readback that waits for the GPU -- for the MassLOD baseline with its shipped parameters
@@ -42,7 +43,16 @@ public static class ParityFrameBench
     {
         var prof = Arg("-profile") == "low" ? Low : Desktop;
         var sizes = Arg("-sizes") is string z ? Array.ConvertAll(z.Split(','), int.Parse) : new[] { 1000, 4000, 8000 };
-        Log($"code optimization {UnityEditor.Compilation.CompilationPipeline.codeOptimization}, decisions {(Pipelined ? "pipelined" : "serial")}");
+#if UNITY_EDITOR
+        string build = $"editor, code optimization {UnityEditor.Compilation.CompilationPipeline.codeOptimization}";
+#else
+        string build = $"player {Application.version}{(Debug.isDebugBuild ? " (development)" : "")}";
+#endif
+        Log($"{build}, decisions {(Pipelined ? "pipelined" : "serial")}");
+        Log($"machine: {SystemInfo.processorType} x{SystemInfo.processorCount}, {SystemInfo.systemMemorySize} MB; " +
+            $"{SystemInfo.graphicsDeviceName} ({SystemInfo.graphicsDeviceType}, {SystemInfo.graphicsMemorySize} MB); {SystemInfo.operatingSystem}");
+        if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
+            Debug.LogError("[FrameBench] no graphics device: run without -nographics (and without -batchmode if this persists)");
         int failures = 0;
         var sb = new StringBuilder("profile,scene,policy,knob,n,ft_mean,ft_p50,ft_p95,ft_p99,ft_std,step_ms,alloc_ms,worst_over_cap,quality,quality_view,quality_perceived,quality_screen,surrogates,restorations,geo0,geo1,geo2,geo3,cpu_ms,gpu_wait_ms,quality_image,pop_image,quality_state,option_mix,thermo_ms\n");
         try
@@ -54,15 +64,32 @@ public static class ParityFrameBench
                 Sweep(SceneKind.Plaza, Desktop, sb, new[] { 8000 }, new[] { 33.3f }, new[] { 1f }, only: true);
             else
                 Sweep(SceneKind.Plaza, prof, sb, sizes,
-                      Arg("-targets") is string tg ? Array.ConvertAll(tg.Split(','), float.Parse)
+                      Arg("-targets") is string tg ? Array.ConvertAll(tg.Split(','), v => float.Parse(v, CultureInfo.InvariantCulture))
                                                    : new[] { 12f, 14f, 17f, 20f, 21.5f, 23f, 26f, 30f, 33.3f, 36f, 40f },
                       new[] { 0.25f, 0.5f, 1f, 2f, 4f, 8f });
         }
         catch (Exception ex) { Debug.LogError("[FrameBench] threw: " + ex); failures++; }
-        var path = Path.GetFullPath(Path.Combine(Application.dataPath, prof == Desktop ? "../Logs/frame_bench.csv" : $"../Logs/frame_bench_{prof.Name}.csv"));
+        // -out <dir>: where results go (default: the editor project's Logs, or Results beside a
+        // standalone build); -tag <name>: frame_bench_<name>.csv and .txt
+        string dir = Arg("-out") ?? Path.Combine(Application.dataPath, Application.isEditor ? "../Logs" : "../Results");
+        Directory.CreateDirectory(dir);
+        string stem = "frame_bench" + (prof == Desktop ? "" : "_" + prof.Name) + (Arg("-tag") is string tag ? "_" + tag : "");
+        var path = Path.GetFullPath(Path.Combine(dir, stem + ".csv"));
         File.WriteAllText(path, sb.ToString());
         Log("wrote " + path);
+        File.WriteAllText(Path.ChangeExtension(path, ".txt"), logText.ToString());
+#if UNITY_EDITOR
         if (Application.isBatchMode) UnityEditor.EditorApplication.Exit(failures == 0 ? 0 : 1);
+#else
+        Application.Quit(failures == 0 ? 0 : 1);
+#endif
+    }
+
+    // a standalone build runs the bench when launched with -parityBench, then quits
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+    static void AutoRun()
+    {
+        if (!Application.isEditor && Array.IndexOf(Environment.GetCommandLineArgs(), "-parityBench") >= 0) Run();
     }
 
     /// <summary>One scene under one profile: calibrate once, then every size under both policies.
@@ -693,5 +720,6 @@ public static class ParityFrameBench
     // and the animation that was shown: none on an impostor
     static int AnimRun(CrowdWorld w, int i) => w.GeoV[0][i] == 3 ? 3 : w.AnimV[0][i];
 
-    static void Log(string s) { Debug.Log("[FrameBench] " + s); }
+    static readonly StringBuilder logText = new StringBuilder();
+    static void Log(string s) { Debug.Log("[FrameBench] " + s); logText.Append(s).Append('\n'); }
 }
