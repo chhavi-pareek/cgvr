@@ -20,5 +20,6 @@
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/ErrorLedger.cs" />
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/RlsCostModel.cs" />
     <Compile Include="../Parity3D/Assets/Scripts/Runtime/MassLodAssigner.cs" />
+    <Compile Include="../Parity3D/Assets/Scripts/Runtime/Orca.cs" />
   </ItemGroup>
 </Project>

@@ -114,6 +114,7 @@ def main():
     ok &= factored(env)
     ok &= viewers(env)
     ok &= viewers_warm(env)
+    ok &= orca_check(env)
     print("\nC# port agrees with alloc/serial.py" if ok else "\nC# PORT DISAGREES -- investigate")
     sys.exit(0 if ok else 1)
 
@@ -341,6 +342,53 @@ def capped_fill(env):
     print(f"  utility loss   mean {gaps.mean()*100:.4f}%   max {gaps.max()*100:.4f}%")
     ok = over == 0 and mask == 0 and gaps.max() < 0.02
     print("  ->", "capped fill is feasible and near-oracle" if ok else "CAPPED FILL PROBLEM")
+    return ok
+
+
+def orca_check(env):
+    """Runtime/Orca.cs against sim/orca.py: velocities from identical neighbour sets -- crowds,
+    overlapping pairs (the collision branch) and packed neighbourhoods (the infeasible fallback)
+    -- and the k-nearest selection, with ties built in."""
+    from sim import orca
+    rng = np.random.default_rng(17)
+    vel, want, fell_back, overlapped = [], [], 0, 0
+    for c in range(800):
+        kind = c % 4
+        m = 30
+        pos = rng.uniform(0, (15.0, 6.0, 2.5, 1.6)[kind], size=(m, 2))
+        v = rng.normal(0, 0.8, size=(m, 2))
+        i, k = 0, (4, 10)[c % 2]
+        nb = orca.neighbours(pos, i, k)
+        pref = rng.normal(size=2); pref *= rng.uniform(0.8, 1.5) / np.linalg.norm(pref)
+        mx = 1.25 * np.linalg.norm(pref)
+        dt = 1.0 / 30.0
+        lines = orca.half_planes(pos[i], v[i], pos[nb], v[nb], dt=dt)
+        fell_back += orca._lp2(lines, mx, pref, False)[0] < len(lines)
+        overlapped += bool(len(nb)) and np.min(np.hypot(*(pos[nb] - pos[i]).T)) < 2 * orca.RADIUS
+        want.append(orca.new_velocity(pos[i], v[i], pref, mx, pos[nb], v[nb], dt=dt))
+        vel.append(dict(p=pos[i].tolist(), v=v[i].tolist(), pref=pref.tolist(), max=float(mx), dt=dt,
+                        nx=pos[nb, 0].tolist(), ny=pos[nb, 1].tolist(), nvx=v[nb, 0].tolist(), nvy=v[nb, 1].tolist()))
+    knn, knn_want = [], []
+    for c in range(300):
+        # half the crowds on a lattice, so equal distances (ties) are everywhere
+        pos = (rng.integers(0, 6, size=(40, 2)) * 0.5).astype(float) if c % 2 else rng.uniform(0, 5, size=(40, 2))
+        i, k = int(rng.integers(40)), int((1, 4, 10)[c % 3])
+        knn.append(dict(x=pos[:, 0].tolist(), y=pos[:, 1].tolist(), i=i, k=k, reach=orca.REACH))
+        knn_want.append(orca.neighbours(pos, i, k).tolist())
+    with open(CASES, "w") as f:
+        json.dump(dict(vel=vel, knn=knn), f)
+    r = subprocess.run(["dotnet", "run", "--project", PROJ, "-c", "Release", "--", CASES, RESULTS, "orca"],
+                       capture_output=True, text=True, env=env, cwd=HERE)
+    if r.returncode != 0:
+        print(r.stdout[-2000:]); print(r.stderr[-2000:]); sys.exit(1)
+    got = json.load(open(RESULTS))
+    dv = np.abs(np.asarray(got["vel"]) - np.asarray(want)).max()
+    knn_diff = sum(g != w for g, w in zip(got["knn"], knn_want))
+    print(f"\nORCA: {len(vel)} velocity cases ({fell_back} on the infeasible fallback, {overlapped} overlapping), {len(knn)} k-nearest cases")
+    print(f"  max |velocity difference|           : {dv:.2e} m/s")
+    print(f"  differing neighbour lists           : {knn_diff}")
+    ok = dv < 1e-9 and knn_diff == 0 and min(fell_back, overlapped, len(vel) - fell_back) > 100
+    print("  ->", "Orca.cs agrees with sim/orca.py" if ok else "ORCA PORT DISAGREES (or a branch went untested)")
     return ok
 
 

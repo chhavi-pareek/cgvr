@@ -33,11 +33,55 @@ static class Program
         public double btol { get; set; }
     }
 
+    // sim/orca.py against Runtime/Orca.cs: new velocities from given neighbour sets, and the
+    // k-nearest selection (order and ties) from whole crowds
+    static int OrcaCheck(string casesPath, string resultsPath)
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(casesPath));
+        double[] Arr(JsonElement e) { var a = new double[e.GetArrayLength()]; int i = 0; foreach (var x in e.EnumerateArray()) a[i++] = x.GetDouble(); return a; }
+        var orca = new Orca(16);
+        var sb = new StringBuilder("{\"vel\":[");
+        bool first = true;
+        foreach (var c in doc.RootElement.GetProperty("vel").EnumerateArray())
+        {
+            var p = Arr(c.GetProperty("p")); var v = Arr(c.GetProperty("v")); var pref = Arr(c.GetProperty("pref"));
+            var nx = Arr(c.GetProperty("nx")); var ny = Arr(c.GetProperty("ny"));
+            var nvx = Arr(c.GetProperty("nvx")); var nvy = Arr(c.GetProperty("nvy"));
+            orca.NewVelocity(p[0], p[1], v[0], v[1], pref[0], pref[1], c.GetProperty("max").GetDouble(),
+                             nx, ny, nvx, nvy, nx.Length, c.GetProperty("dt").GetDouble(), out double rx, out double ry);
+            sb.Append(first ? "" : ",").Append('[').Append(rx.ToString("R", CultureInfo.InvariantCulture)).Append(',')
+              .Append(ry.ToString("R", CultureInfo.InvariantCulture)).Append(']');
+            first = false;
+        }
+        sb.Append("],\"knn\":[");
+        first = true;
+        foreach (var c in doc.RootElement.GetProperty("knn").EnumerateArray())
+        {
+            var x = Arr(c.GetProperty("x")); var y = Arr(c.GetProperty("y"));
+            int i = c.GetProperty("i").GetInt32(), k = c.GetProperty("k").GetInt32();
+            double reach = c.GetProperty("reach").GetDouble();
+            var idx = new int[k]; var d2 = new double[k]; int cnt = 0;
+            for (int j = 0; j < x.Length; j++)
+            {
+                if (j == i) continue;
+                double dx = x[j] - x[i], dy = y[j] - y[i], dj = dx * dx + dy * dy;
+                if (dj < reach * reach) cnt = Orca.Insert(idx, d2, cnt, k, j, dj);
+            }
+            sb.Append(first ? "" : ",").Append('[').Append(string.Join(",", new ArraySegment<int>(idx, 0, cnt))).Append(']');
+            first = false;
+        }
+        sb.Append("]}");
+        File.WriteAllText(resultsPath, sb.ToString());
+        Console.WriteLine("orca cases done");
+        return 0;
+    }
+
     static int Main(string[] args)
     {
         var table = ParityTable.Build(python: true);
         Console.WriteLine($"C# table: m = {table.M}");
-        if (args.Length < 2) { Console.Error.WriteLine("usage: <cases.json> <results.json>"); return 2; }
+        if (args.Length < 2) { Console.Error.WriteLine("usage: <cases.json> <results.json> [orca]"); return 2; }
+        if (args.Length >= 3 && args[2] == "orca") return OrcaCheck(args[0], args[1]);
 
         var json = File.ReadAllText(args[0]);
         var cases = JsonSerializer.Deserialize<List<Case>>(json,

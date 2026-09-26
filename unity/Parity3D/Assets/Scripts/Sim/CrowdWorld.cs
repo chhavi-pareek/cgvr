@@ -29,6 +29,7 @@ namespace Parity
 
         public Vector2[] Pos, Goal, CoreP;   // CoreP: the core's authoritative position
         public Vector2[] PrevPos, Final;     // pre-step position (wall crossing); corridor exit
+        public Vector2[] Vel, PrevVel;       // walking velocity, m/s; its start-of-frame snapshot
         public int[] Slot;                   // hub queue slot, -1 when not queued
         public bool[] Queuer;
         public sbyte[] Stage;                // corridor route leg: mouth / doorway / exit
@@ -243,6 +244,7 @@ namespace Parity
             N = n;
             Pos = new Vector2[n]; Goal = new Vector2[n]; CoreP = new Vector2[n];
             CoreFrom = new Vector2[n]; PrevPos = new Vector2[n]; Final = new Vector2[n];
+            Vel = new Vector2[n]; PrevVel = new Vector2[n];
             Slot = new int[n]; Queuer = new bool[n]; Stage = new sbyte[n];
             Heading = new float[n]; Walk = new float[n];
             Speed = new float[n]; Sig = new float[n]; Phase = new float[n];
@@ -389,6 +391,41 @@ namespace Parity
         }
 
         public static double[,] CalibratedTheta;
+
+        /// <summary>Navigation quality per tier, measured: worlds from one seed walk to a common
+        /// state under full ORCA, then each runs `frames` more at one navigation tier; a tier keeps
+        /// 1 - dev(t) / dev(3) of full ORCA's effect, dev being the mean distance from the full-ORCA
+        /// world's positions (tier 3, no avoidance at all, is the "absent" of the pixel judge).
+        /// The step is Jacobi and deterministic, so the worlds agree exactly until the tiers differ.</summary>
+        public static double[] MeasureNavQuality(SceneSpec spec, ParityTable table, int n, int frames = 60, int starts = 3)
+        {
+            var dev = new double[ParityTable.NTiers];
+            for (int s = 0; s < starts; s++)
+            {
+                var ws = new CrowdWorld[ParityTable.NTiers];
+                for (int t = 0; t < ws.Length; t++)
+                {
+                    var w = ws[t] = new CrowdWorld(Policy.Parity, n, spec, 31u + (uint)s, table);
+                    for (int f = 0; f < 30 + 30 * s + frames; f++)
+                    {
+                        sbyte nav = (sbyte)(f < 30 + 30 * s ? 0 : t);
+                        for (int i = 0; i < w.N; i++) { w.Beh[i] = 0; w.Nav[i] = nav; w.Anim[i] = 3; w.Geo[i] = 3; }
+                        w.StepCore(); w.StepFine(); w.frame++;
+                    }
+                }
+                for (int t = 1; t < ws.Length; t++)
+                {
+                    double sum = 0;
+                    for (int i = 0; i < n; i++) sum += (ws[t].Pos[i] - ws[0].Pos[i]).magnitude;
+                    dev[t] += sum / n / starts;
+                }
+                foreach (var w in ws) w.Dispose();
+            }
+            var q = new double[ParityTable.NTiers];
+            for (int t = 0; t < q.Length; t++)
+                q[t] = dev[3] > 0 ? System.Math.Min(System.Math.Max(1.0 - dev[t] / dev[3], 0.0), 1.0) : 1.0;
+            return q;
+        }
 
         /// <summary>Price the full table from a calibration and drop the dominated rows.</summary>
         public static ParityTable PricedAndPruned(ParityTable full, double floorMs, double[,] theta,
@@ -910,7 +947,20 @@ namespace Parity
         {
             for (int i = 0; i < N; i++) Joints(i, JointCount[tiers[i]]);
         }
-        static readonly int[] NavBudget = { 24, 8, 0, 0 };
+        // Navigation tiers: ORCA against the 10 or the 4 nearest (Runtime/Orca.cs, the port of
+        // sim/orca.py), then plain separation from 8 neighbours, then nothing.
+        static readonly int[] OrcaK = { 10, 4, 0, 0 };
+        static readonly int[] NavBudget = { 0, 0, 8, 0 };
+        const int MaxK = 10;
+
+        // per-worker ORCA scratch, one slot per chunk of the fine step
+        sealed class OrcaScratch
+        {
+            public readonly Orca Solver = new Orca(MaxK);
+            public readonly int[] Idx = new int[MaxK];
+            public readonly double[] D2 = new double[MaxK], X = new double[MaxK], Y = new double[MaxK], VX = new double[MaxK], VY = new double[MaxK];
+        }
+        OrcaScratch[] orcaScratch;
 
         static readonly float[] DecSpeedW = new float[LatentDim];
         static readonly float[] DecLatW = new float[LatentDim];
@@ -962,6 +1012,7 @@ namespace Parity
         void StepFine()
         {
             System.Array.Copy(Pos, PrevPos, N);
+            System.Array.Copy(Vel, PrevVel, N);
             grid.Build(PrevPos, N);
             // Invariant 5: agents are visited in (cell, tier) order, the tier being the one the
             // allocator chose -- neighbours are adjacent in memory and one tier's body runs in
@@ -979,10 +1030,15 @@ namespace Parity
             // cores in contiguous stretches of the visit order (each a run of nearby cells) --
             // for both policies alike
             int chunks = Parallelism > 1 && N >= 1024 ? Mathf.Min(Parallelism * 4, N / 256) : 1;
+            if (orcaScratch == null || orcaScratch.Length < chunks)
+            {
+                orcaScratch = new OrcaScratch[chunks];
+                for (int c = 0; c < chunks; c++) orcaScratch[c] = new OrcaScratch();
+            }
             if (chunks > 1)
                 System.Threading.Tasks.Parallel.For(0, chunks, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = Parallelism },
-                    c => FineRange((int)((long)c * N / chunks), (int)((long)(c + 1) * N / chunks), congested));
-            else FineRange(0, N, congested);
+                    c => FineRange((int)((long)c * N / chunks), (int)((long)(c + 1) * N / chunks), congested, orcaScratch[c]));
+            else FineRange(0, N, congested, orcaScratch[0]);
             Scene.Constrain(this);
             Scene.AfterStep(this, frame, ref rng);
             Presentation();
@@ -991,7 +1047,7 @@ namespace Parity
         /// <summary>Worker threads for the fine step (1 = serial).</summary>
         public int Parallelism = System.Environment.ProcessorCount;
 
-        void FineRange(int lo, int hi, bool congested)
+        void FineRange(int lo, int hi, bool congested, OrcaScratch os)
         {
             for (int k = lo; k < hi; k++)
             {
@@ -1006,6 +1062,7 @@ namespace Parity
                 {
                     // surrogate: ride the core, no local behaviour at all
                     Pos[i] = CoreP[i];
+                    Vel[i] = (CoreP[i] - PrevPos[i]) / Dt;
                 }
                 // staggered by agent, as UE5 spreads variable tick rates: ticking every tier-1 agent
                 // on the same frame would put the whole saving and the whole cost in alternate frames
@@ -1020,26 +1077,43 @@ namespace Parity
                     float d = to.magnitude;
                     Vector2 dir = d > 1e-4f ? to / d : Vector2.zero;
                     Vector2 sep = Vector2.zero;
-                    int budget = NavBudget[Nav[i]];
+                    int nav = Nav[i], budget = NavBudget[nav], kNear = OrcaK[nav];
                     // someone standing in their queue slot keeps 0.8 m to the next person
                     // rather than being pushed out to the 1.6 m separation radius
                     bool inLine = Slot[i] >= 0 && d < 1.2f;
                     if (budget > 0 && !inLine) sep = grid.Separation(PrevPos, i, 1.6f, budget);
                     dir = new Vector2(dir.x - dir.y * LatBias[i], dir.y + dir.x * LatBias[i]);
                     float adv = Mode == Policy.Baseline ? BehStride(beh) : 1;
-                    Vector2 v;
-                    if (!congested)
-                        v = (dir + sep * 1.4f).normalized * Speed[i] * SpeedScale[i] * adv * Dt;
+                    float spd = Speed[i] * SpeedScale[i];
+                    Vector2 vel;
+                    if (kNear > 0 && !inLine)
+                    {
+                        // ORCA from the start-of-frame snapshot of neighbours' positions and
+                        // velocities (Jacobi, as everything else here)
+                        Vector2 pref = !congested ? dir.normalized * spd
+                                     : Vector2.ClampMagnitude(dir * Mathf.Clamp01(d / 0.6f), 1f) * spd;
+                        int m = grid.Nearest(PrevPos, i, (float)Orca.Reach, kNear, os.Idx, os.D2);
+                        for (int j = 0; j < m; j++)
+                        {
+                            int nb = os.Idx[j];
+                            os.X[j] = PrevPos[nb].x; os.Y[j] = PrevPos[nb].y; os.VX[j] = PrevVel[nb].x; os.VY[j] = PrevVel[nb].y;
+                        }
+                        os.Solver.NewVelocity(PrevPos[i].x, PrevPos[i].y, PrevVel[i].x, PrevVel[i].y, pref.x, pref.y, 1.25 * spd,
+                                              os.X, os.Y, os.VX, os.VY, m, Dt, out double rx, out double ry);
+                        vel = new Vector2((float)rx, (float)ry);
+                    }
+                    else if (!congested)
+                        vel = (dir + sep * 1.4f).normalized * spd;
                     else
                     {
                         // Queues and doorways: the pull and the push are summed, not
                         // normalised, so a pressed crowd slows instead of vibrating at full
                         // walking speed, and an agent eases into its slot instead of
                         // overshooting it every frame.
-                        Vector2 u = Vector2.ClampMagnitude(dir * Mathf.Clamp01(d / 0.6f) + sep * 1.4f, 1f);
-                        v = u * Speed[i] * SpeedScale[i] * adv * Dt;
+                        vel = Vector2.ClampMagnitude(dir * Mathf.Clamp01(d / 0.6f) + sep * 1.4f, 1f) * spd;
                     }
-                    Pos[i] += v;
+                    Vel[i] = vel;
+                    Pos[i] += vel * adv * Dt;
                     Pos[i] = new Vector2(Mathf.Clamp(Pos[i].x, 0f, size.x), Mathf.Clamp(Pos[i].y, 0f, size.y));
                 }
                 int anim = Anim[i];
@@ -1207,6 +1281,33 @@ namespace Parity
                 }
             }
             return seen;
+        }
+
+        /// <summary>The k nearest agents to i within reach (at most one cell), nearest first, ties
+        /// by index -- sim/orca.py::neighbours, via Orca.Insert.</summary>
+        public int Nearest(Vector2[] pos, int i, float reach, int k, int[] idx, double[] d2)
+        {
+            int cx = Mathf.Clamp((int)(pos[i].x / cell), 0, nx - 1);
+            int cy = Mathf.Clamp((int)(pos[i].y / cell), 0, ny - 1);
+            double r2 = (double)reach * reach, px = pos[i].x, py = pos[i].y;
+            int count = 0;
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                int y = cy + dy; if (y < 0 || y >= ny) continue;
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int x = cx + dx; if (x < 0 || x >= nx) continue;
+                    int c = y * nx + x, end = start[c + 1];
+                    for (int s = start[c]; s < end; s++)
+                    {
+                        int j = items[s];
+                        if (j == i) continue;
+                        double ex = pos[j].x - px, ey = pos[j].y - py, dj = ex * ex + ey * ey;
+                        if (dj < r2) count = Orca.Insert(idx, d2, count, k, j, dj);
+                    }
+                }
+            }
+            return count;
         }
 
         public Vector2 Separation(Vector2[] pos, int i, float radius, int budget)

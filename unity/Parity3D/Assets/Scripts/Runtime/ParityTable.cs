@@ -85,11 +85,16 @@ namespace Parity
         /// engine runs navigation (separation) only for a live agent and animates nothing drawn
         /// as an impostor, so there a surrogate's navigation tier and an impostor's animation tier
         /// would be credited quality they never deliver: false drops those rows (180 -> 117).</param>
-        public static ParityTable Build(double eMax = PlazaEMax, double[] geometryQuality = null, bool python = false)
+        /// <param name="navigationQuality">measured per-tier navigation quality (the share of full
+        /// ORCA's effect on trajectories each tier keeps) replacing the placeholder column.</param>
+        public static ParityTable Build(double eMax = PlazaEMax, double[] geometryQuality = null, bool python = false,
+                                        double[] navigationQuality = null)
         {
             var axq = (double[,])AxisQuality.Clone();
             if (geometryQuality != null)
                 for (int t = 0; t < NTiers; t++) axq[NAxes - 1, t] = geometryQuality[t];
+            if (navigationQuality != null)
+                for (int t = 0; t < NTiers; t++) axq[1, t] = navigationQuality[t];
             var tiers = new List<byte>();
             var quality = new List<float>();
             var err = new List<float>();

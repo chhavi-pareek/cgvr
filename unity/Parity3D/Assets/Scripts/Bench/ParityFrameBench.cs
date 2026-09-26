@@ -213,6 +213,10 @@ public static class ParityFrameBench
             // each crowd size, for both policies' cost models. Separation is nearly free in the
             // near-empty plaza of N = 400 and the dominant cost at N = 8000; priced from the
             // former, navigation reads as free and no configuration trades perception for cost.
+            // navigation quality is measured at the density it is used at, like its cost
+            var nq = CrowdWorld.MeasureNavQuality(spec, table, n);
+            table = ParityTable.Build(spec.EMax, gq, navigationQuality: nq);
+            Log($"N={n} navigation quality (share of full ORCA's effect kept): {nq[0]:F3} {nq[1]:F3} {nq[2]:F3} {nq[3]:F3}");
             CrowdWorld.CalibrateAxes(spec, table, n, out floor);
             baseTheta = CrowdWorld.MeasureAxes(spec, table, n, Policy.Baseline, out baseFloor);
             for (int t = 0; t < 3; t++)

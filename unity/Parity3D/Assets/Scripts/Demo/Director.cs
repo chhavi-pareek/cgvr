@@ -51,6 +51,7 @@ namespace Parity
         public bool CoOp;
         public bool PopLedger = true;
         public bool SwitchCost = false;
+        public double[] NavQ;
         public bool Occlusion = true;
         public bool Post = true;
         public bool Paused;
@@ -130,9 +131,10 @@ namespace Parity
             BaseTheta = CrowdWorld.MeasureAxes(Spec, Table, 400, Policy.Baseline, out BaseFloor);
             GeoMs = null; GeoQ = null;
             if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.Null && rendL != null) CalibrateGeometry();
-            // the table the allocator scores with carries the measured geometry column; the
-            // timings above do not depend on quality, so they stay valid
-            if (GeoQ != null) Table = ParityTable.Build(Spec.EMax, GeoQ);
+            NavQ = CrowdWorld.MeasureNavQuality(Spec, Table, 400);
+            // the table the allocator scores with carries the measured geometry and navigation
+            // columns; the timings above do not depend on quality, so they stay valid
+            Table = ParityTable.Build(Spec.EMax, GeoQ, navigationQuality: NavQ);
             // the two-salience allocator needs the full product table; pruning on the combined
             // quality would drop rows it uses, and its hulls prune each half themselves
             var pruned = CrowdWorld.PricedAndPruned(Table, CalibFloor, CrowdWorld.CalibratedTheta, out PrunedRows);
