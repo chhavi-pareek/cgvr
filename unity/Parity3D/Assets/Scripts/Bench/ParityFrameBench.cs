@@ -19,6 +19,10 @@ using Parity;
 public static class ParityFrameBench
 {
     const int Warm = 120, Measure = 300;
+    // -seconds S: measure each cell for S seconds of wall time instead of Measure frames (a long
+    // run beside another process, e.g. a live LLM); image snapshots then every ImageEveryLong frames
+    static readonly float Seconds = Arg("-seconds") is string secs ? float.Parse(secs, CultureInfo.InvariantCulture) : 0f;
+    const int ImageEveryLong = 900;
     static bool Pipelined = Array.IndexOf(Environment.GetCommandLineArgs(), "-serial") < 0;
     // -overlap: the CPU runs a frame ahead of the GPU, as an engine does -- each frame waits only
     // for the PREVIOUS frame's GPU work (an async readback of a resolved 4x4 copy), so the frame
@@ -201,6 +205,11 @@ public static class ParityFrameBench
                 foreach (var k in targets) cells.Add((abl, Policy.Parity, k));
         // -policies a,b: only these
         if (Arg("-policies") is string only_) cells.RemoveAll(c => Array.IndexOf(only_.Split(','), c.name) < 0);
+        if (Arg("-knobs") is string kn)
+        {
+            var ks = Array.ConvertAll(kn.Split(','), v => float.Parse(v, CultureInfo.InvariantCulture));
+            cells.RemoveAll(c => Array.IndexOf(ks, c.knob) < 0);
+        }
         // A fanless machine throttles within minutes of sustained load, so cells run in rounds --
         // one per policy per round, in an order shuffled by -seed, knobs descending on odd seeds --
         // and each cell records a fixed-workload thermometer beside its timings
@@ -301,13 +310,16 @@ public static class ParityFrameBench
                 float lastCpu = -1f, lastGpu = -1f, prevDone = 0f;
                 bool censored = false;
                 var ft = new List<float>(Measure);
+                int imageEvery = Seconds > 0f ? ImageEveryLong : ImageEvery;
+                float measureFrom = -1f;
                 float last = 0f;
                 double qSum = 0, qView = 0, qPer = 0, qScr = 0, aScr = 0, qSt = 0; long qN = 0, qvN = 0;
                 var snaps = new List<Snap>();
                 sbyte[] prevGeo = null, prevAnim = null;
-                for (int f = 0; f < Warm + Measure; f++)
+                for (int f = 0; Seconds > 0f ? measureFrom < 0f || Time.realtimeSinceStartup - measureFrom < Seconds : f < Warm + Measure; f++)
                 {
                     float t0 = Time.realtimeSinceStartup;
+                    if (f == Warm) measureFrom = t0;
                     Orbit(cam, spec, f / 2400f, out var xz, out float yaw);
                     var pm = cam.projectionMatrix;
                     w.SetView(0, pm * cam.worldToCameraMatrix, pm.m00, pm.m11);
@@ -384,14 +396,14 @@ public static class ParityFrameBench
                                 qScr += a * q; aScr += a;
                             }
                         }
-                        if ((f - Warm) % ImageEvery == 0)
+                        if ((f - Warm) % imageEvery == 0)
                         {
                             var sn = Snap.Of(w, f, prevGeo, prevAnim);
                             sn.Option = w.Options != null ? w.Option : 0; sn.PrevOption = prevOption;
                             snaps.Add(sn);
                         }
                     }
-                    if (f + 1 >= Warm && (f + 1 - Warm) % ImageEvery == 0)
+                    if (f + 1 >= Warm && (f + 1 - Warm) % imageEvery == 0)
                     {
                         prevGeo = (sbyte[])w.GeoV[0].Clone(); prevAnim = (sbyte[])w.AnimV[0].Clone();
                         prevOption = w.Options != null ? w.Option : 0;
@@ -399,9 +411,10 @@ public static class ParityFrameBench
                 }
                 w.Join();
                 if (hasPend) pend.WaitForCompletion();
+                int measured = Math.Max(ft.Count, 1);
                 double img = ImageQuality(w, rend, cam, spec, snaps, shot, rt, shown, options != null ? applyOption : null, out double pop);
                 if (options != null) applyOption(0);
-                string mix = string.Join("/", Array.ConvertAll(optFrames, c => (c / (double)Measure).ToString("F2", CultureInfo.InvariantCulture)));
+                string mix = string.Join("/", Array.ConvertAll(optFrames, c => (c / (double)measured).ToString("F2", CultureInfo.InvariantCulture)));
                 ft.Sort();
                 float mean = 0; foreach (var v in ft) mean += v; mean /= ft.Count;
                 float var_ = 0; foreach (var v in ft) var_ += (v - mean) * (v - mean);
@@ -411,23 +424,23 @@ public static class ParityFrameBench
                 for (int i = 0; i < n; i++) { if (w.Beh[i] == 3) sur++; g[w.GeoV[0][i]]++; }
                 float worst = w.MaxDivergence();
                 sb.Append(string.Join(",", tag, spec.Name, name, F(knob), n.ToString(), F(mean), F(P(0.5f)), F(P(0.95f)),
-                                      F(P(0.99f)), F(std), F((float)(stepMs / Measure)), F((float)(allocMs / Measure)), F(worst / w.Cap),
+                                      F(P(0.99f)), F(std), F((float)(stepMs / measured)), F((float)(allocMs / measured)), F(worst / w.Cap),
                                       F((float)(qSum / Math.Max(qN, 1))), F((float)(qView / Math.Max(qvN, 1))), F((float)(qPer / Math.Max(qN, 1))), F((float)(qScr / Math.Max(aScr, 1e-9))),
                                       sur.ToString(), w.Restorations.ToString(), g[0].ToString(), g[1].ToString(),
                                       g[2].ToString(), g[3].ToString(),
-                                      F((float)(cpuMs / Measure)), F((float)(waitMs / Measure)), F((float)img), F((float)pop), F((float)(qSt / Math.Max(qN, 1))), mix, F((float)thermo))).Append('\n');
+                                      F((float)(cpuMs / measured)), F((float)(waitMs / measured)), F((float)img), F((float)pop), F((float)(qSt / Math.Max(qN, 1))), mix, F((float)thermo))).Append('\n');
                 if (n >= 8000 && (knob == 1f || knob == 33.3f))
                 {
                     var parts = new StringBuilder();
                     for (int k = 0; k < w.Prof.Length; k++)
-                        parts.Append($" {CrowdWorld.ProfNames[k]} {w.Prof[k] / (Warm + Measure):F2}");
-                    Log($"  profile {name} N={n} ms/frame:{parts} evals {(double)w.Evals / (Warm + Measure):F1}");
-                    Log($"  frame split: cpu (step+draw+submit) {cpuMs / Measure:F2}  wait for gpu {waitMs / Measure:F2}  gpu recorder (Camera.Render) {gpuRec / Measure:F2} ms");
-                    Log("  coverage project/sort/raster ms/frame: " + string.Join(" ", Array.ConvertAll(CoverageBuffer.Ticks, t => (t * 1000.0 / System.Diagnostics.Stopwatch.Frequency / (Warm + Measure)).ToString("F2"))) + $" filled/frame {(double)CoverageBuffer.Filled / (Warm + Measure):F0}");
+                        parts.Append($" {CrowdWorld.ProfNames[k]} {w.Prof[k] / (Warm + measured):F2}");
+                    Log($"  profile {name} N={n} ms/frame:{parts} evals {(double)w.Evals / (Warm + measured):F1}");
+                    Log($"  frame split: cpu (step+draw+submit) {cpuMs / measured:F2}  wait for gpu {waitMs / measured:F2}  gpu recorder (Camera.Render) {gpuRec / measured:F2} ms");
+                    Log("  coverage project/sort/raster ms/frame: " + string.Join(" ", Array.ConvertAll(CoverageBuffer.Ticks, t => (t * 1000.0 / System.Diagnostics.Stopwatch.Frequency / (Warm + measured)).ToString("F2"))) + $" filled/frame {(double)CoverageBuffer.Filled / (Warm + measured):F0}");
                     if (w.Factored != null)
-                        Log("  solve stages ms/frame: " + string.Join(" ", Array.ConvertAll(w.Factored.StageTicks, t => (t * 1000.0 / System.Diagnostics.Stopwatch.Frequency / (Warm + Measure)).ToString("F2"))) + $" fellback {w.Factored.FellBack} (state {w.Factored.FellBackS}) inversions/agent {(double)w.Factored.LastInversions / n:F2} released {w.HoldsReleased}");
+                        Log("  solve stages ms/frame: " + string.Join(" ", Array.ConvertAll(w.Factored.StageTicks, t => (t * 1000.0 / System.Diagnostics.Stopwatch.Frequency / (Warm + measured)).ToString("F2"))) + $" fellback {w.Factored.FellBack} (state {w.Factored.FellBackS}) inversions/agent {(double)w.Factored.LastInversions / n:F2} released {w.HoldsReleased}");
                 }
-                Log($"{name,-16} {(name == "masslod" ? "caps x" : name == "timeslice" ? "every " : "T* ")}{knob,5:G3} N={n,5}: p95 {P(0.95f),6:F1} ms (mean {mean,5:F1}, step {stepMs / Measure,5:F1}, alloc {allocMs / Measure,5:F2})" +
+                Log($"{name,-16} {(name == "masslod" ? "caps x" : name == "timeslice" ? "every " : "T* ")}{knob,5:G3} N={n,5}: p95 {P(0.95f),6:F1} ms (mean {mean,5:F1}, step {stepMs / measured,5:F1}, alloc {allocMs / measured,5:F2})" +
                     $"  quality {qSum / Math.Max(qN, 1):F3} perceived {qPer / Math.Max(qN, 1):F3} screen {qScr / Math.Max(aScr, 1e-9):F3} image {img:F3} pop {pop:F4} state {qSt / Math.Max(qN, 1):F3}{(options != null && w.Options != null ? " options " + mix : "")}  worst/cap {worst / w.Cap,5:F2}  surrogates {sur}  thermo {thermo:F1}");
                 var hv = new int[2, 3, 4];
                 for (int i = 0; i < n; i++)

@@ -2,6 +2,7 @@
 
     python -m bench.gpu_share                      # rates 0, 0.5, 1 calls/s and back-to-back
     python -m bench.gpu_share --joint              # step 2, from the logs of the runs above
+    python -m bench.gpu_share --live               # step 3: the station live beside the renderer
 
 The crowd renders in the standalone bench (its own process, as a game would be) while this
 process asks the local LLM (qwen2.5:7b through Ollama) the station's questions at a fixed rate --
@@ -114,9 +115,74 @@ def joint(a):
                       f" {100 * m('overflow_frac'):7.2f}% {m('kl_steady_per_agent_h'):12.2f} {m('stall_per_agent_h'):13.1f}")
 
 
+def live(a):
+    """Step 3: one live system. The station runs in real time, its scheduler making real calls to
+    the model (llm/live.py), while the crowd renders a fixed-work cell beside it for `window`
+    seconds. Conditions: no LLM; PARITY asking only for the calls the cap requires; round-robin
+    given exactly the duty PARITY used; round-robin saturated."""
+    from llm.live import LiveServer
+    from llm.policy import build_table
+    from llm.schedule import Run
+    P, lat = build_table()
+    lat = lat * (a.shared_latency / float(np.median(lat)))
+    ask(0)
+    conds = [("no LLM", None, 0.0), ("parity (ledger only)", "parity", 1e-6),
+             ("round_robin, PARITY's duty", "round_robin", None), ("round_robin, saturated", "round_robin", 0.9)]
+    parity_duty = None
+    print(f"live: {a.live_agents} agents deciding in real time, crowd N={a.agents[0]} at MassLOD caps x{a.live_caps} "
+          f"for {a.window} s per condition", flush=True)
+    for name, pol, util in conds:
+        time.sleep(a.cool)
+        if util is None:
+            util = parity_duty
+        tag = "live_" + name.split(" ")[0].replace(",", "") + ("" if util in (0.0, 1e-6) else f"_{util:.2f}")
+        logf = os.path.join(OUT, f"{tag}.log")
+        if os.path.exists(logf):
+            os.remove(logf)
+        proc = subprocess.Popen([BUILD, "-batchmode", "-parityBench", "-overlap", "-sizes", str(a.agents[0]), "-seed", "1",
+                                 "-policies", "masslod", "-knobs", str(a.live_caps), "-seconds", str(a.window),
+                                 "-out", OUT, "-tag", tag, "-logFile", logf],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = time.perf_counter()
+        run = None
+        if pol:
+            run = Run(a.live_agents, pol, P, lat, seed=0, cap=a.cap, util=util)
+            run.server = LiveServer(P, lat, t0)
+        cell_start, t = None, 0
+        while proc.poll() is None:
+            if cell_start is None and os.path.exists(logf) and "cell order" in open(logf, errors="ignore").read():
+                cell_start = time.perf_counter() - t0 + 2.0          # after the warm-up frames
+            if run is not None:
+                wait = t0 + t - time.perf_counter()
+                if wait > 0:
+                    time.sleep(wait)
+                run.step(t)
+                t += 1
+            else:
+                time.sleep(1.0)
+        row = list(csv.DictReader(open(os.path.join(OUT, f"frame_bench_{tag}.csv"))))[0]
+        line = f"  {name:28s} frames mean {float(row['ft_mean']):6.1f} p95 {float(row['ft_p95']):6.1f} ms (gpu wait {float(row['gpu_wait_ms']):5.1f})"
+        if run is not None:
+            run.server.stop()
+            s = run.summary()
+            duty = run.server.duty(cell_start or 0.0, (cell_start or 0.0) + a.window)
+            overall = run.server.busy_s / max(t, 1)
+            if pol == "parity":
+                parity_duty = overall
+            line += (f" | {t} s live, {run.server.calls} calls, duty {overall:.3f} (in the frame window {duty:.3f}), "
+                     f"worst/cap {s['dmax'] / a.cap:.2f}x, overflow {100 * s['overflow_frac']:.2f}%, "
+                     f"steady drift {s['kl_steady_per_agent_h']:.2f}, waits/agent-h {s['stall_per_agent_h']:.1f}, "
+                     f"live replies off the table {run.server.mismatch}")
+        print(line, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joint", action="store_true")
+    ap.add_argument("--live", action="store_true")
+    ap.add_argument("--live-agents", type=int, default=300)
+    ap.add_argument("--live-caps", default="2")
+    ap.add_argument("--window", type=int, default=480)
     ap.add_argument("--duties", nargs="+", type=float, default=[0.0, 0.05, 0.1, 0.2, 0.5, 0.9])
     ap.add_argument("--shared-latency", type=float, default=1.85)
     ap.add_argument("--seconds", type=int, default=1800)
@@ -130,6 +196,9 @@ def main():
     a = ap.parse_args()
     if a.joint:
         joint(a)
+        return
+    if a.live:
+        live(a)
         return
     a.agents = a.agents[0]
 
