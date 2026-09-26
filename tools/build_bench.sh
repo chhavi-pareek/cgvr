@@ -19,6 +19,9 @@ if ! "$UNITY" -batchmode -quit -projectPath "$PROJ" -executeMethod ParityBuild.B
   exit 1
 fi
 grep "\[ParityBuild\]" "$PROJ/Logs/build_$T.log" | head -3
+if [ "$T" = win64 ] && ! file "$OUT/ParityBench.exe" | grep -q "x86-64"; then
+  echo "built exe is not x86-64: $(file -b "$OUT/ParityBench.exe")"; exit 1
+fi
 if [ "$T" = mac ]; then cp "$REPO/tools/bench_package/run_bench.sh" "$OUT/"; else sed 's/\r*$/\r/' "$REPO/tools/bench_package/run_bench.bat" > "$OUT/run_bench.bat"; fi
 rm -f "$PROJ/Builds/ParityBench-$T.zip"
 (cd "$PROJ/Builds" && zip -qr "ParityBench-$T.zip" "$T")
