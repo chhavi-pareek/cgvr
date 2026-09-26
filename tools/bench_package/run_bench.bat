@@ -4,7 +4,8 @@ rem
 rem   run_bench.bat           full protocol: 3 seeds x 37 cells at N = 8000, 3-minute cooldown
 rem                           between seeds (about 45-60 minutes); targets 10-38 ms, so both a
 rem                           fast machine and a slow one have targets above their floor
-rem   run_bench.bat quick     1 seed, 9 cells: a check that the build runs here (about 5 minutes)
+rem   run_bench.bat quick     1 seed, 10 cells at targets 16 and 24 ms: a check that the build runs
+rem                           here and PARITY lands near its target (about 5 minutes)
 rem   run_bench.bat window    as the full protocol, in a window instead of -batchmode (use this
 rem                           if Results\*.txt reports "no graphics device")
 rem
@@ -21,7 +22,7 @@ if /i "%1"=="window" set MODE=
 set COMMON=-parityBench -overlap -sizes 8000 -out Results
 if /i "%1"=="quick" (
   echo quick check ...
-  start "" /wait ParityBench.exe %MODE% %COMMON% -seed 1 -targets 10,14 -policies masslod,knapsack_fullsim,parity -tag quick -logFile Results\quick.log
+  start "" /wait ParityBench.exe %MODE% %COMMON% -seed 1 -targets 16,24 -policies masslod,knapsack_fullsim,parity -tag quick -logFile Results\quick.log
   goto done
 )
 for %%k in (1 2 3) do (

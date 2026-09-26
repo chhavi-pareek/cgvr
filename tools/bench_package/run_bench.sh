@@ -7,7 +7,7 @@ BIN=./ParityBench.app/Contents/MacOS/ParityBench
 MODE=-batchmode; [ "${1:-}" = window ] && MODE=
 COMMON="-parityBench -overlap -sizes 8000 -out Results"
 if [ "${1:-}" = quick ]; then
-  "$BIN" $MODE $COMMON -seed 1 -targets 10,14 -policies masslod,knapsack_fullsim,parity -tag quick -logFile Results/quick.log
+  "$BIN" $MODE $COMMON -seed 1 -targets 16,24 -policies masslod,knapsack_fullsim,parity -tag quick -logFile Results/quick.log
 else
   for k in 1 2 3; do
     echo "seed $k of 3 ..."
