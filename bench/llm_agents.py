@@ -12,6 +12,13 @@ the model's exact answer for that situation (tabulated once, never shown to the 
   view_lod        the LOD way: agents the viewer can see first, then the rest; no ledger
   round_robin     everyone in turn; no ledger
   surrogate_only  never ask the model after warm-up
+
+    python -m bench.llm_agents --novel             # contexts that never repeat
+
+With --novel no paid reply is ever reused as an exact bound (as when memory or dialogue makes every
+prompt unique), and PARITY's charge for a surrogate decision is the worst case, a plug-in estimate
+with no margin, or the conformal bound (llm/schedule.py DriftBound). Coverage is the share of
+surrogate decisions whose true drift was at most what was charged.
 """
 import argparse
 
@@ -29,7 +36,15 @@ def main():
     ap.add_argument("--seconds", type=int, default=1800)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1])
     ap.add_argument("--cap", type=float, default=10.0)
+    ap.add_argument("--novel", action="store_true")
     a = ap.parse_args()
+    conds = [(p, {}) for p in POLICIES]
+    if a.novel:
+        conds = [("parity/worst", dict(novel=True, bound="worst")),
+                 ("parity/plugin", dict(novel=True, bound="plugin")),
+                 ("parity/cp 0.10", dict(novel=True, bound="conformal", alpha=0.10)),
+                 ("parity/cp 0.05", dict(novel=True, bound="conformal", alpha=0.05)),
+                 ("view_lod", {}), ("round_robin", {})]
     P, lat = build_table()
     print(f"model latency median {1e3 * np.median(lat):.0f} ms -> budget {0.9 / lat.mean():.2f} calls/s; "
           f"cap {a.cap} nats; {a.seconds // 60} simulated minutes; seeds {a.seeds}")
@@ -39,13 +54,14 @@ def main():
         rb = np.mean([r.st.boarded for r in ref]); rm = np.mean([r.st.missed for r in ref])
         print(f"\nN = {n}: {dec_rate:.1f} decisions/s needed for every decision to be the model's "
               f"({100 * min(1.0, 0.9 / lat.mean() / dec_rate):.0f}% servable);  reference boarded {rb:.0f}, missed {rm:.0f}")
-        print("  policy           worst/cap  over-cap   drift/agent-h  in view   model share  calls/s  waits/agent-h  boarded  missed")
-        for pol in POLICIES:
-            rs = [Run(n, pol, P, lat, seed=s, cap=a.cap).run(a.seconds).summary() for s in a.seeds]
+        print("  policy           worst/cap  over-cap   drift/agent-h  in view   model share  calls/s  waits/agent-h  boarded  missed  coverage")
+        for name, kw in conds:
+            pol = name.split("/")[0]
+            rs = [Run(n, pol, P, lat, seed=s, cap=a.cap, **kw).run(a.seconds).summary() for s in a.seeds]
             m = lambda k: float(np.mean([r[k] for r in rs]))  # noqa: E731
-            print(f"  {pol:15s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
+            print(f"  {name:15s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
                   f"{m('kl_per_agent_h'):13.2f} {m('kl_view_per_agent_h'):9.2f} {m('llm_frac'):12.2f} {m('calls_per_s'):8.2f} "
-                  f"{m('stall_per_agent_h'):13.1f} {m('boarded'):8.0f} {m('missed'):7.0f}")
+                  f"{m('stall_per_agent_h'):13.1f} {m('boarded'):8.0f} {m('missed'):7.0f}  {100 * m('coverage'):6.1f}%")
 
 
 if __name__ == "__main__":

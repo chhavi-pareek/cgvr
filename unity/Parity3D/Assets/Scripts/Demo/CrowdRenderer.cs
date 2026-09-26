@@ -165,6 +165,11 @@ namespace Parity
 
         /// <summary>Draws the crowd as viewer `viewer` of the world sees it: its own mesh and gait
         /// tiers (several viewers share one behaviour but not one LOD).</summary>
+        /// <summary>Agents submitted by the last Draw: those whose bounding sphere touches the
+        /// camera frustum. The rest are culled, whatever their tier, as any engine would.</summary>
+        public int Drawn;
+        readonly Plane[] frustum = new Plane[6];
+
         public void Draw(CrowdWorld w, Camera cam, int viewer = 0)
         {
             EnsureAppearance(w.N);
@@ -172,9 +177,16 @@ namespace Parity
             var animT = w.AnimV[viewer];
             Vector3 eye = cam.transform.position;
             var sTorso = streams[(int)S.TorsoHi];
+            GeometryUtility.CalculateFrustumPlanes(cam, frustum);
+            Drawn = 0;
             for (int i = 0; i < w.N; i++)
             {
                 Vector3 p = new Vector3(w.Pos[i].x, 0f, w.Pos[i].y);
+                Vector3 mid = new Vector3(p.x, 0.9f, p.z);
+                bool outside = false;
+                for (int f = 0; f < 6 && !outside; f++) outside = frustum[f].GetDistanceToPoint(mid) < -1.2f;
+                if (outside) continue;
+                Drawn++;
                 float heat = Heat(w, i);
                 Vector4 cShirt = shirt[i], cLegs = trousers[i], cSkin = skin[i], cHair = hair[i];
                 float glow = 0f;
@@ -313,6 +325,7 @@ namespace Parity
         public double[] MeasureGeometry(CrowdWorld w, Camera cam, int rounds = 10)
         {
             var best = new double[ParityTable.NTiers];
+            var bestCpu = new double[ParityTable.NTiers];
             for (int g = 0; g < best.Length; g++) best[g] = double.MaxValue;
             var probe = new Texture2D(1, 1, TextureFormat.RGBA32, false);
             var keepGeo = (sbyte[])w.Geo.Clone();
@@ -330,9 +343,11 @@ namespace Parity
                     float t0 = Time.realtimeSinceStartup;
                     RenderOnce(w, cam, probe);
                     double dt = (Time.realtimeSinceStartup - t0) * 1000.0;
-                    if (r >= warm && dt < best[g]) best[g] = dt;
+                    if (r >= warm && dt < best[g]) { best[g] = dt; bestCpu[g] = submitMs; }
                 }
-            for (int g = 0; g < best.Length; g++) best[g] /= w.N;
+            // per agent drawn: a culled agent costs nothing at any tier
+            for (int g = 0; g < best.Length; g++) { best[g] /= Mathf.Max(Drawn, 1); bestCpu[g] /= Mathf.Max(Drawn, 1); }
+            GeometryCpu = bestCpu;
             System.Array.Copy(keepGeo, w.Geo, w.N);
             System.Array.Copy(keepAnim, w.AnimV[0], w.N);
             Object.DestroyImmediate(probe);
@@ -406,10 +421,17 @@ namespace Parity
             }
         }
 
+        /// <summary>From the last MeasureGeometry: the CPU part of each tier's cost (building and
+        /// submitting its draws, ms per drawn agent); the rest of the measured time is the GPU's.</summary>
+        public double[] GeometryCpu = new double[ParityTable.NTiers];
+        double submitMs;
+
         void RenderOnce(CrowdWorld w, Camera cam, Texture2D probe)
         {
+            float t0 = Time.realtimeSinceStartup;
             Draw(w, cam);
             cam.Render();
+            submitMs = (Time.realtimeSinceStartup - t0) * 1000.0;
             var prev = RenderTexture.active;
             RenderTexture.active = cam.targetTexture;
             probe.ReadPixels(new Rect(0, 0, 1, 1), 0, 0, false);   // blocks until the GPU is done

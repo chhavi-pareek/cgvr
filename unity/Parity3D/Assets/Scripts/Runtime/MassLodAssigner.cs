@@ -24,6 +24,7 @@ namespace Parity
         sbyte[] vis, sim;
         short[] hold;
         int[] order;
+        readonly RadixSorter radix = new RadixSorter();
         float[] dist;
         int n;
 
@@ -72,7 +73,7 @@ namespace Parity
 
         /// <param name="sig">out: significance, also the salience source for PARITY.</param>
         public void Step(Vector2[] pos, int count, Vector2 camPos, float camYaw,
-                         float[] sig, bool[] inView, sbyte[] simTier, sbyte[] visTier)
+                         float[] sig, bool[] inView, sbyte[] simTier, sbyte[] visTier, bool viewOnly = false)
         {
             if (n != count) Resize(count);
             float cosLimit = Mathf.Cos(Fov * 0.5f + ViewMargin);
@@ -89,6 +90,14 @@ namespace Parity
                 inView[i] = hold[i] > 0;
                 sig[i] = d * (inView[i] ? 1f : OovPenalty);
             }
+            // PARITY reads only distance and visibility; the bands and caps are the baseline's
+            if (!viewOnly) Tiers(sig, inView, simTier, visTier);
+        }
+
+        /// <summary>Bands, hysteresis and caps from the distances and visibility of the last
+        /// Step, which may have been a viewOnly one.</summary>
+        public void Tiers(float[] sig, bool[] inView, sbyte[] simTier, sbyte[] visTier)
+        {
             if (cold)
             {
                 for (int i = 0; i < n; i++) { vis[i] = 0; sim[i] = 0; }
@@ -99,9 +108,9 @@ namespace Parity
             BandTier(dist, VisBands, vis, HystDist, n);
             BandTier(sig, SimBands, sim, HystDist, n);
 
-            for (int i = 0; i < n; i++) order[i] = i;
-            var keys = sig;
-            System.Array.Sort(order, (a, b) => keys[a].CompareTo(keys[b]));  // stable enough: ties are equal-significance
+            var keys = radix.Keys(n);
+            for (int i = 0; i < n; i++) { keys[i] = RadixSorter.Key(sig[i]); order[i] = i; }
+            radix.Sort(order, n);                                   // significance ascending, ties by index
 
             for (int i = 0; i < n; i++) visTier[i] = inView[i] ? vis[i] : (sbyte)3;
             for (int i = 0; i < n; i++) simTier[i] = sim[i];

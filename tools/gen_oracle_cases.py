@@ -224,7 +224,11 @@ def viewers(env):
             B = np.where(rng.random((2, n)) < 0.3, 0.0, np.minimum(1.0, (10.0 / rng.uniform(2, 120, (2, n))) ** 2))
             H = np.where(rng.random((2, n)) < 0.25, rng.integers(0, 15, (2, n)), -1)
             Pv = np.where(rng.random((2, n)) < 0.9, rng.integers(0, 15, (2, n)), -1)
+            Ps = np.where(rng.random(n) < 0.9, rng.integers(0, 12, n), -1)
             w = (0.0, 0.05, 0.12, 0.3)[seed]      # one seed without the switching cost
+            ws = (0.1, 0.0, 0.2, 0.05)[seed]      # and one without the state switching cost
+            # two seeds lock a third of the state pairs (the render-only knapsack baseline)
+            Sl = np.where(rng.random(n) < 0.3, rng.integers(0, 12, n), -1) if seed % 2 else np.full(n, -1)
             top = FactoredAllocator(TABLE).allocate(s, cost, np.inf, headroom=hr, view_salience=B).cost
             floor = FactoredAllocator(TABLE).allocate(s, cost, 0.0, headroom=hr, view_salience=B).cost
             # the last two sit just above the no-hold floor, so holds have to be released
@@ -234,19 +238,21 @@ def viewers(env):
                                   views=[[float(x) for x in row] for row in B],
                                   holds=[[int(x) for x in row] for row in H],
                                   prevs=[[int(x) for x in row] for row in Pv], switchCost=w,
+                                  statePrev=[int(x) for x in Ps], stateSwitchCost=ws, stateLock=[int(x) for x in Sl],
                                   rowCost=[float(x) for x in cost], headroom=[float(x) for x in hr],
                                   fillMax=0, warm=False))
-                meta.append((n, s, B, H, cost, hr, b, Pv, w))
+                meta.append((n, s, B, H, cost, hr, b, Pv, w, Ps, ws, Sl))
     got = _run(cases, env, "viewers")
     verdict = over = mask_v = diff = rel_diff = 0
     tot = released = 0
     f32 = lambda x: np.asarray(x, np.float32).astype(np.float64)
-    for (n, s, B, H, cost, hr, b, Pv, w), g in zip(meta, got):
+    for (n, s, B, H, cost, hr, b, Pv, w, Ps, ws, Sl), g in zip(meta, got):
         # the port reads every number as fp32; give the reference the same numbers, or the
         # release loop's running floor lands on different sides of a budget it sits right on
         al = FactoredAllocator(TABLE)
         py = al.allocate(f32(s), f32(cost), float(np.float32(b)), headroom=f32(hr), view_salience=f32(B), view_lock=H,
-                         view_prev=Pv, switch_cost=float(np.float32(w)))
+                         view_prev=Pv, switch_cost=float(np.float32(w)),
+                         state_prev=Ps, state_switch_cost=float(np.float32(ws)), state_lock=Sl)
         cs = np.asarray(g["assign"], np.int64)
         tot += 2 * n
         verdict += int(bool(py.infeasible) != bool(g["infeasible"]))
@@ -256,10 +262,10 @@ def viewers(env):
         released += al.released
         if not g["infeasible"] and g["cost"] > b * (1 + 1e-5):
             over += 1
-        if np.any(TABLE.err[cs] > np.asarray(hr)[None, :] + 1e-6):
+        if np.any((TABLE.err[cs] > np.asarray(hr)[None, :] + 1e-6)[:, Sl < 0]):   # a lock overrides the mask
             mask_v += 1
         diff += int((cs != py.assign).sum())
-    print(f"\nviewers (two views, pop holds, switching cost): {len(meta)} cases, {tot} agent-view decisions, "
+    print(f"\nviewers (two views, pop holds, view and state switching costs): {len(meta)} cases, {tot} agent-view decisions, "
           f"{released} holds released for the budget")
     print(f"  infeasibility verdict disagreements : {verdict}")
     print(f"  released-hold count disagreements   : {rel_diff}")
@@ -283,22 +289,26 @@ def viewers_warm(env):
     f32 = lambda x: np.asarray(x, np.float32).astype(np.float64)
     frames, cases = [], []
     prev = np.full((2, n), -1)
+    sprev = np.full(n, -1)
     py = FactoredAllocator(TABLE, warm=True, btol=1e-3)      # exactly as the engine runs it
     for f in range(40):
         B = np.clip(B * rng.uniform(0.97, 1.03, B.shape), 0.0, 1.0)
         b = float(np.float32(0.35 * top * (1 + rng.uniform(-0.03, 0.03))))
         H = np.where(rng.random((2, n)) < 0.1, np.maximum(prev, 0), -1)
         r = py.allocate(f32(s), f32(cost), b, headroom=f32(hr), view_salience=f32(B), view_lock=H,
-                        view_prev=prev, switch_cost=float(np.float32(0.12)))
+                        view_prev=prev, switch_cost=float(np.float32(0.12)),
+                        state_prev=sprev, state_switch_cost=float(np.float32(0.12)))
         cases.append(dict(n=n, budget=b, salience=[float(x) for x in s], views=[[float(x) for x in row] for row in B],
                           holds=[[int(x) for x in row] for row in H], prevs=[[int(x) for x in row] for row in prev],
-                          switchCost=0.12, rowCost=[float(x) for x in cost], headroom=[float(x) for x in hr],
+                          switchCost=0.12, statePrev=[int(x) for x in sprev], stateSwitchCost=0.12,
+                          rowCost=[float(x) for x in cost], headroom=[float(x) for x in hr],
                           fillMax=0, warm=True, btol=1e-3))
         frames.append(r.assign.copy())
         prev = py.view_pair.copy()
+        sprev = py.state_pair.copy()
     got = _run(cases, env, "viewers-warm")
     diff = sum(int((np.asarray(g["assign"]) != a).sum()) for g, a in zip(got, frames))
-    print(f"\nfactored warm start: 40 frames, N={n}, two views, switching cost and holds, budget +-3%")
+    print(f"\nfactored warm start: 40 frames, N={n}, two views, both switching costs and holds, budget +-3%")
     print(f"  differing agent-view assignments    : {diff}  of {40 * 2 * n}")
     print("  ->", "warm factored path agrees" if diff == 0 else "WARM FACTORED PATH DISAGREES")
     return diff == 0

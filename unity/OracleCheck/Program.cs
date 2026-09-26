@@ -27,12 +27,15 @@ static class Program
         public int[][] holds { get; set; }    // per viewer: view pair held by the pop ledger, or -1
         public int[][] prevs { get; set; }    // per viewer: previous view pair for the switching cost
         public float switchCost { get; set; }
+        public int[] statePrev { get; set; }  // previous state pair for the state switching cost
+        public float stateSwitchCost { get; set; }
+        public int[] stateLock { get; set; }  // state pair fixed from outside, -1 free
         public double btol { get; set; }
     }
 
     static int Main(string[] args)
     {
-        var table = ParityTable.Build();
+        var table = ParityTable.Build(surrogateNav: true);
         Console.WriteLine($"C# table: m = {table.M}");
         if (args.Length < 2) { Console.Error.WriteLine("usage: <cases.json> <results.json>"); return 2; }
 
@@ -67,7 +70,8 @@ static class Program
                 var am = new int[V][];
                 for (int v = 0; v < V; v++) am[v] = new int[c.n];
                 fac.SetCosts(c.rowCost);
-                var rf = fac.Solve(c.salience, c.views, c.holds, hm, c.n, c.budget, am, c.prevs, c.switchCost);
+                var rf = fac.Solve(c.salience, c.views, c.holds, hm, c.n, c.budget, am, c.prevs, c.switchCost,
+                                  c.statePrev, c.stateSwitchCost, c.stateLock);
                 if (k > 0) sb.Append(',');
                 sb.Append("{\"assign\":[");
                 for (int v = 0; v < V; v++)

@@ -89,31 +89,49 @@ namespace Parity
     {
         public int W = 128, H = 128;
         public float Height = 1.8f, HalfWidth = 0.3f;
-        bool[] covered;
-        float[] depth;
+        ulong[] covered;
         int[] order, x0, x1, y0, y1;
         int filled;
+        readonly RadixSorter radix = new RadixSorter();
+        public static readonly long[] Ticks = new long[3];
+        public static long Filled;
+
+        static int Pop(ulong x)
+        {
+            x -= (x >> 1) & 0x5555555555555555UL;
+            x = (x & 0x3333333333333333UL) + ((x >> 2) & 0x3333333333333333UL);
+            x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FUL;
+            return (int)((x * 0x0101010101010101UL) >> 56);
+        }
 
         /// <summary>Visible pixels per agent through view-projection vp (projX, projY are the
         /// projection's x and y scale). Returns the pixel count of an unoccluded figure at d0.</summary>
         public float Compute(Vector2[] pos, int n, Matrix4x4 vp, float projX, float projY, float d0, float[] visible)
         {
-            if (covered == null || covered.Length != W * H) covered = new bool[W * H];
+            long tq0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            int words = (W + 63) >> 6;
+            if (covered == null || covered.Length != words * H) covered = new ulong[words * H];
             System.Array.Clear(covered, 0, covered.Length);
-            if (depth == null || depth.Length < n)
+            if (order == null || order.Length < n)
             {
-                depth = new float[n]; order = new int[n];
+                order = new int[n];
                 x0 = new int[n]; x1 = new int[n]; y0 = new int[n]; y1 = new int[n];
             }
+            var keys = radix.Keys(n);
             filled = 0;
+            // rows x, y and w of vp at the foot (y = 0); the head adds Height times column 1
+            float m00 = vp.m00, m02 = vp.m02, m03 = vp.m03, m10 = vp.m10, m12 = vp.m12, m13 = vp.m13;
+            float m30 = vp.m30, m32 = vp.m32, m33 = vp.m33;
+            float hX = vp.m01 * Height, hY = vp.m11 * Height, hW = vp.m31 * Height;
             for (int i = 0; i < n; i++)
             {
                 visible[i] = 0f;
-                var foot = vp * new Vector4(pos[i].x, 0f, pos[i].y, 1f);
-                var head = vp * new Vector4(pos[i].x, Height, pos[i].y, 1f);
-                if (foot.w <= 0.1f || head.w <= 0.1f) continue;
-                float fx = foot.x / foot.w, fy = foot.y / foot.w, hx = head.x / head.w, hy = head.y / head.w;
-                float hw = HalfWidth * projX / (0.5f * (foot.w + head.w));
+                float px = pos[i].x, pz = pos[i].y;
+                float fxc = m00 * px + m02 * pz + m03, fyc = m10 * px + m12 * pz + m13, fw = m30 * px + m32 * pz + m33;
+                float hw0 = fw + hW;
+                if (fw <= 0.1f || hw0 <= 0.1f) continue;
+                float fx = fxc / fw, fy = fyc / fw, hx = (fxc + hX) / hw0, hy = (fyc + hY) / hw0;
+                float hw = HalfWidth * projX / (0.5f * (fw + hw0));
                 float ax = Mathf.Min(fx, hx) - hw, bx = Mathf.Max(fx, hx) + hw;
                 float ay = Mathf.Min(fy, hy), by = Mathf.Max(fy, hy);
                 int px0 = Mathf.Clamp(Mathf.FloorToInt((ax + 1f) * 0.5f * W), 0, W);
@@ -122,22 +140,33 @@ namespace Parity
                 int py1 = Mathf.Clamp(Mathf.CeilToInt((by + 1f) * 0.5f * H), 0, H);
                 if (px1 <= px0 || py1 <= py0) continue;
                 x0[i] = px0; x1[i] = px1; y0[i] = py0; y1[i] = py1;
-                depth[filled] = foot.w;
+                keys[filled] = (uint)Mathf.Min(fw * 64f, 65535f);     // 1.6 cm depth steps: two radix passes
                 order[filled] = i;
                 filled++;
             }
-            System.Array.Sort(depth, order, 0, filled);          // nearest first
+            long tq = System.Diagnostics.Stopwatch.GetTimestamp(); Ticks[0] += tq - tq0; Filled += filled;
+            radix.Sort(order, filled);                          // nearest first
+            long tr = System.Diagnostics.Stopwatch.GetTimestamp(); Ticks[1] += tr - tq;
             for (int k = 0; k < filled; k++)
             {
                 int i = order[k], c = 0;
-                for (int y = y0[i]; y < y1[i]; y++)
+                int w0 = x0[i] >> 6, w1 = (x1[i] - 1) >> 6;
+                for (int w = w0; w <= w1; w++)
                 {
-                    int row = y * W;
-                    for (int x = x0[i]; x < x1[i]; x++)
-                        if (!covered[row + x]) { covered[row + x] = true; c++; }
+                    int lo = Mathf.Max(x0[i] - (w << 6), 0), hi = Mathf.Min(x1[i] - (w << 6), 64);
+                    ulong mask = (hi == 64 ? ~0UL : (1UL << hi) - 1UL) & ~((1UL << lo) - 1UL);
+                    for (int y = y0[i]; y < y1[i]; y++)
+                    {
+                        int at = y * words + w;
+                        ulong fresh = mask & ~covered[at];
+                        if (fresh == 0UL) continue;
+                        c += Pop(fresh);
+                        covered[at] |= fresh;
+                    }
                 }
                 visible[i] = c;
             }
+            Ticks[2] += System.Diagnostics.Stopwatch.GetTimestamp() - tr;
             float refW = 2f * HalfWidth * projX / d0 * 0.5f * W;
             float refH = Height * projY / d0 * 0.5f * H;
             return Mathf.Max(refW * refH, 1f);

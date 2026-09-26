@@ -191,6 +191,7 @@ namespace Parity
             Base?.Dispose(); Par?.Dispose();
             Base = new CrowdWorld(Policy.Baseline, Agents, Spec, 1u, AllocTable, TargetMs, Cap);
             Par = new CrowdWorld(Policy.Parity, Agents, Spec, 1u, AllocTable, TargetMs, Cap);
+            Base.Pipelined = Par.Pipelined = true;
             Base.ApplyCalibration(BaseFloor, BaseTheta);
             Par.ApplyCalibration(CalibFloor, CrowdWorld.CalibratedTheta);
             Par.ViewAware = ViewAware;
@@ -300,6 +301,7 @@ namespace Parity
             // co-op: the second viewer walks the same orbit half a turn behind
             Place(CamR, CoOp ? orbitT + 0.5f : orbitT, out var camXZ2, out float yaw2);
 
+            Base.Join(); Par.Join();
             foreach (var w in new[] { Base, Par })
             {
                 w.BudgetFrac = BudgetFrac; w.AbsoluteBudget = Budget == BudgetMode.Absolute;

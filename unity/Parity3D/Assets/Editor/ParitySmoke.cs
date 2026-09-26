@@ -21,9 +21,11 @@ public static class ParitySmoke
         int failures = 0;
         try
         {
-            var table = ParityTable.Build();
+            var table = ParityTable.Build(surrogateNav: true);
             Log($"table rows m = {table.M} (expected 180)");
             if (table.M != 180) { Err($"table has {table.M} rows, not 180"); failures++; }
+            int engineRows = ParityTable.Build().M;
+            if (engineRows != 135) { Err($"engine table has {engineRows} rows, not 135"); failures++; }
 
             var size = SceneSpec.Get(SceneKind.Plaza);
             double floor;
@@ -114,6 +116,7 @@ public static class ParitySmoke
             failures += Scene(SceneKind.Corridor, 260, 3600);
             failures += Coverage();
             failures += ViewSide();
+            failures += Pipelined(1500, 600);
         }
         catch (Exception ex)
         {
@@ -280,6 +283,55 @@ public static class ParitySmoke
         }
         if (differ == 0) { Err("the two viewers were never given different detail"); failures++; }
         Log($"pop ledger: worst agent in any 2 s {worstFree} free -> {worstHeld} bounded");
+        return failures;
+    }
+
+    /// <summary>Decisions on a worker thread, a frame ahead, under a frame-time target: the same
+    /// invariants as the serial path, checked with the worker joined.</summary>
+    static int Pipelined(int n, int frames)
+    {
+        var spec = SceneSpec.Get(SceneKind.Plaza);
+        int failures = 0;
+        var table = ParityTable.Build(spec.EMax);
+        double floor, baseFloor;
+        CrowdWorld.CalibrateAxes(spec, table, 200, out floor);
+        var baseTheta = CrowdWorld.MeasureAxes(spec, table, 200, Policy.Baseline, out baseFloor);
+        var worlds = new[] { new CrowdWorld(Policy.Baseline, n, spec, 1u, table) { Pipelined = true },
+                             new CrowdWorld(Policy.Parity, n, spec, 1u, table) { Pipelined = true } };
+        worlds[0].ApplyCalibration(baseFloor, baseTheta);
+        worlds[1].ApplyCalibration(floor, CrowdWorld.CalibratedTheta);
+        var par = worlds[1];
+        par.FrameTargetMs = 4.5f;
+        int nan = 0, overBudget = 0, baseLive = 0;
+        long parSur = 0;
+        float peak = 0f;
+        float r = 0.45f * Mathf.Min(spec.Size.x, spec.Size.y);
+        for (int f = 0; f < frames; f++)
+        {
+            float ang = (f / 2400f) * Mathf.PI * 2f;
+            var cam = spec.Focus + new Vector2(r * Mathf.Cos(ang), r * Mathf.Sin(ang));
+            float yaw = Mathf.Atan2(spec.Focus.y - cam.y, spec.Focus.x - cam.x);
+            foreach (var w in worlds)
+            {
+                // a synthetic frame: the step plus a fixed render share
+                w.Step(cam, yaw, w.StepMs + 4f);
+                w.Join();
+                for (int i = 0; i < w.N; i++)
+                    if (float.IsNaN(w.Pos[i].x) || float.IsNaN(w.Pos[i].y)) nan++;
+            }
+            for (int i = 0; i < n; i++) { if (worlds[0].Beh[i] < 3) baseLive++; if (par.Beh[i] == 3) parSur++; }
+            if (!par.Last.Infeasible && par.Last.Cost > par.BudgetMs * 1.0001f) overBudget++;
+            peak = Mathf.Max(peak, par.MaxDivergence());
+        }
+        Log($"pipelined: N = {n}, {frames} frames, PARITY worst divergence {peak:F2} of cap {par.Cap:F2}," +
+            $" surrogates {parSur / frames}/frame, restorations {par.Ledger.Restorations}, blocked {par.Prof[11] / frames:F3} ms/frame; baseline live {baseLive / frames}/frame");
+        failures += Check("pipelined NaN positions", nan, 0);
+        failures += Check("pipelined budget overruns", overBudget, 0);
+        failures += Check("pipelined cap breaches (invariant 3)", par.CapBreaches, 0);
+        if (peak > par.Cap + 1e-3f) { Err("pipelined PARITY exceeded its cap"); failures++; }
+        if (parSur == 0 || par.Ledger.Restorations <= n) { Err("pipelined PARITY never had to restore anyone: the ledger went untested"); failures++; }
+        if (baseLive == 0) { Err("pipelined baseline assigned no live tier"); failures++; }
+        foreach (var w in worlds) w.Dispose();
         return failures;
     }
 

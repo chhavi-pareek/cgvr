@@ -84,6 +84,15 @@ namespace Parity
         /// (alloc/factored.py switch_cost): a preference in the objective that lowers the average
         /// pop rate, where the pop ledger only bounds the worst. 0 turns it off.</summary>
         public float SwitchCost = 0.12f;
+        /// <summary>The same price on changing an agent's state pair, per unit of its state
+        /// salience (alloc/factored.py state_switch_cost): frame-time noise moves the budget every
+        /// frame, and this keeps marginal agents from flipping with it. Off by default: in the dense
+        /// plaza the flips are the ledger forcing restorations, which it must not resist.</summary>
+        public float StateSwitchCost;
+        /// <summary>Ablation: PARITY with no divergence cap (Python's parity_nocap).</summary>
+        public bool Uncapped;
+        int[] visit, keyStart;
+        int[] prevS;
         /// <summary>View salience from visible pixels in a coverage buffer instead of distance alone.</summary>
         public bool Occlusion = true;
         public readonly CoverageBuffer Coverage = new CoverageBuffer();
@@ -112,6 +121,42 @@ namespace Parity
         /// <summary>When set (>= 0), the budget IS this: the baseline's own predicted spend this
         /// frame, so both policies are held to the same milliseconds.</summary>
         public float MatchBudgetMs = -1f;
+        /// <summary>When set (> 0), a target FRAME time, so the whole frame -- sim, allocator,
+        /// render, GPU -- settles on the target on any machine without re-tuning. Model-based: the
+        /// budget is the target less a smoothed estimate of what the frame costs beyond the
+        /// allocation's own predicted spend (measured frame minus the predicted spend of the
+        /// allocation that frame ran). Exact in one step when the cost model is, and stable for any
+        /// cost-model scale error below 2x -- an integral controller on the frame time is not, once
+        /// the decision is pipelined a frame ahead. FrameGain is the smoothing rate.</summary>
+        public float FrameTargetMs;
+        public float FrameGain = 0.1f;
+        /// <summary>The target is a PERCENTILE of frame time, not its mean: the budget leaves
+        /// z * std of headroom (z = 1.65 is the 95th percentile of a normal).</summary>
+        public float FrameZ = 1.65f;
+        float frameEma, frameVar, overheadEma = float.NaN, appliedCost = -1f;
+
+        /// <summary>Frames overlap -- the CPU prepares frame t + 1 while the GPU draws frame t --
+        /// so a frame costs max(CPU, GPU), not their sum, and a millisecond is not one currency.
+        /// With DualResource each row has a CPU cost (behaviour, navigation, animation, and the
+        /// draw submission its mesh needs) and a GPU cost (the rest of its mesh), each resource
+        /// its own budget from its own measured time, and the allocator prices a row at
+        /// cpu + Rho * gpu with Rho the ratio of the two multipliers. The existing single-budget
+        /// solve is exact for a fixed Rho (the combined budget is B_cpu + Rho * B_gpu); Rho is
+        /// searched each frame, warm from the last, until both budgets hold. A resource with
+        /// slack gets price 0 -- which is how CPU fidelity becomes free while the GPU is the
+        /// bottleneck, and the other way round.</summary>
+        public bool DualResource;
+        /// <summary>Last frame's main-thread CPU time and GPU time, set by the caller before Step.</summary>
+        public float MeasuredCpuMs = -1f, MeasuredGpuMs = -1f;
+        /// <summary>MeasuredGpuMs is only an upper bound: without a GPU timer, an overlapped frame
+        /// that never waited for the GPU shows how long the GPU had, not how long it took.</summary>
+        public bool GpuCensored;
+        public float Rho = 1f, BudgetCpuMs, BudgetGpuMs, SpendCpuMs, SpendGpuMs;
+        /// <summary>GPU share of each geometry tier's cost (ms per agent, relative to tier 3),
+        /// from the render calibration; the rest of the calibrated geometry cost is CPU.</summary>
+        public static readonly double[] GeoGpuTheta = new double[ParityTable.NTiers];
+        float[] rowCpu, rowGpu, rowEff;
+        float ovCpu = float.NaN, ovGpu = float.NaN, cpuEma, cpuVar, gpuEma, gpuVar, appliedCpu = -1f, appliedGpu = -1f;
         public float TargetMs = 16.7f;
         public float BudgetMs = 16.7f;   // recomputed every frame unless AbsoluteBudget
         // cap = 300 * e_sur, as sim/tiered.py builds it from the occupancy-weighted mean rate
@@ -193,16 +238,16 @@ namespace Parity
                 // truncated decode loses the tail first. That is the whole point of the axis.
                 for (int d = 0; d < LatentDim; d++) Latent[i * LatentDim + d] = r.Range(-1f, 1f) / (1f + d);
             }
-            grid = new Grid(size, 4f);
+            grid = new Grid(size, 2.5f);          // >= the largest query radius (2.2 m)
 
             Alloc?.Dispose(); Ledger?.Dispose();
             DisposeNative();
-            if (Mode == Policy.Parity)
+            // both modes: the baseline's render-knapsack variant allocates the view half too
             {
                 Alloc = new FidelityAllocator(Table);
                 Factored = FactoredAllocator.TryCreate(Table);
                 if (Factored != null) { Factored.Warm = true; Factored.Btol = 1e-3; }
-                stateSalM = new float[n]; headroomM = new float[n];
+                stateSalM = new float[n]; headroomM = new float[n]; prevS = new int[n];
                 Ledger = new ErrorLedger(n, Cap, 7u);
                 salience = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
                 headroom = new Unity.Collections.NativeArray<float>(n, Unity.Collections.Allocator.Persistent);
@@ -239,7 +284,7 @@ namespace Parity
         /// perturbed. Returns ms per agent per frame; the caller subtracts the all-tier-3 floor.
         /// Nothing authored enters the result, which is invariant 1.</summary>
         public static double CalibrateAxes(SceneSpec spec, ParityTable table, int n,
-                                           out double floorMsPerAgent, int reps = 24)
+                                           out double floorMsPerAgent, int reps = 8)
         {
             CalibratedTheta = MeasureAxes(spec, table, n, Policy.Parity, out floorMsPerAgent, reps);
             return floorMsPerAgent;
@@ -250,35 +295,64 @@ namespace Parity
         /// them something different, and a cost-matched comparison has to price each policy's
         /// spend with its own measured costs.</summary>
         public static double[,] MeasureAxes(SceneSpec spec, ParityTable table, int n, Policy mode,
-                                            out double floorMsPerAgent, int reps = 24)
+                                            out double floorMsPerAgent, int reps = 8, int blocks = 6)
         {
             var w = new CrowdWorld(mode, n, spec, 99u, table);
-            double Time4(int b, int nv, int a, int g)
+            void Pin(int[] c)
             {
                 for (int i = 0; i < w.N; i++)
                 {
-                    w.Beh[i] = (sbyte)b; w.Nav[i] = (sbyte)nv; w.Anim[i] = (sbyte)a; w.Geo[i] = (sbyte)g;
+                    w.Beh[i] = (sbyte)c[0]; w.Nav[i] = (sbyte)c[1]; w.Anim[i] = (sbyte)c[2]; w.Geo[i] = (sbyte)c[3];
                 }
-                w.grid.Build(w.Pos, w.N);
-                w.StepCore(); w.StepFine(); w.frame++;            // warm up
-                float t0 = Time.realtimeSinceStartup;
-                // frame MUST advance: the behaviour and animation tiers are update strides, so
-                // holding frame at 0 makes every tier run every step and measures only the
-                // decode width. That reads back as a non-monotone cost column.
-                for (int r = 0; r < reps; r++) { w.StepCore(); w.StepFine(); w.frame++; }
-                return (Time.realtimeSinceStartup - t0) * 1000.0 / (reps * (double)w.N);
             }
-
-            floorMsPerAgent = Time4(3, 3, 3, 3);
-            var th = new double[ParityTable.NAxes, ParityTable.NTiers];
-            for (int ax = 0; ax < ParityTable.NAxes; ax++)
+            // Each configuration is a pin of all four axes. The one-axis-at-a-time contrast is
+            // taken against the all-floor pin, except navigation: separation runs only for a
+            // live agent, so against a surrogate every navigation tier reads as free. Its
+            // contrast is taken on the cheapest live behaviour tier instead. The baseline never
+            // splits the two (MassLOD sets navigation = behaviour), so its behaviour column is
+            // the joint contrast and its navigation column 0.
+            bool joint = mode == Policy.Baseline;
+            var cfg = new System.Collections.Generic.List<int[]> { new[] { 3, 3, 3, 3 } };
+            for (int t = 0; t < ParityTable.NTiers - 1; t++) cfg.Add(joint ? new[] { t, t, 3, 3 } : new[] { t, 3, 3, 3 });
+            if (!joint)
+            {
+                cfg.Add(new[] { 2, 3, 3, 3 });
+                for (int t = 0; t < ParityTable.NTiers - 1; t++) cfg.Add(new[] { 2, t, 3, 3 });
+            }
+            for (int ax = 2; ax < ParityTable.NAxes; ax++)
                 for (int t = 0; t < ParityTable.NTiers - 1; t++)
                 {
-                    int[] pin = { 3, 3, 3, 3 };
-                    pin[ax] = t;
-                    double ms = Time4(pin[0], pin[1], pin[2], pin[3]);
-                    th[ax, t] = System.Math.Max(ms - floorMsPerAgent, 0.0);
+                    var c = new[] { 3, 3, 3, 3 }; c[ax] = t; cfg.Add(c);
                 }
+            // the configurations are timed in interleaved blocks and each keeps its fastest
+            // block: the parallel step at large N is short enough that scheduler noise would
+            // otherwise swamp the differences being measured
+            var best = new double[cfg.Count];
+            for (int k = 0; k < cfg.Count; k++) best[k] = double.MaxValue;
+            for (int blk = 0; blk < blocks; blk++)
+                for (int k = 0; k < cfg.Count; k++)
+                {
+                    Pin(cfg[k]);
+                    w.grid.Build(w.Pos, w.N);
+                    w.StepCore(); w.StepFine(); w.frame++;            // warm up
+                    float t0 = Time.realtimeSinceStartup;
+                    // frame MUST advance: the baseline's behaviour and animation tiers are update
+                    // strides, so holding frame at 0 makes every tier run every step
+                    for (int r = 0; r < reps; r++) { w.StepCore(); w.StepFine(); w.frame++; }
+                    best[k] = System.Math.Min(best[k], (Time.realtimeSinceStartup - t0) * 1000.0 / (reps * (double)w.N));
+                }
+
+            floorMsPerAgent = best[0];
+            var th = new double[ParityTable.NAxes, ParityTable.NTiers];
+            int at = 1;
+            for (int t = 0; t < ParityTable.NTiers - 1; t++) th[0, t] = System.Math.Max(best[at++] - best[0], 0.0);
+            if (!joint)
+            {
+                double live = best[at++];
+                for (int t = 0; t < ParityTable.NTiers - 1; t++) th[1, t] = System.Math.Max(best[at++] - live, 0.0);
+            }
+            for (int ax = 2; ax < ParityTable.NAxes; ax++)
+                for (int t = 0; t < ParityTable.NTiers - 1; t++) th[ax, t] = System.Math.Max(best[at++] - best[0], 0.0);
             w.Dispose();
             return th;
         }
@@ -312,6 +386,7 @@ namespace Parity
         /// salience falls back to the (d0 / d)^2 area model.</summary>
         public void SetView(int k, Matrix4x4 viewProjection, float projX, float projY)
         {
+            Join();
             viewProj[k] = viewProjection;
             proj[k] = new Vector2(projX, projY);
             hasView[k] = true;
@@ -319,18 +394,75 @@ namespace Parity
 
         public bool[] SeenBy(int k) => k == 0 ? InView : InView2;
 
+        /// <summary>Cumulative ms per stage, for profiling: see ProfNames.</summary>
+        /// Main thread: masslod (view part), decide (wait + any serial decision + apply), core,
+        /// fine, accrue, pops. The decision itself, wherever it runs: prep, view, coverage, solve,
+        /// and total (the multiplier search inside solve). wait is the part of decide spent
+        /// blocked on a pipelined decision.
+        public readonly double[] Prof = new double[12];
+        public static readonly string[] ProfNames = { "masslod", "decide", "core", "fine", "accrue", "pops", "view", "prep", "coverage", "total", "solve", "wait" };
+        static readonly double TickMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        long tick, atick;
+        void Lap(int k) { long now = System.Diagnostics.Stopwatch.GetTimestamp(); Prof[k] += (now - tick) * TickMs; tick = now; }
+        void ALap(int k) { long now = System.Diagnostics.Stopwatch.GetTimestamp(); Prof[k] += (now - atick) * TickMs; atick = now; }
+
+        /// <summary>Decide the next frame's tiers on a worker thread while this frame renders, for
+        /// either policy. The decision sees the ledger exactly as the next frame starts (it is
+        /// taken after accrual) and the camera one frame late. Set before the first Step.</summary>
+        public bool Pipelined;
+        System.Threading.Tasks.Task decision;
+        bool decided;
+        bool CanPipeline => Mode == Policy.Baseline || (ViewAware && Factored != null);
+
+        /// <summary>Waits for a pipelined decision in flight. Call before touching the world
+        /// from outside Step.</summary>
+        public void Join()
+        {
+            if (decision == null) return;
+            decision.Wait();
+            decision = null;
+        }
+
+        float decCpu, decGpu, decPairCpu, decPairGpu;
+        bool decGpuCensored;
+
+        void Decide(float measuredFrameMs, float pairedCost)
+        {
+            if (Mode == Policy.Parity) RunAllocator(measuredFrameMs, pairedCost);
+            else
+            {
+                if (Pipelined) MassLod.Tiers(Sig, InView, SimTier, VisTier);
+                if (RenderKnapsack) RunAllocator(measuredFrameMs, pairedCost);
+            }
+        }
+
         public void Step(Vector2 camPos, float camYaw, float measuredFrameMs)
         {
-            float t0 = Time.realtimeSinceStartup;
-            MassLod.Step(Pos, N, camPos, camYaw, Sig, InView, SimTier, VisTier);
-            if (Viewers > 1) MassLod2.Step(Pos, N, Cam2, Yaw2, Sig2, InView2, simTier2, visTier2);
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            tick = t0;
+            Join();
+            Prof[11] += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * TickMs;
+            bool pipe = Pipelined && CanPipeline;
+            bool viewOnly = Mode == Policy.Parity || pipe;
+            MassLod.Step(Pos, N, camPos, camYaw, Sig, InView, SimTier, VisTier, viewOnly);
+            if (Viewers > 1) MassLod2.Step(Pos, N, Cam2, Yaw2, Sig2, InView2, simTier2, visTier2, viewOnly);
+            Lap(0);
 
-            if (Mode == Policy.Baseline) ApplyBaselineTiers();
-            else RunAllocator(measuredFrameMs);
+            // the predicted spend of the allocation the measured (previous) frame ran
+            float paired = appliedCost;
+            decCpu = MeasuredCpuMs; decGpu = MeasuredGpuMs; decGpuCensored = GpuCensored; decPairCpu = appliedCpu; decPairGpu = appliedGpu;
+            if (!decided) Decide(measuredFrameMs, paired);
+            decided = false;
+            if (Mode == Policy.Baseline) { ApplyBaselineTiers(); appliedCost = AllocatableMs; }
+            else { ApplyDecision(); appliedCost = AllocatableMs; appliedCpu = SpendCpuMs; appliedGpu = SpendGpuMs; }
+            Lap(1);
 
             StepCore();
+            Lap(2);
             StepFine();
+            Lap(3);
             AccrueDivergence();
+            Lap(4);
             int views = Mode == Policy.Parity ? Viewers : 1;
             for (int k = 0; k < views; k++)
             {
@@ -344,24 +476,77 @@ namespace Parity
                 }
                 Pops[k].Update(AnimV[k], GeoV[k], SeenBy(k), N, popArea);
             }
-            StepMs = (Time.realtimeSinceStartup - t0) * 1000f;
+            Lap(5);
             frame++;
+            if (pipe)
+            {
+                float ms = measuredFrameMs;
+                decided = true;
+                decision = System.Threading.Tasks.Task.Run(() => Decide(ms, paired));
+            }
+            StepMs = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * TickMs);
         }
+
+        /// <summary>Baseline variants (Mode == Baseline). TimeSlice = 1, 3 or 10: uniform AI time
+        /// slicing instead of MassLOD's simulation levels -- every agent, near or far, updated every
+        /// TimeSlice frames, staggered (the simulation level with that stride, for all). RenderKnapsack: the view half chosen by a
+        /// frame-budget knapsack (Funkhouser and Sequin 1993) over MassLOD's simulation levels,
+        /// which it takes as given -- visual and simulation tiers still derived independently.</summary>
+        public int TimeSlice;
+        public bool RenderKnapsack;
+        int[] stateLock;
+
+        int BehStride(int beh) => TimeSlice > 0 ? TimeSlice : Stride[beh];
+        sbyte SliceTier => (sbyte)(TimeSlice >= 10 ? 2 : TimeSlice >= 3 ? 1 : 0);
 
         void ApplyBaselineTiers()
         {
             // MassLOD gives one level per agent and applies it to every axis at once.
             for (int i = 0; i < N; i++)
             {
-                sbyte t = SimTier[i];
+                sbyte t = TimeSlice > 0 ? SliceTier : SimTier[i];
                 Beh[i] = t; Nav[i] = t; Anim[i] = VisTier[i]; Geo[i] = VisTier[i];
+                if (RenderKnapsack)
+                {
+                    int row = assignV[0][i];
+                    Anim[i] = (sbyte)Table.TierOf(row, 2);
+                    Geo[i] = (sbyte)Table.TierOf(row, 3);
+                }
                 AnimV[0][i] = Anim[i];
                 Row[i] = -1;
             }
         }
 
-        void RunAllocator(float measuredFrameMs)
+        bool decidedFactored;
+        int decidedViewers;
+
+        public int RhoSolves = 3;
+        public float RhoTol = 0.02f;
+
+        // one resource's overhead (measured minus the predicted spend of the allocation that ran)
+        // and its spread, as the single-budget controller keeps them for the whole frame
+        void Track(float measured, float paired, ref float overhead, ref float ema, ref float var, bool censored = false)
         {
+            if (measured <= 0f || paired < 0f) return;
+            float o = measured - paired;
+            // a censored reading bounds the overhead from above and says nothing about the spread:
+            // it can only pull an estimate down (a generous budget then makes the resource bind,
+            // and the next exact reading pulls it back up)
+            if (censored && !float.IsNaN(overhead))
+            {
+                if (o < overhead) overhead += FrameGain * (o - overhead);
+                return;
+            }
+            overhead = float.IsNaN(overhead) ? o : overhead + FrameGain * (o - overhead);
+            if (ema <= 0f) ema = measured;
+            float dev = measured - ema;
+            ema += 0.2f * dev;
+            var = Mathf.Lerp(var, dev * dev, 0.05f);
+        }
+
+        void RunAllocator(float measuredFrameMs, float pairedCost)
+        {
+            atick = System.Diagnostics.Stopwatch.GetTimestamp();
             // invariant 1: the cost of a tier comes from measured frame time, never authored
             Histogram();
             if (UseOnlineRls && frame > 2 && measuredFrameMs > 0f) Cost.Update(counts, N, measuredFrameMs);
@@ -382,11 +567,50 @@ namespace Parity
                 Factored.SetCosts(rowCost);
                 cmax += (float)((V - 1) * Factored.MaxViewCost);
             }
+            bool dual = DualResource && FrameTargetMs > 0f && factored;
+            if (dual)
+            {
+                if (rowCpu == null || rowCpu.Length != rowCost.Length)
+                {
+                    rowCpu = new float[rowCost.Length]; rowGpu = new float[rowCost.Length]; rowEff = new float[rowCost.Length];
+                }
+                for (int r = 0; r < rowCost.Length; r++)
+                {
+                    rowGpu[r] = (float)GeoGpuTheta[Table.TierOf(r, 3)];
+                    rowCpu[r] = rowCost[r] - rowGpu[r];
+                }
+                Track(decCpu, decPairCpu, ref ovCpu, ref cpuEma, ref cpuVar);
+                Track(decGpu, decPairGpu, ref ovGpu, ref gpuEma, ref gpuVar, decGpuCensored);
+                float gmin = float.MaxValue, gmax = 0f, pmin = float.MaxValue, pmax = 0f;
+                for (int r = 0; r < rowCost.Length; r++)
+                {
+                    gmin = Mathf.Min(gmin, rowGpu[r]); gmax = Mathf.Max(gmax, rowGpu[r]);
+                    pmin = Mathf.Min(pmin, rowCpu[r]); pmax = Mathf.Max(pmax, rowCpu[r]);
+                }
+                BudgetCpuMs = float.IsNaN(ovCpu) ? N * pmin : Mathf.Clamp(FrameTargetMs - FrameZ * Mathf.Sqrt(cpuVar) - ovCpu, N * pmin, N * pmax);
+                BudgetGpuMs = float.IsNaN(ovGpu) ? N * gmin : Mathf.Clamp(FrameTargetMs - FrameZ * Mathf.Sqrt(gpuVar) - ovGpu, N * gmin, N * gmax);
+            }
+            else if (FrameTargetMs > 0f)
+            {
+                if (measuredFrameMs > 0f && pairedCost >= 0f)
+                {
+                    float o = measuredFrameMs - pairedCost;
+                    overheadEma = float.IsNaN(overheadEma) ? o : overheadEma + FrameGain * (o - overheadEma);
+                    if (frameEma <= 0f) frameEma = measuredFrameMs;
+                    float dev = measuredFrameMs - frameEma;
+                    frameEma += 0.2f * dev;
+                    frameVar = Mathf.Lerp(frameVar, dev * dev, 0.05f);
+                }
+                float b = float.IsNaN(overheadEma) ? N * cmin
+                        : FrameTargetMs - FrameZ * Mathf.Sqrt(frameVar) - overheadEma;
+                BudgetMs = Mathf.Clamp(b, N * cmin, N * cmax);
+            }
+            else
             BudgetMs = AbsoluteBudget ? TargetMs
                      : MatchBudgetMs >= 0f ? MatchBudgetMs
                      : N * (cmin + BudgetFrac * (cmax - cmin));
 
-            Ledger.Cap = Cap;
+            Ledger.Cap = Uncapped ? 1e30f : Cap;
             Ledger.Refresh(N);
             for (int i = 0; i < N; i++)
             {
@@ -397,6 +621,7 @@ namespace Parity
                 headroom[i] = Ledger.Headroom[i];
                 if (factored) { stateSalM[i] = s; headroomM[i] = headroom[i]; }
             }
+            ALap(7);
             if (factored)
                 for (int k = 0; k < V; k++)
                 {
@@ -408,7 +633,9 @@ namespace Parity
                     Occluded[k] = 0;
                     if (Occlusion && hasView[k])
                     {
+                        ALap(6);
                         float refPx = Coverage.Compute(Pos, N, viewProj[k], proj[k].x, proj[k].y, ViewD0, VisiblePx[k]);
+                        ALap(8);
                         for (int i = 0; i < N; i++)
                         {
                             vs[i] = Mathf.Min(1f, VisiblePx[k][i] / refPx);
@@ -433,6 +660,9 @@ namespace Parity
                     }
                     for (int i = 0; i < N; i++)
                         prevV[k][i] = frame == 0 ? -1 : Factored.ViewPairOfKey(AnimV[k][i] * ParityTable.NTiers + GeoV[k][i]);
+                    if (k == 0)
+                        for (int i = 0; i < N; i++)
+                            prevS[i] = frame == 0 ? -1 : Factored.StatePairOfKey(Beh[i] * ParityTable.NTiers + Nav[i]);
                     if (PopLedger)
                     {
                         var h = Pops[k].Holds(seen, N);
@@ -440,7 +670,7 @@ namespace Parity
                     }
                 }
 
-            float t0 = Time.realtimeSinceStartup;
+            ALap(6);
             if (factored)
             {
                 Factored.SetCosts(rowCost);
@@ -448,7 +678,51 @@ namespace Parity
                 var holds = PopLedger ? (V == 1 ? new[] { holdV[0] } : holdV) : null;
                 var asg = V == 1 ? new[] { assignV[0] } : assignV;
                 var prevs = SwitchCost > 0f ? (V == 1 ? new[] { prevV[0] } : prevV) : null;
-                Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg, prevs, SwitchCost);
+                if (Mode == Policy.Baseline)
+                {
+                    // the render knapsack takes MassLOD's simulation level as given
+                    if (stateLock == null || stateLock.Length != N) stateLock = new int[N];
+                    for (int i = 0; i < N; i++)
+                    {
+                        int t = TimeSlice > 0 ? SliceTier : SimTier[i];
+                        stateLock[i] = Factored.StatePairOfKey(t * ParityTable.NTiers + t);
+                    }
+                }
+                var lockS = Mode == Policy.Baseline ? stateLock : null;
+                var sprev = StateSwitchCost > 0f ? prevS : null;
+                if (!dual)
+                    Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg, prevs, SwitchCost,
+                                          sprev, StateSwitchCost, lockS);
+                else
+                {
+                    // Rho: 0 when the GPU has slack at Rho = 0, else the ratio at which the GPU
+                    // budget is met exactly (the CPU one then is too: the combined constraint is
+                    // tight). Bracketed from last frame's value, a few solves per frame; the
+                    // search continues next frame from where it stopped.
+                    float lo = 0f, hi = float.PositiveInfinity, rho = Rho;
+                    for (int it = 0; it < RhoSolves; it++)
+                    {
+                        for (int r = 0; r < rowCost.Length; r++) rowEff[r] = rowCpu[r] + rho * rowGpu[r];
+                        Factored.SetCosts(rowEff);
+                        BudgetMs = BudgetCpuMs + rho * BudgetGpuMs;
+                        Last = Factored.Solve(stateSalM, sal, holds, headroomM, N, BudgetMs, asg, prevs, SwitchCost,
+                                              sprev, StateSwitchCost, lockS);
+                        double pc = 0, pg = 0;
+                        for (int k = 0; k < V; k++)
+                            for (int i = 0; i < N; i++) { pc += rowCpu[asg[k][i]]; pg += rowGpu[asg[k][i]]; }
+                        SpendCpuMs = (float)pc; SpendGpuMs = (float)pg;
+                        Rho = rho;
+                        bool gpuOver = pg > BudgetGpuMs * (1f + RhoTol), cpuOver = pc > BudgetCpuMs * (1f + RhoTol);
+                        if (gpuOver) lo = rho;
+                        else if (cpuOver && rho > 0f) hi = rho;
+                        else break;
+                        rho = float.IsInfinity(hi) ? Mathf.Max(2f * rho, 0.05f)
+                            : lo <= 0f ? 0.5f * hi : Mathf.Sqrt(lo * hi);
+                        if (!gpuOver && lo <= 0f && hi < 1e-3f) rho = 0f;
+                    }
+                }
+                Prof[9] += Factored.TotalTicks * TickMs; Factored.TotalTicks = 0;
+                Evals += Last.Evals;
                 HoldsReleased += Factored.Released;
             }
             else
@@ -457,8 +731,20 @@ namespace Parity
                 Last = Alloc.Solve(salience, headroom, N, BudgetMs, assign);
             }
             AllocatableMs = Last.Cost;
-            AllocMs = (Time.realtimeSinceStartup - t0) * 1000f;
+            if (!dual) { SpendCpuMs = AllocatableMs; SpendGpuMs = 0f; }
+            long before = atick;
+            ALap(10);
+            AllocMs = (float)((atick - before) * TickMs);
+            decidedFactored = factored;
+            decidedViewers = V;
+        }
 
+        /// <summary>Applies the last decision: tiers, and reconciliation of any surrogate the
+        /// decision promoted. Runs on the main thread.</summary>
+        void ApplyDecision()
+        {
+            bool factored = decidedFactored;
+            int V = decidedViewers;
             Promotes = 0; Demotes = 0;
             for (int i = 0; i < N; i++)
             {
@@ -495,6 +781,7 @@ namespace Parity
 
         /// <summary>Pop-ledger holds the allocator released to meet the frame budget, cumulative.</summary>
         public int HoldsReleased;
+        public long Evals;
         float[] popArea;
 
         /// <summary>Invariant 4: stepped for every agent at every tier, never allocated.</summary>
@@ -531,6 +818,13 @@ namespace Parity
         // what the cost model actually measures.
         static readonly int[] DecodeDims = { LatentDim, 8, 4, 0 };
         static readonly int[] JointCount = { 12, 8, 3, 0 };
+
+        /// <summary>Every agent's gait decoded at the top animation tier: the reference pose an
+        /// image judge compares a policy's frame against.</summary>
+        public void FullPose()
+        {
+            for (int i = 0; i < N; i++) Joints(i, JointCount[0]);
+        }
         static readonly int[] NavBudget = { 24, 8, 0, 0 };
 
         static readonly float[] DecSpeedW = new float[LatentDim];
@@ -582,21 +876,55 @@ namespace Parity
 
         void StepFine()
         {
-            grid.Build(Pos, N);
             System.Array.Copy(Pos, PrevPos, N);
+            grid.Build(PrevPos, N);
+            // Invariant 5: agents are visited in (cell, tier) order, the tier being the one the
+            // allocator chose -- neighbours are adjacent in memory and one tier's body runs in
+            // a stretch. Every neighbour read is from the start-of-frame snapshot (Jacobi), so the
+            // order changes only speed, never the result, and the loop is free to go wide.
+            if (visit == null || visit.Length != N) visit = new int[N];
+            if (keyStart == null || keyStart.Length != grid.Cells * 4 + 1) keyStart = new int[grid.Cells * 4 + 1];
+            var cellOf = grid.CellOf;
+            System.Array.Clear(keyStart, 0, keyStart.Length);
+            for (int i = 0; i < N; i++) keyStart[cellOf[i] * 4 + Beh[i] + 1]++;
+            for (int k = 0; k + 1 < keyStart.Length; k++) keyStart[k + 1] += keyStart[k];
+            for (int i = 0; i < N; i++) visit[keyStart[cellOf[i] * 4 + Beh[i]]++] = i;
             bool congested = Spec.Kind != SceneKind.Plaza;
-            for (int i = 0; i < N; i++)
+            // Jacobi reads make every agent's update independent, so the loop is split across
+            // cores in contiguous stretches of the visit order (each a run of nearby cells) --
+            // for both policies alike
+            int chunks = Parallelism > 1 && N >= 1024 ? Mathf.Min(Parallelism * 4, N / 256) : 1;
+            if (chunks > 1)
+                System.Threading.Tasks.Parallel.For(0, chunks, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = Parallelism },
+                    c => FineRange((int)((long)c * N / chunks), (int)((long)(c + 1) * N / chunks), congested));
+            else FineRange(0, N, congested);
+            Scene.Constrain(this);
+            Scene.AfterStep(this, frame, ref rng);
+            Presentation();
+        }
+
+        /// <summary>Worker threads for the fine step (1 = serial).</summary>
+        public int Parallelism = System.Environment.ProcessorCount;
+
+        void FineRange(int lo, int hi, bool congested)
+        {
+            for (int k = lo; k < hi; k++)
             {
-                // context is read from the core's neighbourhood, so it is available at every
-                // tier including the surrogate, which never runs a neighbour query of its own
-                Ctx[i] = CtxOf(grid.Count(Pos, i, 2.2f, 12));
+                int i = visit[k];
                 int beh = Beh[i];
+                // context is read from the core's neighbourhood, so it is available at every
+                // tier including the surrogate, which never runs a neighbour query of its own.
+                // At run time only PARITY's ledger needs it, and only for a surrogate; the
+                // baseline's measured divergence is an instrument (see Instrument()).
+                if (Mode == Policy.Parity && beh == 3) Ctx[i] = CtxOf(grid.Count(PrevPos, i, 2.2f, 8));
                 if (beh == 3)
                 {
                     // surrogate: ride the core, no local behaviour at all
                     Pos[i] = CoreP[i];
                 }
-                else if (Mode == Policy.Baseline ? frame % Stride[beh] == 0 : true)
+                // staggered by agent, as UE5 spreads variable tick rates: ticking every tier-1 agent
+                // on the same frame would put the whole saving and the whole cost in alternate frames
+                else if (Mode == Policy.Baseline ? (frame + i) % BehStride(beh) == 0 : true)
                 {
                     // PARITY's behaviour tiers are latent WIDTH (latent16 / latent8 / latent4):
                     // every one of them runs every frame, and the only way to stop paying for
@@ -611,9 +939,9 @@ namespace Parity
                     // someone standing in their queue slot keeps 0.8 m to the next person
                     // rather than being pushed out to the 1.6 m separation radius
                     bool inLine = Slot[i] >= 0 && d < 1.2f;
-                    if (budget > 0 && !inLine) sep = grid.Separation(Pos, i, 1.6f, budget);
+                    if (budget > 0 && !inLine) sep = grid.Separation(PrevPos, i, 1.6f, budget);
                     dir = new Vector2(dir.x - dir.y * LatBias[i], dir.y + dir.x * LatBias[i]);
-                    float adv = Mode == Policy.Baseline ? Stride[beh] : 1;
+                    float adv = Mode == Policy.Baseline ? BehStride(beh) : 1;
                     Vector2 v;
                     if (!congested)
                         v = (dir + sep * 1.4f).normalized * Speed[i] * SpeedScale[i] * adv * Dt;
@@ -631,15 +959,12 @@ namespace Parity
                 }
                 int anim = Anim[i];
                 int astride = Mode == Policy.Baseline ? Stride[anim] : 1;
-                if (anim < 3 && frame % astride == 0)
+                if (anim < 3 && (frame + i) % astride == 0)
                 {
                     Phase[i] += Speed[i] * Dt * astride * 6f * Mathf.Clamp01(Walk[i]);
                     Joints(i, JointCount[anim]);
                 }
             }
-            Scene.Constrain(this);
-            Scene.AfterStep(this, frame, ref rng);
-            Presentation();
         }
 
         void Presentation()
@@ -679,13 +1004,28 @@ namespace Parity
                     if (Ledger.D[i] > Cap + 1e-4f) CapBreaches++;
                 }
             }
-            else
+            else if (Instrumented) Instrument();
+        }
+
+        /// <summary>When false, Step leaves the baseline's measured divergence to a separate
+        /// Instrument() call, so a benchmark can keep a measuring device out of the frame it
+        /// times: the baseline needs no context at run time, only the figures do.</summary>
+        public bool Instrumented = true;
+
+        /// <summary>The baseline's measured divergence for this frame, from the same snapshot
+        /// the step read -- identical whether called inside Step or after it.</summary>
+        public void Instrument()
+        {
+            if (Mode != Policy.Baseline) return;
+            // Every baseline tier above 0 misses part of the reference process, not just
+            // the lowest one -- that is what ticking at 1/3/10 frames costs. Nothing ever
+            // resets it: MassLOD has no ledger, so the total only goes up.
+            for (int i = 0; i < N; i++)
             {
-                // Every baseline tier above 0 misses part of the reference process, not just
-                // the lowest one -- that is what ticking at 1/3/10 frames costs. Nothing ever
-                // resets it: MassLOD has no ledger, so the total only goes up.
-                for (int i = 0; i < N; i++)
-                    Dmeas[i] += ERate[Ctx[i]] * BaselineMiss[Beh[i]];
+                float miss = TimeSlice > 0 ? 1f - 1f / TimeSlice : BaselineMiss[Beh[i]];
+                if (miss <= 0f) continue;
+                Ctx[i] = CtxOf(grid.Count(PrevPos, i, 2.2f, 8));
+                Dmeas[i] += ERate[Ctx[i]] * miss;
             }
         }
 
@@ -717,7 +1057,7 @@ namespace Parity
             if (assign.IsCreated) assign.Dispose();
         }
 
-        public void Dispose() { Alloc?.Dispose(); Ledger?.Dispose(); DisposeNative(); }
+        public void Dispose() { Join(); Alloc?.Dispose(); Ledger?.Dispose(); DisposeNative(); }
     }
 
     /// <summary>Uniform grid for neighbour separation; the cost of a full query is what the
@@ -726,15 +1066,17 @@ namespace Parity
     {
         readonly int nx, ny;
         readonly float cell;
-        readonly int[] head;
-        int[] next;
+        readonly int[] start;        // agents of cell c are items[start[c] .. start[c + 1])
+        int[] items, cellOf;
+        public int[] CellOf => cellOf;
+        public int Cells => nx * ny;
 
         public Grid(Vector2 size, float cellSize)
         {
             cell = cellSize;
             nx = Mathf.Max(1, Mathf.CeilToInt(size.x / cell));
             ny = Mathf.Max(1, Mathf.CeilToInt(size.y / cell));
-            head = new int[nx * ny];
+            start = new int[nx * ny + 1];
         }
 
         int Idx(Vector2 p)
@@ -744,11 +1086,19 @@ namespace Parity
             return cy * nx + cx;
         }
 
+        // a counting sort by cell: each cell's agents are contiguous, so a query walks memory
+        // in order instead of chasing a linked list across it
         public void Build(Vector2[] pos, int n)
         {
-            if (next == null || next.Length < n) next = new int[n];
-            for (int i = 0; i < head.Length; i++) head[i] = -1;
-            for (int i = 0; i < n; i++) { int c = Idx(pos[i]); next[i] = head[c]; head[c] = i; }
+            if (items == null || items.Length < n) { items = new int[n]; cellOf = new int[n]; }
+            System.Array.Clear(start, 0, start.Length);
+            for (int i = 0; i < n; i++) { int c = Idx(pos[i]); cellOf[i] = c; start[c + 1]++; }
+            for (int c = 0; c < nx * ny; c++) start[c + 1] += start[c];
+            // backwards, so each cell keeps its agents in index order; the scatter leaves
+            // start[c + 1] at the BEGINNING of cell c, so shift down one
+            for (int i = n - 1; i >= 0; i--) items[--start[cellOf[i] + 1]] = i;
+            for (int c = 0; c < nx * ny; c++) start[c] = start[c + 1];
+            start[nx * ny] = n;
         }
 
         public int Count(Vector2[] pos, int i, float radius, int cap)
@@ -763,8 +1113,12 @@ namespace Parity
                 for (int dx = -1; dx <= 1 && seen < cap; dx++)
                 {
                     int x = cx + dx; if (x < 0 || x >= nx) continue;
-                    for (int j = head[y * nx + x]; j >= 0 && seen < cap; j = next[j])
+                    int c = y * nx + x, end = start[c + 1];
+                    for (int k = start[c]; k < end && seen < cap; k++)
+                    {
+                        int j = items[k];
                         if (j != i && (pos[i] - pos[j]).sqrMagnitude <= r2) seen++;
+                    }
                 }
             }
             return seen;
@@ -783,8 +1137,10 @@ namespace Parity
                 for (int dx = -1; dx <= 1 && seen < budget; dx++)
                 {
                     int x = cx + dx; if (x < 0 || x >= nx) continue;
-                    for (int j = head[y * nx + x]; j >= 0 && seen < budget; j = next[j])
+                    int c = y * nx + x, end = start[c + 1];
+                    for (int k = start[c]; k < end && seen < budget; k++)
                     {
+                        int j = items[k];
                         if (j == i) continue;
                         Vector2 d = pos[i] - pos[j];
                         float m2 = d.sqrMagnitude;

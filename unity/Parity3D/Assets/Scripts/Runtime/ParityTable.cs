@@ -81,7 +81,11 @@ namespace Parity
         /// <param name="eMax">measured surrogate KL rate used for admission; see RowErr.</param>
         /// <param name="geometryQuality">measured per-tier geometry quality (the engine's pixel
         /// judge) replacing the placeholder column; null keeps the Python table exactly.</param>
-        public static ParityTable Build(double eMax = PlazaEMax, double[] geometryQuality = null)
+        /// <param name="surrogateNav">true: the Python table, where navigation is only a label
+        /// and a surrogate may carry any navigation tier. The engine runs navigation (separation)
+        /// for live agents only, so there a surrogate's navigation tier would be credited quality
+        /// it never delivers: false drops those rows (180 -> 135).</param>
+        public static ParityTable Build(double eMax = PlazaEMax, double[] geometryQuality = null, bool surrogateNav = false)
         {
             var axq = (double[,])AxisQuality.Clone();
             if (geometryQuality != null)
@@ -96,7 +100,7 @@ namespace Parity
             for (int a = 0; a < NTiers; a++)
             for (int g = 0; g < NTiers; g++)
             {
-                if (!Allowed(b, n, a, g)) continue;
+                if (!Allowed(b, n, a, g) || (!surrogateNav && b == 3 && n != 3)) continue;
                 int[] t = { b, n, a, g };
                 double q = 0.0;
                 for (int ax = 0; ax < NAxes; ax++) q += axq[ax, t[ax]];

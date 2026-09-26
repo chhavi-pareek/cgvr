@@ -37,6 +37,7 @@ namespace Parity
         readonly int[] rowOf;            // [s * nV + v]
         int[] viewOf;                    // [row] -> view pair
         readonly int[] keyToV = new int[ParityTable.NTiers * ParityTable.NTiers];   // anim*4+geo -> pair
+        readonly int[] keyToS = new int[ParityTable.NTiers * ParityTable.NTiers];   // beh*4+nav -> pair
         readonly double[] qS, qV, eS;
         readonly double[] cS, cV;
         double[] levels;                 // distinct state error rates, ascending
@@ -117,6 +118,8 @@ namespace Parity
             for (int i = 0; i < f.rowOf.Length; i++) if (f.rowOf[i] < 0) return null;
             for (int k = 0; k < f.keyToV.Length; k++) f.keyToV[k] = -1;
             foreach (var kv in vIdx) f.keyToV[kv.Key] = kv.Value;
+            for (int k = 0; k < f.keyToS.Length; k++) f.keyToS[k] = -1;
+            foreach (var kv in sIdx) f.keyToS[kv.Key] = kv.Value;
             f.viewOf = new int[t.M];
             for (int i = 0; i < f.rowOf.Length; i++) f.viewOf[f.rowOf[i]] = i % f.nV;
             var lv = new SortedSet<double>();
@@ -232,17 +235,19 @@ namespace Parity
         // is identical to sorting from scratch. A camera cut can scramble the order; past
         // CoherentLimit inversions per agent the repair gives up and sorts.
         public bool Coherent = true;
-        public int CoherentLimit = 12;
+        public int CoherentLimit = 2, CoherentRetry = 15;
+        int skipS;
+        int[] skipV = new int[0];
         /// <summary>Inversions repaired last solve, and whether any half fell back to a full sort.</summary>
         public long LastInversions;
         public bool LastFellBack;
         int[] orderS = new int[0];
         int[][] orderV = new int[0][];
-        Agent[] sortWork = new Agent[0];
+        readonly RadixSorter radix = new RadixSorter();
 
         static bool Before(float[] key, int a, int b) => key[a] > key[b] || (key[a] == key[b] && a < b);
 
-        void CoherentOrder(float[] key, int n, ref int[] order)
+        void CoherentOrder(float[] key, int n, ref int[] order, ref int skip)
         {
             if (order.Length != n)
             {
@@ -250,7 +255,10 @@ namespace Parity
                 for (int i = 0; i < n; i++) order[i] = i;
             }
             long moves = 0, limit = (long)CoherentLimit * n;
-            bool ok = Coherent;
+            // an order that just fell back is not tried again for a while: a moving camera
+            // reorders everything, and the failed repair would cost more than the sort
+            bool tried = Coherent && skip <= 0, ok = tried;
+            if (skip > 0) skip--;
             for (int j = 1; j < n && ok; j++)
             {
                 int x = order[j], k = j - 1;
@@ -265,11 +273,11 @@ namespace Parity
             LastInversions += moves;
             if (!ok)
             {
+                if (tried) skip = CoherentRetry;
                 LastFellBack |= Coherent;
-                if (sortWork.Length < n) sortWork = new Agent[n];
-                for (int i = 0; i < n; i++) sortWork[i] = new Agent { Key = key[i], Index = i };
-                Array.Sort(sortWork, 0, n, Desc);
-                for (int i = 0; i < n; i++) order[i] = sortWork[i].Index;
+                var k = radix.Keys(n);
+                for (int i = 0; i < n; i++) { k[i] = ~RadixSorter.Key(key[i]); order[i] = i; }
+                radix.Sort(order, n);
             }
         }
 
@@ -314,9 +322,27 @@ namespace Parity
         {
             if (prevV == null || prevV[k] == null || switchCost <= 0.0)
                 return Blocks(p, lam, salV[k], cV, sortV[k], pick);
+            return Sticky(p, lam, salV[k], sortV[k], prevV[k], cV, qV, switchCost, pick);
+        }
+
+        // the state half's switching cost: a behaviour change must earn stateSwitch * salience;
+        // prevS holds each agent's previous state pair only where its headroom still affords it
+        int[] prevS = new int[0];
+        bool stickyS;
+        double fixedS;
+        double stateSwitch;
+
+        double StateBlocks(Part p, double lam, int[] pick)
+        {
+            if (!stickyS) return Blocks(p, lam, salS, cS, sortS, pick);
+            return Sticky(p, lam, salS, sortS, prevS, cS, qS, stateSwitch, pick);
+        }
+
+        static double Sticky(Part p, double lam, double[] sal, Agent[] sorted, int[] prev, double[] c, double[] q,
+                             double sw, int[] pick)
+        {
             int n = p.Hi - p.Lo, K = p.Hull.Length;
             if (n == 0) return 0.0;
-            var sal = salV[k]; var sorted = sortV[k]; var prev = prevV[k];
             double total = 0.0;
             int done = 0;
             for (int blk = 0; blk < K; blk++)
@@ -332,9 +358,9 @@ namespace Parity
                     if (pv >= 0)
                     {
                         double s = sal[p.Lo + j];
-                        if (s * qV[pv] + switchCost * s - lam * cV[pv] >= s * qV[hv] - lam * cV[hv]) choice = pv;
+                        if (s * q[pv] + sw * s - lam * c[pv] >= s * q[hv] - lam * c[hv]) choice = pv;
                     }
-                    total += cV[choice];
+                    total += c[choice];
                     if (pick != null) pick[i] = choice;
                 }
                 done = end;
@@ -342,15 +368,33 @@ namespace Parity
             return total;
         }
 
+        int[][] holdBuf = new int[0][];
+        int[] heldOrder = new int[0];
+
+        // the float key of a hold's extra cost could tie two distinct doubles; fall back to the
+        // exact comparison if the rounded order ever disagrees with it
+        void SortHeldExact(int m)
+        {
+            var keys = new double[m];
+            for (int j = 0; j < m; j++) { keys[j] = -heldWork[j].Extra; heldOrder[j] = j; }
+            Array.Sort(heldOrder, 0, m, Comparer<int>.Create((x, y) => { int c = keys[x].CompareTo(keys[y]); return c != 0 ? c : x.CompareTo(y); }));
+        }
+
+        public long TotalTicks;
+        public readonly long[] StageTicks = new long[7];
+        public int FellBack, FellBackS;
+
         double Total(double lam, int V)
         {
-            double t = 0.0;
-            foreach (var p in partsS) t += Blocks(p, lam, salS, cS, sortS, null);
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            double t = fixedS;
+            foreach (var p in partsS) t += StateBlocks(p, lam, null);
             for (int k = 0; k < V; k++)
             {
                 t += fixedV[k];
                 foreach (var p in partsV[k]) t += ViewBlocks(p, lam, k, null);
             }
+            TotalTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             return t;
         }
 
@@ -383,9 +427,12 @@ namespace Parity
         /// free; viewHold may be null); assign[k] receives viewer k's full-table rows, all of
         /// which share one state pair per agent. Negative view salience is treated as 0.</summary>
         public AllocResult Solve(float[] stateSal, float[][] viewSal, int[][] viewHold, float[] headroom, int n,
-                                 float budget, int[][] assign, int[][] viewPrev = null, float switchCostPerSalience = 0f)
+                                 float budget, int[][] assign, int[][] viewPrev = null, float switchCostPerSalience = 0f,
+                                 int[] statePrev = null, float stateSwitchCostPerSalience = 0f, int[] stateLock = null)
         {
             int V = viewSal.Length;
+            long tk = System.Diagnostics.Stopwatch.GetTimestamp();
+            void Mark(int j) { long now = System.Diagnostics.Stopwatch.GetTimestamp(); StageTicks[j] += now - tk; tk = now; }
             prevV = viewPrev;
             switchCost = switchCostPerSalience;
             Grow(n, V);
@@ -400,18 +447,36 @@ namespace Parity
                 for (int g = 0; g <= L; g++) byLevel[g] = new List<int>();
             }
             for (int g = 0; g <= L; g++) byLevel[g].Clear();
+            // a locked agent's state pair is fixed (set by someone else): its cost is a constant
+            fixedS = 0.0;
             for (int i = 0; i < n; i++)
             {
+                if (stateLock != null && stateLock[i] >= 0) { fixedS += cS[stateLock[i]]; continue; }
                 double h = headroom[i];
                 int g = 0;
                 while (g < L && levels[g] <= h) g++;   // numpy searchsorted(side="right")
                 if (g == 0) { res.Starved++; g = 1; }   // cannot happen while a rate-0 pair exists
                 byLevel[g].Add(i);
             }
+            Mark(0);
             LastInversions = 0; LastFellBack = false;
-            CoherentOrder(stateSal, n, ref orderS);
+            CoherentOrder(stateSal, n, ref orderS, ref skipS);
+            if (LastFellBack) FellBackS++;
+            Mark(1);
             if (groupOf.Length < n) { groupOf = new int[n]; member = new bool[n]; }
+            Array.Clear(groupOf, 0, n);
             for (int g = 1; g <= L; g++) foreach (int i in byLevel[g]) groupOf[i] = g;
+            stateSwitch = stateSwitchCostPerSalience;
+            stickyS = statePrev != null && stateSwitch > 0.0;
+            if (stickyS)
+            {
+                if (prevS.Length < n) prevS = new int[n];
+                for (int i = 0; i < n; i++)
+                {
+                    int pv = statePrev[i];
+                    prevS[i] = pv >= 0 && groupOf[i] > 0 && eS[pv] <= levels[groupOf[i] - 1] + 1e-12 ? pv : -1;
+                }
+            }
             int start = 0;
             for (int g = 1; g <= L; g++)
             {
@@ -423,15 +488,17 @@ namespace Parity
                 start += cnt;
             }
 
+            Mark(2);
             // holds, and the release the frame budget may force on them
             double cvMin = double.MaxValue;
             for (int v = 0; v < nV; v++) cvMin = Math.Min(cvMin, cV[v]);
             heldWork.Clear();
             Released = 0;
-            var hold = new int[V][];
+            if (holdBuf.Length < V) Array.Resize(ref holdBuf, V);
+            var hold = holdBuf;
             for (int k = 0; k < V; k++)
             {
-                hold[k] = new int[n];
+                if (hold[k] == null || hold[k].Length < n) hold[k] = new int[n];
                 for (int i = 0; i < n; i++)
                 {
                     int h = viewHold != null && viewHold[k] != null ? viewHold[k][i] : -1;
@@ -441,28 +508,33 @@ namespace Parity
             }
             if (heldWork.Count > 0)
             {
-                double floor = 0.0;
-                foreach (var p in partsS) floor += Blocks(p, 1e300, salS, cS, sortS, null);
+                double floor = fixedS;
+                foreach (var p in partsS) floor += StateBlocks(p, 1e300, null);
                 for (int k = 0; k < V; k++)
                     for (int i = 0; i < n; i++) floor += hold[k][i] >= 0 ? cV[hold[k][i]] : cvMin;
                 if (floor > budget)
                 {
-                    // costliest first, ties in (viewer, agent) order: numpy's stable argsort
-                    var order = heldWork.ToArray();
-                    var keys = new double[order.Length];
-                    var pos = new int[order.Length];
-                    for (int j = 0; j < order.Length; j++) { keys[j] = -order[j].Extra; pos[j] = j; }
-                    Array.Sort(pos, (x, y) => { int c = keys[x].CompareTo(keys[y]); return c != 0 ? c : x.CompareTo(y); });
-                    foreach (int j in pos)
+                    // costliest first, ties in (viewer, agent) order: numpy's stable argsort. A
+                    // hold's extra cost takes one of nV values, so a stable counting sort is exact.
+                    int m = heldWork.Count;
+                    var k = radix.Keys(m);
+                    if (heldOrder.Length < m) heldOrder = new int[m];
+                    for (int j = 0; j < m; j++) { k[j] = ~RadixSorter.Key((float)heldWork[j].Extra); heldOrder[j] = j; }
+                    radix.Sort(heldOrder, m);
+                    for (int j = 1; j < m; j++)
+                        if (heldWork[heldOrder[j]].Extra > heldWork[heldOrder[j - 1]].Extra) { SortHeldExact(m); break; }
+                    for (int jj = 0; jj < m; jj++)
                     {
                         if (floor <= budget) break;
-                        floor -= order[j].Extra;
-                        hold[order[j].K][order[j].I] = -1;
+                        var hw = heldWork[heldOrder[jj]];
+                        floor -= hw.Extra;
+                        hold[hw.K][hw.I] = -1;
                         Released++;
                     }
                 }
             }
 
+            Mark(3);
             for (int k = 0; k < V; k++)
             {
                 partsV[k].Clear();
@@ -479,13 +551,15 @@ namespace Parity
                 {
                     if (orderV.Length < V) Array.Resize(ref orderV, V);
                     if (orderV[k] == null) orderV[k] = new int[0];
-                    CoherentOrder(viewSal[k], n, ref orderV[k]);
+                    if (skipV.Length < V) Array.Resize(ref skipV, V);
+                    CoherentOrder(viewSal[k], n, ref orderV[k], ref skipV[k]);
                     for (int i = 0; i < n; i++) member[i] = hold[k][i] < 0;
                     PrepareOrdered(sortV[k], salV[k], viewSal[k], orderV[k], n, member, 0, cV, qV, menuV, partsV[k], out int cnt);
                     for (int j = 0; j < cnt; j++) if (salV[k][j] < 0.0) salV[k][j] = 0.0;
                 }
             }
 
+            Mark(4);
             int evals = 1;
             double lam;
             if (Total(0.0, V) <= budget) lam = 0.0;
@@ -522,8 +596,11 @@ namespace Parity
                 lam = hi;
             }
             lastLam = lam;
+            Mark(5);
 
-            foreach (var p in partsS) Blocks(p, lam, salS, cS, sortS, pickS);
+            foreach (var p in partsS) StateBlocks(p, lam, pickS);
+            if (stateLock != null)
+                for (int i = 0; i < n; i++) if (stateLock[i] >= 0) pickS[i] = stateLock[i];
             double cost = 0.0, util = 0.0;
             for (int i = 0; i < n; i++) { cost += cS[pickS[i]]; util += stateSal[i] * qS[pickS[i]]; }
             for (int k = 0; k < V; k++)
@@ -538,6 +615,8 @@ namespace Parity
                     util += Math.Max(viewSal[k][i], 0f) * qV[v];
                 }
             }
+            Mark(6);
+            if (LastFellBack) FellBack++;
             res.Lambda = (float)lam;
             res.Cost = (float)cost;
             res.Utility = (float)util;
@@ -550,6 +629,9 @@ namespace Parity
         /// <summary>The view pair of a full-table row.</summary>
         public int ViewOfRow(int row) => viewOf[row];
 
+        /// <summary>State pair of a (behaviour * NTiers + navigation) key, -1 if not in the table.</summary>
+        public int StatePairOfKey(int key) => key >= 0 && key < keyToS.Length ? keyToS[key] : -1;
+
         /// <summary>View pair of an (animation * NTiers + geometry) key, -1 if not in the table.</summary>
         public int ViewPairOfKey(int key) => key >= 0 && key < keyToV.Length ? keyToV[key] : -1;
 
@@ -557,6 +639,53 @@ namespace Parity
         public double MaxViewCost
         {
             get { double m = 0.0; for (int v = 0; v < nV; v++) m = Math.Max(m, cV[v]); return m; }
+        }
+    }
+
+    /// <summary>Stable LSD radix sort on uint keys, O(n): sorts items by Keys(n)[0..n)
+    /// ascending, ties in input order.</summary>
+    public sealed class RadixSorter
+    {
+        uint[] keys = new uint[0], kTmp = new uint[0];
+        int[] iTmp = new int[0];
+        readonly int[] count = new int[257];
+
+        /// <summary>Order-preserving map of a float onto uint (-0 and +0 map together).</summary>
+        public static uint Key(float f)
+        {
+            if (f == 0f) return 0x80000000u;
+            uint u = (uint)BitConverter.SingleToInt32Bits(f);
+            return (u & 0x80000000u) != 0 ? ~u : u | 0x80000000u;
+        }
+
+        public uint[] Keys(int n)
+        {
+            if (keys.Length < n) { keys = new uint[n]; kTmp = new uint[n]; iTmp = new int[n]; }
+            return keys;
+        }
+
+        public void Sort(int[] items, int n)
+        {
+            if (n <= 1) return;
+            uint[] ka = keys, kb = kTmp;
+            int[] ia = items, ib = iTmp;
+            for (int shift = 0; shift < 32; shift += 8)
+            {
+                Array.Clear(count, 0, count.Length);
+                for (int j = 0; j < n; j++) count[((ka[j] >> shift) & 0xFF) + 1]++;
+                if (count[((ka[0] >> shift) & 0xFF) + 1] == n) continue;
+                for (int b = 0; b < 256; b++) count[b + 1] += count[b];
+                for (int j = 0; j < n; j++)
+                {
+                    uint k = ka[j];
+                    int d = count[(k >> shift) & 0xFF]++;
+                    kb[d] = k; ib[d] = ia[j];
+                }
+                (ka, kb) = (kb, ka);
+                (ia, ib) = (ib, ia);
+            }
+            if (ia != items) Array.Copy(ia, items, n);
+            if (ka != keys) Array.Copy(ka, keys, n);
         }
     }
 }

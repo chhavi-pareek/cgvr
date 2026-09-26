@@ -30,7 +30,7 @@ from collections import deque
 import numpy as np
 
 from .policy import FLOOR, Distilled, Marginal, kl
-from .station import N_ACT, N_Z, Station, Z_GATES, ctx_parts
+from .station import N_ACT, N_CTX, N_Z, Station, Z_GATES, ctx_parts
 
 VIEW_PERIOD = 300          # the viewer moves to another zone every five minutes
 FAR_SALIENCE = 0.25
@@ -86,12 +86,34 @@ class DriftBound:
     decision; the worst case cannot, so true drift <= charged drift <= cap holds deterministically.
     Charging the worst case also makes an unfamiliar situation the first thing worth paying for."""
 
-    def __init__(self):
+    # novel=True emulates contexts that never repeat (memory or dialogue in the prompt): a paid
+    # reply says nothing EXACT about any later decision, so the exact branch is unavailable and
+    # every decision is charged one of
+    #   worst      E_MAX: the deterministic guarantee, at one surrogate decision per LLM decision;
+    #   plugin     the predicted drift, no margin: no guarantee at all;
+    #   conformal  the predicted drift plus a split-conformal margin: P(true <= charged) >= 1 - alpha
+    #              for a decision exchangeable with the calibration decisions. The prediction is a
+    #              kernel average of drift over paid replies at OTHER contexts (Hamming distance on
+    #              the five factors); the margin is the ceil((m+1)(1-alpha))-th smallest residual on
+    #              m calibration replies bought for uniformly random decisions and kept out of the
+    #              predictor. Too few of them to form the quantile and the charge is E_MAX, so the
+    #              bound degrades to the worst case rather than to a guess.
+    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5):
         self.p = {}                    # context -> LLM distribution, from paid replies
         self.exact = {}
+        self.novel, self.bound, self.alpha, self.tau = novel, bound, alpha, tau
+        self.train, self.cal = [], []  # (ctx, p) of paid replies; cal = the random ones
+        self.charge = np.full(N_CTX, E_MAX)
+        self.q_hat = np.inf
+        if novel:
+            parts = np.stack(ctx_parts(np.arange(N_CTX)), 1)
+            h = (parts[:, None, :] != parts[None, :, :]).sum(2).astype(np.float64)
+            self.K = np.exp(-h / tau)
+            np.fill_diagonal(self.K, 0.0)            # a context never predicts itself
 
-    def observe(self, c, p):
+    def observe(self, c, p, calib=False):
         self.p[int(c)] = p
+        (self.cal if calib else self.train).append((int(c), p))
 
     def refresh(self, sur):
         if not self.p:
@@ -99,8 +121,36 @@ class DriftBound:
         c = np.fromiter(self.p.keys(), np.int64)
         k = kl(sur(c), np.vstack([self.p[int(x)] for x in c]))
         self.exact = dict(zip(c.tolist(), k.tolist()))
+        if self.novel and self.bound != "worst":
+            self._conformal(sur)
+
+    def _conformal(self, sur):
+        if not self.train:
+            return
+        tc = np.array([x for x, _ in self.train])
+        td = kl(sur(tc), np.vstack([p for _, p in self.train]))
+        tot, cnt = np.zeros(N_CTX), np.zeros(N_CTX)
+        np.add.at(tot, tc, td); np.add.at(cnt, tc, 1.0)
+        w = self.K @ cnt
+        pred = np.where(w > 0, (self.K @ tot) / np.maximum(w, 1e-300), E_MAX)
+        self.pred = pred
+        if self.bound == "plugin":
+            self.charge = np.clip(pred, 0.0, E_MAX)
+            return
+        m = len(self.cal)
+        k = int(np.ceil((m + 1) * (1 - self.alpha)))
+        if k > m:
+            self.q_hat = np.inf
+            self.charge = np.full(N_CTX, E_MAX)
+            return
+        cc = np.array([x for x, _ in self.cal])
+        cd = kl(sur(cc), np.vstack([p for _, p in self.cal]))
+        self.q_hat = float(np.sort(cd - pred[cc])[k - 1])
+        self.charge = np.clip(pred + self.q_hat, 0.0, E_MAX)
 
     def __call__(self, c):
+        if self.novel:
+            return self.charge[np.atleast_1d(c)]
         return np.array([self.exact.get(int(x), E_MAX) for x in np.atleast_1d(c)])
 
     def is_exact(self, c):
@@ -111,7 +161,7 @@ class Run:
     """policy: parity | view_lod | round_robin | surrogate_only | reference"""
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
-                 calib_calls=60, refit_every=40):
+                 calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1):
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
         self.rng = np.random.default_rng(seed)
         self.st = Station(n, np.random.default_rng(seed + 1))
@@ -119,7 +169,11 @@ class Run:
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
         self.sur = Distilled() if surrogate == "distilled" else Marginal()
-        self.drift = DriftBound()
+        self.drift = DriftBound(novel, bound, alpha)
+        # novel contexts: this share of the call budget goes to uniformly random decisions, whose
+        # replies calibrate the conformal margin (and still serve those decisions)
+        self.explore = explore if novel and bound == "conformal" else 0.0
+        self.calib_req = set()
         self.refit_every, self.seen = refit_every, 0
         self.L = np.zeros(n)                                  # charged ledger
         self.D = np.zeros(n)                                  # true drift since last LLM decision
@@ -132,7 +186,7 @@ class Run:
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
-                          over_cap=0, agent_s=0, view_s=0, calib=0)
+                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0)
         self.dmax_t = []
         if policy not in ("reference",):
             # a warm-up batch so the surrogate and the drift bound start from something
@@ -143,9 +197,9 @@ class Run:
             self._refit()
 
     # -- learning from replies --------------------------------------------------------
-    def _learn(self, c, p):
+    def _learn(self, c, p, calib=False):
         self.sur.observe(c, p)
-        self.drift.observe(c, p)
+        self.drift.observe(c, p, calib)
         self.seen += 1
 
     def _refit(self):
@@ -168,10 +222,12 @@ class Run:
             else:
                 self.late += 1                # the decision it was for has already been made
             fresh = c not in self.drift.p
-            self._learn(c, p)
+            calib = agent in self.calib_req
+            self.calib_req.discard(agent)
+            self._learn(c, p, calib)
             if self.seen % self.refit_every == 0:
                 self._refit()
-            elif fresh:
+            elif fresh and not self.drift.novel:
                 self.drift.exact[c] = float(kl(self.sur(c), p)[0])
 
         dec = np.flatnonzero(st.busy_until <= t)
@@ -228,6 +284,7 @@ class Run:
         d = float(kl(q, P[c])[0])
         self.L[i] += e
         self.D[i] += d
+        self.stats["covered"] += int(d <= e + 1e-12)
         self.stats["sur"] += 1
         self.stats["kl"] += d
         if self.salience(t)[i] == 1.0:
@@ -256,6 +313,26 @@ class Run:
         zone, ticket = st.next_state(cand)
         xhat = st.context(t, cand, zone=zone, ticket=ticket, at_step=when)
         if self.policy == "parity":
+            # calibration draws on the call budget like any request, except while there is no
+            # margin at all: then every surrogate decision costs E_MAX, every agent's next
+            # request is mandatory, the budget never recovers, and the margin would never form.
+            # A request for a random decision is what breaks that, so it overrides the budget
+            # (as a mandatory request does). The calibration set is those decisions only -- not
+            # the warm-up at t = 0, whose contexts (everyone just arrived) are unrepresentative.
+            uncal = not np.isfinite(self.drift.q_hat)
+            if (self.explore > 0 and (self.tokens >= 1 or uncal) and in_time.any()
+                    and (uncal or self.rng.random() < self.explore)):
+                j = int(self.rng.choice(np.flatnonzero(in_time)))
+                self.server.submit(cand[j], xhat[j], t)
+                self.req_gen[int(cand[j])] = int(self.st.gen[cand[j]])
+                self.req_dec[int(cand[j])] = int(self.ndec[cand[j]])
+                self.inflight[cand[j]] = True
+                self.calib_req.add(int(cand[j]))
+                self.tokens -= 1
+                keep = np.arange(len(cand)) != j
+                cand, when, in_time, xhat = cand[keep], when[keep], in_time[keep], xhat[keep]
+                if cand.size == 0:
+                    return
             e = self.drift(xhat)
             # an agent whose ledger cannot take its next surrogate decision is asked for now,
             # even too late to avoid a wait; anyone else only if the reply can arrive in time
@@ -312,5 +389,5 @@ class Run:
                     kl_view_per_agent_h=s["kl_view"] / max(s["view_s"] / 3600.0, 1e-9),
                     dmax=s["dmax"], over_cap_frac=s["over_cap"] / max(s["agent_s"], 1),
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
-                    overrun=s["overrun"],
+                    overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     boarded=st.boarded, missed=st.missed, left=st.left, turned=st.turned_away)

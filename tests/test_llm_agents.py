@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from llm.policy import Distilled, Marginal, kl
-from llm.schedule import Run
+from llm.schedule import E_MAX, DriftBound, Run
 from llm.station import N_ACT, N_CTX, ctx_index, ctx_parts
 
 
@@ -60,3 +60,36 @@ def test_the_call_budget_is_respected_except_for_mandatory_requests():
 def test_reference_is_the_llm_everywhere():
     s = Run(100, "reference", P, LAT, seed=0).run(300).summary()
     assert s["llm_frac"] == 1.0 and s["kl_per_agent_h"] == 0.0
+
+
+def test_conformal_charge_covers_fresh_contexts_at_its_level():
+    # split conformal: replies at random contexts calibrate the margin, and the charge must cover
+    # the true drift of at least ~1 - alpha of fresh random contexts the predictor never saw
+    rng = np.random.default_rng(3)
+    sur = Distilled()
+    for c in rng.integers(0, N_CTX, 300):
+        sur.observe(c, P[c])
+    sur.fit()
+    for alpha in (0.2, 0.1):
+        d = DriftBound(novel=True, bound="conformal", alpha=alpha)
+        for c in rng.integers(0, N_CTX, 300):
+            d.observe(c, P[c])
+        for c in rng.integers(0, N_CTX, 200):
+            d.observe(c, P[c], calib=True)
+        d.refresh(sur)
+        assert np.isfinite(d.q_hat)
+        fresh = rng.integers(0, N_CTX, 4000)
+        cover = np.mean(kl(sur(fresh), P[fresh]) <= d(fresh) + 1e-12)
+        assert cover >= 1 - alpha - 0.03, (alpha, cover)
+
+
+def test_conformal_charge_is_the_worst_case_until_calibrated():
+    d = DriftBound(novel=True, bound="conformal", alpha=0.1)
+    for c in range(20):
+        d.observe(c, P[c])
+    for c in range(5):
+        d.observe(100 + c, P[100 + c], calib=True)      # 5 < 1 / 0.1 - 1: no quantile yet
+    sur = Distilled()
+    sur.observe(np.arange(20), P[:20]); sur.fit()
+    d.refresh(sur)
+    assert np.all(d(np.arange(N_CTX)) == E_MAX)

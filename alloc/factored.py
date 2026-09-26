@@ -121,6 +121,13 @@ class _Half:
         self.c, self.q, self.sal = c, q, sal
         self.fixed = float(fixed_cost)
         self.prev = prev if (prev is not None and bonus is not None and (bonus > 0).any()) else None
+        if self.prev is not None:
+            # a previous choice outside the agent's menu (headroom no longer affords it) is no option
+            self.prev = np.asarray(self.prev, np.int64).copy()
+            for idx, mask in groups:
+                if mask is not None and len(idx):
+                    pv = self.prev[idx]
+                    self.prev[idx] = np.where((pv >= 0) & mask[np.maximum(pv, 0)], pv, -1)
         self.bonus = bonus
 
     def _hull_pick(self, lam, pick):
@@ -181,6 +188,13 @@ class FactoredAllocator:
       change nobody sees is free and a change in full view must earn switch_cost more quality
       per unit salience than it costs. A preference in the objective, priced against the budget
       like everything else; the pop ledger remains the hard bound.
+    * state_lock: a state pair per agent fixed from outside (or -1): its cost is a constant and
+      only the view half is allocated -- a render-only knapsack beside independent simulation
+      tiers (Funkhouser and Sequin 1993 over MassLOD's simulation bands).
+    * state_prev + state_switch_cost: the same for the state pair, scaled by state salience,
+      with a previous pair the agent's headroom no longer affords dropped from its options (the
+      ledger still forces restoration). Budget jitter then stops flipping marginal agents
+      between live and surrogate every frame.
     * view_lock, same shape as view_salience: a view-pair index to hold, or -1. Held agents
       drop out of that viewer's half with a fixed cost. If the held costs alone make the budget
       unreachable, holds are released, most expensive first, and `self.released` counts them:
@@ -205,7 +219,7 @@ class FactoredAllocator:
         return f[1]
 
     def allocate(self, salience, cost, budget, headroom=None, view_salience=None, view_lock=None,
-                 view_prev=None, switch_cost=0.0):
+                 view_prev=None, switch_cost=0.0, state_prev=None, state_switch_cost=0.0, state_lock=None):
         a = np.asarray(salience, np.float64)
         B = a if view_salience is None else np.asarray(view_salience, np.float64)
         multi = B.ndim == 2
@@ -217,16 +231,21 @@ class FactoredAllocator:
         cost = np.asarray(cost, np.float64)
         F = self.factor(cost)
 
+        SL = np.full(n, -1, np.int64) if state_lock is None else np.asarray(state_lock, np.int64)
+        free = SL < 0
         if headroom is None:
-            sgroups = [(np.arange(n), None)]
+            sgroups = [(np.flatnonzero(free), None)]
         else:
             hr = np.asarray(headroom, np.float64)
             levels = np.unique(F.e_state)
             g = np.searchsorted(levels, hr, side="right")
-            if (g == 0).any():
+            if (g[free] == 0).any():
                 raise ValueError("agent with no feasible configuration")
-            sgroups = [(np.flatnonzero(g == gv), F.e_state <= levels[gv - 1] + 1e-12) for gv in np.unique(g)]
-        state = _Half(a, F.q_state, F.c_state, sgroups)
+            sgroups = [(np.flatnonzero(free & (g == gv)), F.e_state <= levels[gv - 1] + 1e-12)
+                       for gv in np.unique(g[free])]
+        state = _Half(a, F.q_state, F.c_state, sgroups, fixed_cost=F.c_state[SL[~free]].sum(),
+                      prev=None if state_prev is None else np.asarray(state_prev, np.int64),
+                      bonus=state_switch_cost * a)
 
         # the pop budget yields to the frame budget: release the costliest holds until the
         # cheapest reachable total fits
@@ -294,7 +313,7 @@ class FactoredAllocator:
             lam = hi
         self.lam = lam
 
-        sp = state.choose(lam, np.empty(n, np.int64))
+        sp = state.choose(lam, np.where(free, 0, SL))
         vp = np.empty((V, n), np.int64)
         for k in range(V):
             vp[k] = np.where(L[k] >= 0, L[k], 0)
