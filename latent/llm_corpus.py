@@ -25,7 +25,9 @@ OUT = DATA / "corpus_llm.jsonl"
 
 PROMPT = """You are writing short descriptions of individual people in a crowd, for a crowd simulation.
 For each numbered situation, write ONE natural sentence of 10 to 25 words describing what that person is
-doing. Use your own words: do not copy the phrasing given, and vary the sentence structure from item to item.
+doing. The sentence must convey every element of the situation -- what they intend, who they are with, their
+gesture, their manner and the place -- but in your own words: do not copy the phrasing given, and vary the
+sentence structure from item to item.
 Then rate how visually conspicuous the behaviour would be to someone watching the crowd, from 0.0 (blends
 in completely) to 1.0 (immediately draws the eye).
 

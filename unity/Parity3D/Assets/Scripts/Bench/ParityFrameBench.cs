@@ -201,7 +201,8 @@ public static class ParityFrameBench
             foreach (var abl in new[] { "parity_free", "parity_area", "parity_area_free", "parity_nohold", "parity_area_nohold",
                                         "parity_holdonly", "parity_sw0", "parity_sw0.005", "parity_sw0.01", "parity_sw0.02", "parity_sw0.04",
                                         "parity_sw0_gain0.02", "parity_sw0_gain0.005",
-                                        "parity_sw0_vs0.1", "parity_sw0_vs0.05", "parity_sw0_vs0.02", "parity_area_sw0_vs0.1" })
+                                        "parity_sw0_vs0.1", "parity_sw0_vs0.05", "parity_sw0_vs0.02", "parity_area_sw0_vs0.1",
+                                        "parity_refill120", "parity_refill60", "parity_refill30" })
                 foreach (var k in targets) cells.Add((abl, Policy.Parity, k));
         // -policies a,b: only these
         if (Arg("-policies") is string only_) cells.RemoveAll(c => Array.IndexOf(only_.Split(','), c.name) < 0);
@@ -293,6 +294,9 @@ public static class ParityFrameBench
                     if (name.Contains("_holdonly")) w.SwitchCost = 0f;
                     if (Token(name, "_gain") is float gain) w.FrameGain = gain;
                     if (Token(name, "_vs") is float vsm) w.ViewSmoothing = vsm;
+                    // _refill<f>: the pop ledger refills a token every f frames (default 300)
+                    if (Token(name, "_refill") is float rf)
+                        foreach (var pt in w.Pops) pt.Refill = 1f / rf;
                     if (name.Contains("_area")) w.Occlusion = false;
                 }
                 bool scaler = name.EndsWith("_scaler");

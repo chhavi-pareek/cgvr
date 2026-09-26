@@ -20,7 +20,8 @@ import numpy as np
 
 
 class PopLedger:
-    def __init__(self, shape, capacity=2.0, refill=1.0 / 300.0):   # a token per 5 s, as the engine
+    def __init__(self, shape, capacity=2.0, refill=1.0 / 300.0):   # a token per 5 s: the recorded phases;
+        # the engine now refills a token a second (Sim/ViewSide.cs PopTracker, measured in pixels)
         self.capacity, self.refill = float(capacity), float(refill)
         self.tokens = np.full(shape, self.capacity)
         self.prev = np.full(shape, -1, np.int64)

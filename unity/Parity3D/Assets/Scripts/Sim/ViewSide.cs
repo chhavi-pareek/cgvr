@@ -19,7 +19,10 @@ namespace Parity
 {
     public sealed class PopTracker
     {
-        public float Capacity = 2f, Refill = 1f / 300f;   // one token per 5 s: at most 12 pops a minute
+        // one token a second: judged in pixels (ParityFrameBench image and pop), a token per 5 s
+        // held so many agents at stale tiers that 20-40% of the crowd's image was lost; a token a
+        // second keeps 94-99% of the knapsack's image with 5-7x fewer pops (Mac, N=8000, 10-14 ms)
+        public float Capacity = 2f, Refill = 1f / 60f;
         public int Window = 120;          // the "any 2 s" window the HUD reports
         const int Ring = 32;
 
