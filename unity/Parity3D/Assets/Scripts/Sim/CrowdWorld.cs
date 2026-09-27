@@ -102,6 +102,12 @@ namespace Parity
         /// at ViewD0 -- a nearer agent is worth its larger image, as Funkhouser's benefit and the
         /// pixel judge both count it. The cap is a numeric guard only.</summary>
         public float SalienceCap = 64f;
+        /// <summary>Pixel salience decides how the view half is shared among agents, not how much
+        /// the view half weighs against the state half: each viewer's view saliences are scaled to
+        /// sum to the state saliences' total, as the table weighs the four axes equally. Uncapped,
+        /// one near agent's rendering outweighed many agents' simulation, and on a laptop where
+        /// navigation cost more PARITY traded ORCA away for geometry it placed no better.</summary>
+        public bool NormaliseView = true;
         public readonly CoverageBuffer Coverage = new CoverageBuffer();
         readonly Matrix4x4[] viewProj = new Matrix4x4[MaxViewers];
         readonly Vector2[] proj = new Vector2[MaxViewers];
@@ -725,6 +731,16 @@ namespace Parity
                     {
                         sm[i] = frame == 0 ? vs[i] : Mathf.Lerp(sm[i], vs[i], ViewSmoothing);
                         vs[i] = sm[i];
+                    }
+                    if (NormaliseView && factored)
+                    {
+                        double sv = 0.0, ss = 0.0;
+                        for (int i = 0; i < N; i++) { sv += vs[i]; ss += stateSalM[i]; }
+                        if (sv > 0.0)
+                        {
+                            float f = (float)(ss / sv);
+                            for (int i = 0; i < N; i++) vs[i] *= f;
+                        }
                     }
                     for (int i = 0; i < N; i++)
                         prevV[k][i] = frame == 0 ? -1 : Factored.ViewPairOfKey(AnimV[k][i] * ParityTable.NTiers + GeoV[k][i]);

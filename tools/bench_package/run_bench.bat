@@ -27,7 +27,7 @@ if /i "%1"=="quick" (
 )
 for %%k in (1 2 3) do (
   echo seed %%k of 3 ...
-  start "" /wait ParityBench.exe %MODE% %COMMON% -seed %%k -targets 10,13,16,20,24,30,38 -policies masslod,timeslice,knapsack,knapsack_fullsim,parity,parity_sw0 -tag seed%%k -logFile Results\seed%%k.log
+  start "" /wait ParityBench.exe %MODE% %COMMON% -seed %%k -targets 10,13,16,20,24,30,38 -policies masslod,timeslice,knapsack,knapsack_fullsim,parity,parity_sw0,parity_rawview -tag seed%%k -logFile Results\seed%%k.log
   if %%k LSS 3 (
     echo cooling down for 3 minutes ...
     timeout /t 180 /nobreak >nul
