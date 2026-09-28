@@ -33,7 +33,9 @@ LETTERS = "ABCDEF"
 MODEL = "qwen2.5:7b"
 URL = "http://localhost:11434/api/chat"
 FLOOR = 1e-4          # probability given to an option outside the model's top-20 tokens
-LOGS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bench", "logs")
+# the tabulated answers are the ground truth every LLM result is measured against, so they are
+# versioned with the code (llm/tables/), not with the gitignored logs
+TABLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tables")
 
 
 def prompt(c):
@@ -68,7 +70,7 @@ def ask(c, model=MODEL, timeout=120, scn=None):
 def table_path(model=MODEL, scn=None):
     pr, n = (prompt, N_CTX) if scn is None else (scn.prompt, scn.N_CTX)
     h = hashlib.sha1((model + pr(0) + pr(n - 1)).encode()).hexdigest()[:10]
-    return os.path.join(LOGS, f"llm_table_{model.replace(':', '_')}_{h}.npz")
+    return os.path.join(TABLES, f"llm_table_{model.replace(':', '_')}_{h}.npz")
 
 
 def build_table(model=MODEL, force=False, log=print, scn=None):
@@ -86,7 +88,7 @@ def build_table(model=MODEL, force=False, log=print, scn=None):
         P[c], lat[c] = ask(c, model, scn=scn)
         if log and c % 96 == 95:
             log(f"  {c + 1}/{n_ctx} contexts, median call {np.median(lat[:c + 1]) * 1e3:.0f} ms")
-    os.makedirs(LOGS, exist_ok=True)
+    os.makedirs(TABLES, exist_ok=True)
     np.savez(path, P=P, latency=lat, model=model)
     return P, lat
 
