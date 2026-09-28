@@ -1,0 +1,31 @@
+\begin{table*}[t]
+\centering
+\caption{Station: drift in nats per agent-hour and the per-agent cap ($\kappa=10$), 10 seeds, mean $\pm$ 95\% CI.}
+\label{tab:station}
+\begin{tabular}{llrrrrr}
+\toprule
+$N$ & Policy & Worst / cap & Over, \% & Drift & Steady & Waits \\
+\midrule
+300 & PARITY & 0.91 $\pm$ 0.01 & 0.00 $\pm$ 0.00 & 1.48 $\pm$ 0.08 & 0.59 $\pm$ 0.06 & 0 $\pm$ 0 \\
+ & PARITY, no ledger & 0.91 $\pm$ 0.01 & 0.00 $\pm$ 0.00 & 1.44 $\pm$ 0.07 & 0.54 $\pm$ 0.04 & 0 $\pm$ 0 \\
+ & Cascade & 0.93 $\pm$ 0.02 & 0.00 $\pm$ 0.00 & 1.60 $\pm$ 0.10 & 0.53 $\pm$ 0.06 & 0 $\pm$ 0 \\
+ & View-LOD & 1.12 $\pm$ 0.06 & 0.16 $\pm$ 0.06 & 2.52 $\pm$ 0.12 & 1.44 $\pm$ 0.14 & 0 $\pm$ 0 \\
+ & Round-robin & 1.15 $\pm$ 0.20 & 0.09 $\pm$ 0.04 & 2.61 $\pm$ 0.13 & 1.55 $\pm$ 0.10 & 0 $\pm$ 0 \\
+ & Surrogate only & 4.31 $\pm$ 0.86 & 21.05 $\pm$ 1.88 & 17.81 $\pm$ 0.82 & 7.17 $\pm$ 0.91 & 0 $\pm$ 0 \\
+\midrule
+1000 & PARITY & 0.96 $\pm$ 0.01 & 0.00 $\pm$ 0.00 & 2.69 $\pm$ 0.15 & 0.96 $\pm$ 0.04 & 1 $\pm$ 2 \\
+ & PARITY, no ledger & 0.96 $\pm$ 0.01 & 0.00 $\pm$ 0.00 & 2.65 $\pm$ 0.12 & 0.92 $\pm$ 0.05 & 0 $\pm$ 0 \\
+ & Cascade & 1.18 $\pm$ 0.05 & 0.24 $\pm$ 0.08 & 3.78 $\pm$ 0.35 & 1.30 $\pm$ 0.10 & 0 $\pm$ 0 \\
+ & View-LOD & 1.25 $\pm$ 0.11 & 0.28 $\pm$ 0.12 & 3.74 $\pm$ 0.17 & 1.87 $\pm$ 0.08 & 0 $\pm$ 0 \\
+ & Round-robin & 1.35 $\pm$ 0.18 & 0.22 $\pm$ 0.08 & 3.82 $\pm$ 0.08 & 1.97 $\pm$ 0.14 & 0 $\pm$ 0 \\
+ & Surrogate only & 4.36 $\pm$ 0.77 & 12.85 $\pm$ 0.76 & 15.51 $\pm$ 0.43 & 4.24 $\pm$ 0.61 & 0 $\pm$ 0 \\
+\midrule
+2000 & PARITY & 0.97 $\pm$ 0.01 & 0.00 $\pm$ 0.00 & 3.49 $\pm$ 0.19 & 1.60 $\pm$ 0.14 & 112 $\pm$ 43 \\
+ & PARITY, no ledger & 0.98 $\pm$ 0.02 & 0.01 $\pm$ 0.01 & 3.06 $\pm$ 0.12 & 1.11 $\pm$ 0.06 & 0 $\pm$ 0 \\
+ & Cascade & 1.44 $\pm$ 0.14 & 0.51 $\pm$ 0.12 & 5.12 $\pm$ 0.29 & 1.97 $\pm$ 0.15 & 0 $\pm$ 0 \\
+ & View-LOD & 1.53 $\pm$ 0.17 & 0.32 $\pm$ 0.13 & 4.06 $\pm$ 0.15 & 1.99 $\pm$ 0.12 & 0 $\pm$ 0 \\
+ & Round-robin & 1.63 $\pm$ 0.25 & 0.26 $\pm$ 0.06 & 4.03 $\pm$ 0.08 & 1.96 $\pm$ 0.06 & 0 $\pm$ 0 \\
+ & Surrogate only & 4.52 $\pm$ 0.56 & 11.28 $\pm$ 1.09 & 14.87 $\pm$ 0.30 & 3.35 $\pm$ 0.58 & 0 $\pm$ 0 \\
+\bottomrule
+\end{tabular}
+\end{table*}

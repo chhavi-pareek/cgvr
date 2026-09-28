@@ -1,0 +1,40 @@
+\begin{table*}[t]
+\centering
+\caption{Museum evacuation (alarm at 5 min): drift, the cap, waiting and evacuation-time W1 to the same-seed all-LLM run, 10 seeds.}
+\label{tab:museum}
+\begin{tabular}{llrrrrrr}
+\toprule
+$N$ & Policy & Worst / cap & Over, \% & Drift & Post-alarm & Waits & Evac.\ W1, s \\
+\midrule
+300 & PARITY & 0.79 $\pm$ 0.06 & 0.00 $\pm$ 0.00 & 18.99 $\pm$ 1.35 & 21.3 $\pm$ 8.9 & 405 $\pm$ 258 & 41 $\pm$ 22 \\
+ & PARITY + rehearsal & 0.76 $\pm$ 0.07 & 0.00 $\pm$ 0.00 & 18.31 $\pm$ 1.55 & 5.8 $\pm$ 1.9 & 326 $\pm$ 230 & 38 $\pm$ 23 \\
+ & PARITY + rehearsal + wait 5 s & 0.76 $\pm$ 0.09 & 0.00 $\pm$ 0.00 & 16.84 $\pm$ 1.55 & 4.3 $\pm$ 2.5 & 7 $\pm$ 3 & 45 $\pm$ 25 \\
+ & PARITY, no ledger & 1.26 $\pm$ 0.21 & 0.32 $\pm$ 0.25 & 18.38 $\pm$ 1.36 & 16.8 $\pm$ 9.7 & 0 $\pm$ 0 & 38 $\pm$ 17 \\
+ & Cascade & 1.73 $\pm$ 0.32 & 1.62 $\pm$ 1.00 & 21.47 $\pm$ 2.33 & 21.7 $\pm$ 10.2 & 0 $\pm$ 0 & 53 $\pm$ 22 \\
+ & Cascade + rehearsal & 1.11 $\pm$ 0.16 & 0.25 $\pm$ 0.25 & 19.83 $\pm$ 2.82 & 3.0 $\pm$ 1.4 & 0 $\pm$ 0 & 39 $\pm$ 11 \\
+ & View-LOD & 1.74 $\pm$ 0.47 & 0.71 $\pm$ 0.37 & 21.91 $\pm$ 2.24 & 21.4 $\pm$ 10.5 & 0 $\pm$ 0 & 49 $\pm$ 20 \\
+ & Round-robin & 1.34 $\pm$ 0.32 & 0.39 $\pm$ 0.25 & 19.92 $\pm$ 2.08 & 22.1 $\pm$ 9.0 & 0 $\pm$ 0 & 48 $\pm$ 22 \\
+ & Surrogate only & 9.36 $\pm$ 1.51 & 45.44 $\pm$ 6.27 & 154.77 $\pm$ 15.54 & 249.3 $\pm$ 22.9 & 0 $\pm$ 0 & 138 $\pm$ 47 \\
+\midrule
+1000 & PARITY & 0.79 $\pm$ 0.04 & 0.00 $\pm$ 0.00 & 11.88 $\pm$ 1.72 & 8.8 $\pm$ 3.7 & 1532 $\pm$ 311 & 172 $\pm$ 55 \\
+ & PARITY + rehearsal & 0.68 $\pm$ 0.07 & 0.00 $\pm$ 0.00 & 12.34 $\pm$ 1.39 & 2.6 $\pm$ 2.1 & 1857 $\pm$ 505 & 206 $\pm$ 70 \\
+ & PARITY + rehearsal + wait 5 s & 1.38 $\pm$ 0.26 & 0.35 $\pm$ 0.29 & 26.10 $\pm$ 3.13 & 10.3 $\pm$ 2.4 & 38 $\pm$ 7 & 25 $\pm$ 7 \\
+ & PARITY, no ledger & 2.23 $\pm$ 0.62 & 1.21 $\pm$ 0.77 & 25.10 $\pm$ 1.40 & 35.0 $\pm$ 9.6 & 0 $\pm$ 0 & 21 $\pm$ 11 \\
+ & Cascade & 2.92 $\pm$ 0.66 & 1.91 $\pm$ 0.61 & 28.11 $\pm$ 2.10 & 41.7 $\pm$ 5.5 & 0 $\pm$ 0 & 22 $\pm$ 6 \\
+ & Cascade + rehearsal & 1.26 $\pm$ 0.36 & 0.18 $\pm$ 0.20 & 22.08 $\pm$ 2.98 & 7.4 $\pm$ 3.0 & 0 $\pm$ 0 & 28 $\pm$ 10 \\
+ & View-LOD & 2.35 $\pm$ 0.44 & 2.06 $\pm$ 1.19 & 27.56 $\pm$ 3.40 & 33.2 $\pm$ 10.3 & 0 $\pm$ 0 & 14 $\pm$ 5 \\
+ & Round-robin & 2.36 $\pm$ 0.25 & 1.03 $\pm$ 0.48 & 24.34 $\pm$ 1.90 & 34.7 $\pm$ 8.6 & 0 $\pm$ 0 & 20 $\pm$ 6 \\
+ & Surrogate only & 10.24 $\pm$ 2.68 & 42.18 $\pm$ 3.29 & 141.21 $\pm$ 10.87 & 239.2 $\pm$ 17.6 & 0 $\pm$ 0 & 146 $\pm$ 22 \\
+\midrule
+2000 & PARITY & 0.82 $\pm$ 0.03 & 0.00 $\pm$ 0.00 & 12.26 $\pm$ 2.81 & 8.5 $\pm$ 3.9 & 1435 $\pm$ 451 & 157 $\pm$ 73 \\
+ & PARITY + rehearsal & 0.64 $\pm$ 0.07 & 0.00 $\pm$ 0.00 & 13.76 $\pm$ 1.71 & 5.3 $\pm$ 2.0 & 1010 $\pm$ 516 & 85 $\pm$ 76 \\
+ & PARITY + rehearsal + wait 5 s & 1.34 $\pm$ 0.47 & 0.64 $\pm$ 0.83 & 21.90 $\pm$ 5.47 & 16.0 $\pm$ 4.2 & 29 $\pm$ 11 & 23 $\pm$ 7 \\
+ & PARITY, no ledger & 2.56 $\pm$ 0.81 & 2.02 $\pm$ 0.80 & 27.91 $\pm$ 2.15 & 45.9 $\pm$ 3.9 & 0 $\pm$ 0 & 15 $\pm$ 4 \\
+ & Cascade & 2.61 $\pm$ 0.42 & 3.96 $\pm$ 2.36 & 31.65 $\pm$ 4.54 & 46.6 $\pm$ 5.4 & 0 $\pm$ 0 & 19 $\pm$ 4 \\
+ & Cascade + rehearsal & 1.42 $\pm$ 0.23 & 0.67 $\pm$ 0.66 & 23.75 $\pm$ 2.31 & 8.5 $\pm$ 3.4 & 0 $\pm$ 0 & 27 $\pm$ 13 \\
+ & View-LOD & 2.67 $\pm$ 0.40 & 2.40 $\pm$ 0.75 & 28.64 $\pm$ 2.75 & 33.1 $\pm$ 10.3 & 0 $\pm$ 0 & 18 $\pm$ 8 \\
+ & Round-robin & 2.66 $\pm$ 0.50 & 1.43 $\pm$ 0.38 & 25.43 $\pm$ 1.64 & 41.3 $\pm$ 3.3 & 0 $\pm$ 0 & 23 $\pm$ 3 \\
+ & Surrogate only & 10.24 $\pm$ 1.76 & 46.90 $\pm$ 3.72 & 146.07 $\pm$ 12.51 & 242.3 $\pm$ 17.8 & 0 $\pm$ 0 & 181 $\pm$ 22 \\
+\bottomrule
+\end{tabular}
+\end{table*}

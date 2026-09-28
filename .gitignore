@@ -11,3 +11,5 @@ unity/OracleCheck/obj/
 unity/OracleCheck/cases.json
 unity/OracleCheck/results.json
 latent/data/*.part.jsonl
+paper/data/*_series.npz
+!paper/data/museum_*_series.npz

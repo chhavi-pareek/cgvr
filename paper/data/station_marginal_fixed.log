@@ -1,0 +1,40 @@
+model latency median 694 ms -> budget 1.36 calls/s; cap 10.0 nats; 30 simulated minutes; seeds [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+N = 1000: 10.4 decisions/s needed for every decision to be the model's (13% servable);  reference boarded 415, missed 439
+  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  forced  boarded   missed  coverage  overflow
+  parity              1.00x     0.00%         23.43   12.90     54.07         0.32     1.38           6.6     0.0      223      151   100.0%    0.00%
+  parity_nocap        5.73x    13.21%         23.61   13.19     53.87         0.36     1.35           0.0     0.0      219      125   100.0%   19.74%
+  cascade             7.79x     8.64%         24.22   10.80     72.43         0.45     1.35           0.0     0.0      112      127   100.0%   15.40%
+  view_lod           11.15x    13.57%         25.02   14.85     55.12         0.31     1.35           0.0     0.0      181      220   100.0%   18.10%
+  round_robin         7.57x    10.44%         24.71   14.51     54.82         0.31     1.35           0.0     0.0      190      210   100.0%   16.05%
+  over 10 seeds, mean +- 95% CI:  worst/cap | drift/agent-h | steady | in view | overflow % | boarded | missed
+  parity            1.00 +- 0.00 |  23.43 +- 0.73 |  12.90 +- 0.80 |  54.07 +- 0.94 |   0.00 +- 0.00 | 222.60 +- 13.57 | 150.70 +- 14.97
+  parity_nocap      4.58 +- 0.58 |  23.61 +- 0.82 |  13.19 +- 0.91 |  53.87 +- 1.23 |  19.74 +- 1.16 | 219.20 +- 12.31 | 125.20 +- 7.91
+  cascade           6.94 +- 0.33 |  24.22 +- 0.93 |  10.80 +- 1.14 |  72.43 +- 0.82 |  15.40 +- 0.78 | 111.90 +- 3.81 | 127.40 +- 11.75
+  view_lod          8.59 +- 1.03 |  25.02 +- 0.88 |  14.85 +- 0.90 |  55.12 +- 1.72 |  18.10 +- 1.06 | 180.70 +- 12.13 | 220.10 +- 18.13
+  round_robin       6.53 +- 0.64 |  24.71 +- 0.48 |  14.51 +- 0.71 |  54.82 +- 1.08 |  16.05 +- 1.28 | 190.50 +- 10.20 | 210.50 +- 19.61
+  parity minus each, paired (mean +- 95% CI, Wilcoxon p, seeds parity lower):
+    vs parity_nocap  drift -0.18 +- 0.52 (p 0.432, 6/10); steady -0.30 +- 0.61 (p 0.232, 7/10); in view +0.21 +- 0.74 (p 0.557, 4/10); worst -35.80 +- 5.75 (p 0.002, 10/10)
+    vs cascade       drift -0.79 +- 0.83 (p 0.084, 6/10); steady +2.10 +- 0.89 (p 0.004, 1/10); in view -18.35 +- 1.01 (p 0.002, 10/10); worst -59.37 +- 3.26 (p 0.002, 10/10)
+    vs view_lod      drift -1.59 +- 0.87 (p 0.006, 9/10); steady -1.95 +- 0.85 (p 0.004, 9/10); in view -1.04 +- 1.47 (p 0.160, 6/10); worst -75.96 +- 10.27 (p 0.002, 10/10)
+    vs round_robin   drift -1.28 +- 0.45 (p 0.002, 10/10); steady -1.62 +- 0.53 (p 0.002, 10/10); in view -0.75 +- 1.15 (p 0.375, 5/10); worst -55.33 +- 6.43 (p 0.002, 10/10)
+
+N = 2000: 20.9 decisions/s needed for every decision to be the model's (6% servable);  reference boarded 805, missed 895
+  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  forced  boarded   missed  coverage  overflow
+  parity              1.00x     0.00%         20.39    8.85     51.33         0.12     1.66         502.5     0.0      295      443   100.0%    0.00%
+  parity_nocap        8.32x    17.36%         27.42   15.98     64.82         0.22     1.35           0.0     0.0      409      190   100.0%   25.54%
+  cascade             7.60x    10.11%         25.18   10.53     80.54         0.30     1.35           0.0     0.0      174      176   100.0%   15.88%
+  view_lod           10.71x    15.51%         26.77   15.73     61.83         0.18     1.35           0.0     0.0      318      356   100.0%   22.01%
+  round_robin         8.90x    14.82%         26.15   14.94     61.24         0.18     1.35           0.0     0.0      306      357   100.0%   20.79%
+  over 10 seeds, mean +- 95% CI:  worst/cap | drift/agent-h | steady | in view | overflow % | boarded | missed
+  parity            1.00 +- 0.00 |  20.39 +- 0.91 |   8.85 +- 1.08 |  51.33 +- 2.98 |   0.00 +- 0.00 | 294.90 +- 32.63 | 442.80 +- 58.22
+  parity_nocap      7.32 +- 0.50 |  27.42 +- 1.31 |  15.98 +- 1.41 |  64.82 +- 1.66 |  25.54 +- 1.17 | 408.80 +- 31.37 | 189.80 +- 8.48
+  cascade           6.54 +- 0.56 |  25.18 +- 1.97 |  10.53 +- 2.52 |  80.54 +- 1.14 |  15.88 +- 2.15 | 174.50 +- 13.75 | 175.80 +- 37.66
+  view_lod          8.34 +- 0.95 |  26.77 +- 1.26 |  15.73 +- 1.39 |  61.83 +- 1.51 |  22.01 +- 1.31 | 317.80 +- 30.46 | 355.80 +- 20.78
+  round_robin       7.48 +- 0.46 |  26.15 +- 1.60 |  14.94 +- 1.71 |  61.24 +- 2.00 |  20.79 +- 1.91 | 306.30 +- 37.55 | 357.00 +- 19.29
+  parity minus each, paired (mean +- 95% CI, Wilcoxon p, seeds parity lower):
+    vs parity_nocap  drift -7.03 +- 1.65 (p 0.002, 10/10); steady -7.12 +- 1.91 (p 0.002, 10/10); in view -13.49 +- 3.38 (p 0.002, 10/10); worst -63.25 +- 4.96 (p 0.002, 10/10)
+    vs cascade       drift -4.79 +- 2.37 (p 0.006, 9/10); steady -1.68 +- 3.07 (p 0.232, 7/10); in view -29.22 +- 3.29 (p 0.002, 10/10); worst -55.41 +- 5.59 (p 0.002, 10/10)
+    vs view_lod      drift -6.37 +- 1.66 (p 0.002, 10/10); steady -6.88 +- 2.04 (p 0.002, 10/10); in view -10.50 +- 3.22 (p 0.002, 10/10); worst -73.36 +- 9.48 (p 0.002, 10/10)
+    vs round_robin   drift -5.76 +- 2.05 (p 0.002, 10/10); steady -6.09 +- 2.35 (p 0.002, 10/10); in view -9.91 +- 4.20 (p 0.002, 10/10); worst -64.75 +- 4.61 (p 0.002, 10/10)
+100 runs written to paper/data/station_marginal_fixed.csv (time series beside it)
