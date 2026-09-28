@@ -10,3 +10,4 @@ unity/OracleCheck/bin/
 unity/OracleCheck/obj/
 unity/OracleCheck/cases.json
 unity/OracleCheck/results.json
+latent/data/*.part.jsonl
