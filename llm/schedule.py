@@ -29,8 +29,9 @@ from collections import deque
 
 import numpy as np
 
+from . import station
 from .policy import FLOOR, Distilled, Marginal, kl
-from .station import N_ACT, N_CTX, N_Z, Station, Z_GATES, ctx_parts
+from .station import N_ACT
 
 VIEW_PERIOD = 300          # the viewer moves to another zone every five minutes
 FAR_SALIENCE = 0.25
@@ -123,17 +124,18 @@ class DriftBound:
     #              version: a stretch's expected true drift is within the cap. The margin needs
     #              about E_MAX / (eps E[charge]) calibration replies to exist at all, so a small
     #              delta is only affordable when the model serves a large share of decisions.
-    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25):
+    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station):
+        self.n_ctx = scn.N_CTX
         self.p = {}                    # context -> LLM distribution, from paid replies
         self.exact = {}
         self.p15, self.exact15 = {}, {}  # the small model's answers, and its exact drift from the LLM
         self.novel, self.bound, self.alpha, self.tau = novel, bound, alpha, tau
         self.delta, self.eta = delta, eta
         self.train, self.cal = [], []  # (ctx, p) of paid replies; cal = the random ones
-        self.charge = np.full(N_CTX, E_MAX)
+        self.charge = np.full(self.n_ctx, E_MAX)
         self.q_hat = np.inf
         if novel:
-            parts = np.stack(ctx_parts(np.arange(N_CTX)), 1)
+            parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1)
             h = (parts[:, None, :] != parts[None, :, :]).sum(2).astype(np.float64)
             self.K = np.exp(-h / tau)
             np.fill_diagonal(self.K, 0.0)            # a context never predicts itself
@@ -168,7 +170,7 @@ class DriftBound:
             return
         tc = np.array([x for x, _ in self.train])
         td = kl(sur(tc), np.vstack([p for _, p in self.train]))
-        tot, cnt = np.zeros(N_CTX), np.zeros(N_CTX)
+        tot, cnt = np.zeros(self.n_ctx), np.zeros(self.n_ctx)
         np.add.at(tot, tc, td); np.add.at(cnt, tc, 1.0)
         w = self.K @ cnt
         pred = np.where(w > 0, (self.K @ tot) / np.maximum(w, 1e-300), E_MAX)
@@ -183,7 +185,7 @@ class DriftBound:
         k = int(np.ceil((m + 1) * (1 - self.alpha)))
         if k > m:
             self.q_hat = np.inf
-            self.charge = np.full(N_CTX, E_MAX)
+            self.charge = np.full(self.n_ctx, E_MAX)
             return
         cc = np.array([x for x, _ in self.cal])
         cd = kl(sur(cc), np.vstack([p for _, p in self.cal]))
@@ -203,7 +205,7 @@ class DriftBound:
         ok = (m / (m + 1)) * risk + E_MAX / (m + 1) <= 0.0
         if not ok.any():                      # fewer than ~1/eps calibration replies yet
             self.q_hat = np.inf
-            self.charge = np.full(N_CTX, E_MAX)
+            self.charge = np.full(self.n_ctx, E_MAX)
             return
         self.q_hat = float(lam[np.argmax(ok)])
         self.charge = np.clip(pred + self.q_hat, 0.0, E_MAX)
@@ -218,25 +220,37 @@ class DriftBound:
 
 
 class Run:
-    """policy: parity | view_lod | round_robin | surrogate_only | reference"""
+    """policy: parity | parity_nocap | cascade | view_lod | round_robin | surrogate_only | reference
+
+    parity_nocap is PARITY with its ledger switched off (the same salience x drift priority, no
+    admission test, no mandatory requests); the cap is still what drift is measured against.
+    cascade is the LLM-cascade rule (FrugalGPT and its successors): escalate the decisions whose
+    surrogate is least confident (lowest top probability) until the call budget is spent."""
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
-                 delta=0.05, eta=0.25, small=None):
+                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0):
+        self.ledger = policy != "parity_nocap"
+        policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
         # small = (P, latency) of a second, cheaper model: a three-option menu per decision
         self.small = small is not None
         self.P15 = small[0] if small else None
         self.cost15 = float(np.mean(small[1]) / np.mean(latency)) if small else 1.0
         self.probed = set()
+        # rehearsal: this share of the call budget asks the model about contexts nobody is in yet
+        # but that are one factor away from where the crowd is (see _rehearse)
+        self.rehearse, self.rtokens, self.rehearsing = rehearse, 0.0, set()
         self.probe_q = deque()
         self.rng = np.random.default_rng(seed)
-        self.st = Station(n, np.random.default_rng(seed + 1))
+        self.scn = station if scenario is None else scenario
+        assert self.scn.N_ACT == N_ACT
+        self.st = self.scn.World(n, np.random.default_rng(seed + 1))
         self.server = Server(P, latency, np.random.default_rng(seed + 2), small)
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
-        self.sur = Distilled() if surrogate == "distilled" else Marginal()
-        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta)
+        self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
+        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn)
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
         # cannot under-charge) still runs to the cap -- else before calibration nothing fits
@@ -262,7 +276,7 @@ class Run:
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0,
-                          small=0, probes=0)
+                          small=0, probes=0, rehearsals=0)
         self.dmax_t = []
         # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
         # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
@@ -308,7 +322,7 @@ class Run:
 
     # -- one second ----------------------------------------------------------------------
     def salience(self, step):
-        view = (step // VIEW_PERIOD) % N_Z
+        view = (step // VIEW_PERIOD) % self.scn.N_Z
         return np.where(self.st.zone == view, 1.0, FAR_SALIENCE)
 
     def step(self, t):
@@ -326,11 +340,14 @@ class Run:
                     else:
                         self.late += 1
                 continue
-            self.inflight[agent] = False
-            if self.req_dec.get(agent, -1) == self.ndec[agent]:
-                self.pending[agent] = (c, p, self.req_gen.get(agent, -1), 0)
+            if agent < 0:
+                self.rehearsing.discard(c)    # a rehearsal: learned from, no decision waits for it
             else:
-                self.late += 1                # the decision it was for has already been made
+                self.inflight[agent] = False
+                if self.req_dec.get(agent, -1) == self.ndec[agent]:
+                    self.pending[agent] = (c, p, self.req_gen.get(agent, -1), 0)
+                else:
+                    self.late += 1            # the decision it was for has already been made
             if self.small and c not in self.drift.p15 and c not in self.probed:
                 # a probe: the small model at a context the LLM has now answered makes the small
                 # model's drift there exact, so the scheduler knows where it can stand in. Probes
@@ -362,7 +379,7 @@ class Run:
         self._schedule(t)
         if t == self.steady_from:
             self.kl_at, self.agent_s_at = self.stats["kl"], self.stats["agent_s"]
-        self.stats["agent_s"] += self.n
+        self.stats["agent_s"] += st.present()
         self.stats["view_s"] += int((self.salience(t) == 1.0).sum())
         self.stats["dmax"] = max(self.stats["dmax"], float(self.D.max()))
         self.stats["over_cap"] += int((self.D > self.cap + 1e-9).sum())
@@ -386,7 +403,7 @@ class Run:
         if rep is not None and rep[0] == c and rep[3] == 1:
             # a small-model decision: not a reset, charged its drift from the LLM like any other
             e = float(self.drift.small_charge(c)[0])
-            if self.policy != "parity" or self.L[i] + e <= self.cap:
+            if self.policy != "parity" or not self.ledger or self.L[i] + e <= self.cap:
                 d = float(kl(rep[1], P[c])[0])
                 self.L[i] += e
                 self.D[i] += d
@@ -405,7 +422,7 @@ class Run:
             # was on its way); acting on it would be drift nobody charged, so it is discarded
             self.stats["stale"] += 1
         e = float(self.drift(c)[0])
-        if self.policy == "parity" and self.L[i] + e > self._limit(i, e):
+        if self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e):
             # the ledger cannot absorb another surrogate decision: wait for the model
             self.st.busy_until[i] = t + 1
             self.stats["stall"] += 1
@@ -437,7 +454,9 @@ class Run:
         if self.policy in ("reference", "surrogate_only"):
             return
         st = self.st
-        self.tokens = min(self.tokens + self.rate, 3 * self.rate + 1)
+        self.tokens = min(self.tokens + (1 - self.rehearse) * self.rate, 3 * self.rate + 1)
+        if self.rehearse > 0 and self.policy == "parity":
+            self._rehearse(t)
         # people in the ticket queue included: their decision time is estimated from their place
         cand = np.flatnonzero(~self.inflight & (st.busy_until > t))
         cand = np.array([i for i in cand if i not in self.pending], np.int64)
@@ -451,8 +470,7 @@ class Run:
         if cand.size == 0:
             return
         in_time = when >= earliest
-        zone, ticket = st.next_state(cand)
-        xhat = st.context(t, cand, zone=zone, ticket=ticket, at_step=when)
+        xhat = st.context(t, cand, *st.next_state(cand), at_step=when)
         if self.small:
             in15 = when >= t + self.server.backlog(t) + float(self.server.lat[1].max())
             if self.policy == "parity":
@@ -496,7 +514,7 @@ class Run:
             e = self.drift(xhat)
             # an agent whose ledger cannot take its next surrogate decision is asked for now,
             # even too late to avoid a wait; anyone else only if the reply can arrive in time
-            must = self.L[cand] + e > self._limit(cand, e)
+            must = (self.L[cand] + e > self._limit(cand, e)) & self.ledger
             val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
             order = list(np.flatnonzero(must)) + [j for j in np.argsort(-val) if not must[j] and val[j] >= 0]
             for j in order:
@@ -523,6 +541,15 @@ class Run:
                 self.req_dec[int(cand[j])] = int(self.ndec[cand[j]])
                 self.inflight[cand[j]] = True
                 self.tokens -= 1
+        elif self.policy == "cascade":
+            conf = self.sur(xhat).max(1)
+            for j in np.argsort(conf, kind="stable"):
+                if self.tokens < 1:
+                    break
+                if not in_time[j]:
+                    continue
+                self._request(cand[j], xhat[j], t, 0)
+                self.tokens -= 1
         elif self.policy == "round_robin":
             order = np.argsort((cand - self.rr) % self.n)
             for j in order[in_time[order]]:
@@ -534,6 +561,37 @@ class Run:
                 self.inflight[cand[j]] = True
                 self.tokens -= 1
                 self.rr = (cand[j] + 1) % self.n
+
+    def _rehearse(self, t):
+        """Ask the model about an unseen context next to the crowd's. A context nobody has asked
+        about is charged E_MAX, so the first decision there spends most of a ledger and the second
+        waits for the model -- when a situation changes for everyone at once (an alarm), the whole
+        crowd waits. The neighbours of the occupied contexts (one factor changed) are where the
+        crowd goes next, so their replies are bought ahead from a share of the budget: each makes
+        the drift there exact and trains the surrogate there. Neighbours are ranked by how many
+        people are one factor away from them; the scheduler never learns which change is coming."""
+        self.rtokens = min(self.rtokens + self.rehearse * self.rate, 3 * self.rehearse * self.rate + 1)
+        if self.rtokens < 1:
+            return
+        st, scn = self.st, self.scn
+        here = np.flatnonzero(st.inside) if hasattr(st, "inside") else np.arange(self.n)
+        if here.size == 0:
+            return
+        occ, cnt = np.unique(st.context(t, here), return_counts=True)
+        parts = np.stack(scn.ctx_parts(occ), 1)
+        score = {}
+        for f, size in enumerate(scn.SIZES):
+            for v in range(size):
+                nb = parts.copy()
+                nb[:, f] = v
+                for c, w in zip(scn.ctx_index(*nb.T).tolist(), cnt.tolist()):
+                    if c not in self.drift.p and c not in self.rehearsing:
+                        score[c] = score.get(c, 0) + w
+        for c in sorted(score, key=lambda c: (-score[c], c))[:int(self.rtokens)]:
+            self.server.submit(-1, c, t)
+            self.rehearsing.add(c)
+            self.rtokens -= 1
+            self.stats["rehearsals"] += 1
 
     def _probe(self, t):
         """Probes from the budget left after this step's decisions, while they might pay."""
@@ -628,4 +686,4 @@ class Run:
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
-                    boarded=st.boarded, missed=st.missed, left=st.left, turned=st.turned_away)
+                    **st.outcomes())

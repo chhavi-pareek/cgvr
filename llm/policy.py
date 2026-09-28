@@ -25,6 +25,7 @@ import urllib.request
 
 import numpy as np
 
+from . import station
 from .station import (ACTIONS, N_ACT, N_CTX, N_K, N_P, N_Q, N_T, N_Z, PERSONAS, Q_WORDS, T_WORDS, ZONES,
                       ctx_parts)
 
@@ -47,9 +48,10 @@ def prompt(c):
             f"What do they do next?\n{opts}\nAnswer with a single letter.")
 
 
-def ask(c, model=MODEL, timeout=120):
+def ask(c, model=MODEL, timeout=120, scn=None):
     """(distribution over the six actions, seconds taken) for context c."""
-    body = {"model": model, "messages": [{"role": "user", "content": prompt(c)}], "stream": False,
+    text = prompt(c) if scn is None else scn.prompt(c)
+    body = {"model": model, "messages": [{"role": "user", "content": text}], "stream": False,
             "options": {"temperature": 0, "num_predict": 1}, "logprobs": True, "top_logprobs": 20}
     req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.perf_counter()
@@ -63,24 +65,27 @@ def ask(c, model=MODEL, timeout=120):
     return p / p.sum(), dt
 
 
-def table_path(model=MODEL):
-    h = hashlib.sha1((model + prompt(0) + prompt(N_CTX - 1)).encode()).hexdigest()[:10]
+def table_path(model=MODEL, scn=None):
+    pr, n = (prompt, N_CTX) if scn is None else (scn.prompt, scn.N_CTX)
+    h = hashlib.sha1((model + pr(0) + pr(n - 1)).encode()).hexdigest()[:10]
     return os.path.join(LOGS, f"llm_table_{model.replace(':', '_')}_{h}.npz")
 
 
-def build_table(model=MODEL, force=False, log=print):
-    """The LLM's exact distribution at every context, plus the latency of every call."""
-    path = table_path(model)
+def build_table(model=MODEL, force=False, log=print, scn=None):
+    """The LLM's exact distribution at every context, plus the latency of every call. scn: a
+    scenario module (llm/museum.py); the station by default."""
+    path = table_path(model, scn)
+    n_ctx = N_CTX if scn is None else scn.N_CTX
     if os.path.exists(path) and not force:
         t = np.load(path)
         return t["P"], t["latency"]
-    ask(0, model)                                   # load the model before timing anything
-    P = np.empty((N_CTX, N_ACT))
-    lat = np.empty(N_CTX)
-    for c in range(N_CTX):
-        P[c], lat[c] = ask(c, model)
+    ask(0, model, scn=scn)                          # load the model before timing anything
+    P = np.empty((n_ctx, N_ACT))
+    lat = np.empty(n_ctx)
+    for c in range(n_ctx):
+        P[c], lat[c] = ask(c, model, scn=scn)
         if log and c % 96 == 95:
-            log(f"  {c + 1}/{N_CTX} contexts, median call {np.median(lat[:c + 1]) * 1e3:.0f} ms")
+            log(f"  {c + 1}/{n_ctx} contexts, median call {np.median(lat[:c + 1]) * 1e3:.0f} ms")
     os.makedirs(LOGS, exist_ok=True)
     np.savez(path, P=P, latency=lat, model=model)
     return P, lat
@@ -94,11 +99,12 @@ def kl(q, p):
 
 # -- surrogates ---------------------------------------------------------------------------
 
-def features(c):
-    """One-hot of each context factor separately: 6 + 4 + 2 + 3 + 4 = 19 columns, no interactions."""
-    parts = ctx_parts(np.atleast_1d(c))
+def features(c, scn=station):
+    """One-hot of each context factor separately (station: 6 + 4 + 2 + 3 + 4 = 19 columns), no
+    interactions."""
+    parts = scn.ctx_parts(np.atleast_1d(c))
     cols = []
-    for v, n in zip(parts, (N_P, N_T, N_K, N_Q, N_Z)):
+    for v, n in zip(parts, scn.SIZES):
         cols.append(np.eye(n)[v])
     return np.hstack(cols)
 
@@ -106,17 +112,18 @@ def features(c):
 class Marginal:
     """The average reply per persona (the global average before a persona has been seen)."""
 
-    def __init__(self):
-        self.sum = np.zeros((N_P, N_ACT))
-        self.cnt = np.zeros(N_P)
+    def __init__(self, scn=station):
+        self.scn = scn
+        self.sum = np.zeros((scn.SIZES[0], N_ACT))
+        self.cnt = np.zeros(scn.SIZES[0])
 
     def observe(self, c, p):
-        per = ctx_parts(np.atleast_1d(c))[0]
+        per = self.scn.ctx_parts(np.atleast_1d(c))[0]
         np.add.at(self.sum, per, np.atleast_2d(p))
         np.add.at(self.cnt, per, 1)
 
     def __call__(self, c):
-        per = ctx_parts(np.atleast_1d(c))[0]
+        per = self.scn.ctx_parts(np.atleast_1d(c))[0]
         glob = self.sum.sum(0) + 1e-9
         q = np.where(self.cnt[per, None] > 0, self.sum[per] / np.maximum(self.cnt[per, None], 1), glob / glob.sum())
         q = np.maximum(q, FLOOR)
@@ -126,14 +133,15 @@ class Marginal:
 class Distilled:
     """Additive log-linear model fitted to every reply's soft label (minimises KL(p || q))."""
 
-    def __init__(self, l2=1e-3):
-        self.W = np.zeros((19, N_ACT))
+    def __init__(self, l2=1e-3, scn=station):
+        self.scn = scn
+        self.W = np.zeros((sum(scn.SIZES), N_ACT))
         self.b = np.zeros(N_ACT)
         self.X, self.Y = [], []
         self.l2 = l2
 
     def observe(self, c, p):
-        self.X.append(features(c))
+        self.X.append(features(c, self.scn))
         self.Y.append(np.atleast_2d(p))
 
     def fit(self, iters=200, lr=0.5):
@@ -150,7 +158,7 @@ class Distilled:
             self.b -= lr * g.sum(0)
 
     def __call__(self, c):
-        z = features(c) @ self.W + self.b
+        z = features(c, self.scn) @ self.W + self.b
         z -= z.max(1, keepdims=True)
         q = np.exp(z)
         q = np.maximum(q / q.sum(1, keepdims=True), FLOOR)

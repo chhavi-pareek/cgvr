@@ -11,7 +11,16 @@ the model's exact answer for that situation (tabulated once, never shown to the 
   parity          ledger + worst-case charge for unseen situations + salience x drift
   view_lod        the LOD way: agents the viewer can see first, then the rest; no ledger
   round_robin     everyone in turn; no ledger
+  cascade         the LLM-cascade rule: the least confident surrogate decisions first; no ledger
+  parity_nocap    PARITY's priority with the ledger switched off (the ablation)
   surrogate_only  never ask the model after warm-up
+
+    python -m bench.llm_agents --scenario museum   # an evacuation: every context changes at the alarm
+    python -m bench.llm_agents --rehearse 0.2      # adds PARITY buying replies ahead (llm/schedule.py)
+    python -m bench.llm_agents --model qwen2.5:14b # another reference model
+
+With more than two seeds each column is the mean with a 95% t-interval over seeds, and every
+policy is also compared with PARITY seed by seed (same station, same arrivals: paired).
 
     python -m bench.llm_agents --novel             # contexts that never repeat
     python -m bench.llm_agents --menu              # a smaller model (1.5B) as a middle option
@@ -26,11 +35,33 @@ TRUE drift passed the cap -- the quantity risk control bounds by delta.
 import argparse
 
 import numpy as np
+from scipy import stats
 
+from llm import museum, station
 from llm.policy import build_table
 from llm.schedule import Run
 
-POLICIES = ("parity", "view_lod", "round_robin", "surrogate_only")
+# crowd outcomes printed per scenario (Station.outcomes / Museum.outcomes)
+OUTCOMES = {"station": ("boarded", "missed"), "museum": ("t50", "t90", "inside", "coats")}
+
+POLICIES = ("parity", "parity_nocap", "cascade", "view_lod", "round_robin", "surrogate_only")
+
+
+def ci(x):
+    """Mean and half-width of the 95% t-interval over seeds."""
+    x = np.asarray(x, float)
+    if x.size < 2:
+        return float(x.mean()), float("nan")
+    return float(x.mean()), float(stats.t.ppf(0.975, x.size - 1) * x.std(ddof=1) / np.sqrt(x.size))
+
+
+def paired(base, other, key):
+    """PARITY minus another policy, seed by seed: mean difference, its 95% interval, the Wilcoxon
+    signed-rank p-value, and how many seeds PARITY was lower on."""
+    d = np.array([b[key] - o[key] for b, o in zip(base, other)])
+    m, h = ci(d)
+    p = stats.wilcoxon(d).pvalue if d.size >= 5 and np.any(d != 0) else float("nan")
+    return m, h, p, int((d < 0).sum())
 
 
 def main():
@@ -41,8 +72,14 @@ def main():
     ap.add_argument("--cap", type=float, default=10.0)
     ap.add_argument("--novel", action="store_true")
     ap.add_argument("--menu", action="store_true", help="add the small model (qwen2.5:1.5b) as a middle option")
+    ap.add_argument("--scenario", choices=("station", "museum"), default="station")
+    ap.add_argument("--model", default="qwen2.5:7b")
+    ap.add_argument("--rehearse", type=float, default=0.0, help="also run PARITY with this rehearsal share")
     a = ap.parse_args()
+    scn = museum if a.scenario == "museum" else station
     conds = [(p, {}) for p in POLICIES]
+    if a.rehearse > 0:
+        conds.insert(1, (f"parity/reh {a.rehearse:g}", dict(rehearse=a.rehearse)))
     if a.novel:
         conds = [("parity/worst", dict(novel=True, bound="worst")),
                  ("parity/plugin", dict(novel=True, bound="plugin")),
@@ -52,28 +89,56 @@ def main():
                  ("parity/crc 0.20", dict(novel=True, bound="crc", delta=0.20, eta=0.50)),
                  ("parity/crc mean", dict(novel=True, bound="crc", delta=1.0, eta=0.25)),
                  ("view_lod", {}), ("round_robin", {})]
-    P, lat = build_table()
+    # the call latencies are the station table's for the same model (same length of prompt), so
+    # every scenario is served at one measured speed
+    P = build_table(a.model, scn=None if scn is station else scn)[0]
+    lat = build_table(a.model)[1]
+    for i, (name, kw) in enumerate(conds):
+        conds[i] = (name, dict(kw, scenario=scn))
+    outk = OUTCOMES[a.scenario]
     if a.menu:
+        assert scn is station, "the small model is tabulated for the station only"
         small = build_table("qwen2.5:1.5b")
         conds = [("parity", {}), ("parity/7B+1.5B", dict(small=small)), ("view_lod", {}),
                  ("model_lod", dict(small=small)), ("round_robin", {})]
     print(f"model latency median {1e3 * np.median(lat):.0f} ms -> budget {0.9 / lat.mean():.2f} calls/s; "
           f"cap {a.cap} nats; {a.seconds // 60} simulated minutes; seeds {a.seeds}")
     for n in a.agents:
-        ref = [Run(n, "reference", P, lat, seed=s).run(a.seconds) for s in a.seeds]
+        ref = [Run(n, "reference", P, lat, seed=s, scenario=scn).run(a.seconds) for s in a.seeds]
         dec_rate = np.mean([r.stats["llm"] for r in ref]) / a.seconds
-        rb = np.mean([r.st.boarded for r in ref]); rm = np.mean([r.st.missed for r in ref])
+        ro = {k: np.nanmean([r.summary()[k] for r in ref]) for k in outk}
         print(f"\nN = {n}: {dec_rate:.1f} decisions/s needed for every decision to be the model's "
-              f"({100 * min(1.0, 0.9 / lat.mean() / dec_rate):.0f}% servable);  reference boarded {rb:.0f}, missed {rm:.0f}")
-        print("  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  boarded  missed  coverage  overflow")
+              f"({100 * min(1.0, 0.9 / lat.mean() / dec_rate):.0f}% servable);  reference "
+              + ", ".join(f"{k} {v:.0f}" for k, v in ro.items()))
+        many = len(a.seeds) > 2
+        print("  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  "
+              + "  ".join(f"{k:>7s}" for k in outk) + "  coverage  overflow")
+        runs = {}
         for name, kw in conds:
             pol = "view_lod" if name == "model_lod" else name.split("/")[0]
             rs = [Run(n, pol, P, lat, seed=s, cap=a.cap, **kw).run(a.seconds).summary() for s in a.seeds]
+            runs[name] = rs
             m = lambda k: float(np.mean([r[k] for r in rs]))  # noqa: E731
             print(f"  {name:15s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
                   f"{m('kl_per_agent_h'):13.2f} {m('kl_steady_per_agent_h'):7.2f} {m('kl_view_per_agent_h'):9.2f} {m('llm_frac'):12.2f} {m('calls_per_s'):8.2f} "
-                  f"{m('stall_per_agent_h'):13.1f} {m('boarded'):8.0f} {m('missed'):7.0f}  {100 * m('coverage'):6.1f}%  {100 * m('overflow_frac'):6.2f}%")
-
+                  f"{m('stall_per_agent_h'):13.1f}  " + "  ".join(f"{np.nanmean([r[k] for r in rs]):7.0f}" for k in outk)
+                  + f"  {100 * m('coverage'):6.1f}%  {100 * m('overflow_frac'):6.2f}%")
+        if not many:
+            continue
+        print(f"  over {len(a.seeds)} seeds, mean +- 95% CI:  worst/cap | drift/agent-h | steady | in view | overflow %")
+        for name, rs in runs.items():
+            cols = [ci([r["dmax"] / a.cap for r in rs]), ci([r["kl_per_agent_h"] for r in rs]),
+                    ci([r["kl_steady_per_agent_h"] for r in rs]), ci([r["kl_view_per_agent_h"] for r in rs]),
+                    ci([100 * r["overflow_frac"] for r in rs])]
+            print(f"  {name:15s} " + " | ".join(f"{mu:6.2f} +- {h:4.2f}" for mu, h in cols))
+        base = runs[conds[0][0]]
+        print(f"  {conds[0][0]} minus each, paired (mean +- 95% CI, Wilcoxon p, seeds {conds[0][0]} lower):")
+        for name, rs in list(runs.items())[1:]:
+            parts = []
+            for key, lab in (("kl_per_agent_h", "drift"), ("kl_steady_per_agent_h", "steady"), ("kl_view_per_agent_h", "in view"), ("dmax", "worst")):
+                mu, h, p, w = paired(base, rs, key)
+                parts.append(f"{lab} {mu:+.2f} +- {h:.2f} (p {p:.3f}, {w}/{len(rs)})")
+            print(f"    vs {name:13s} " + "; ".join(parts))
 
 if __name__ == "__main__":
     main()

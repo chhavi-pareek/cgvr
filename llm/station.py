@@ -45,6 +45,7 @@ Q_WORDS = ("short (about a minute)", "moderate (about five minutes)", "very long
 
 N_P, N_T, N_K, N_Q, N_Z = len(PERSONAS), 4, 2, 3, len(ZONES)
 N_CTX = N_P * N_T * N_K * N_Q * N_Z
+SIZES = (N_P, N_T, N_K, N_Q, N_Z)      # context factors, persona first (llm/policy.py surrogates)
 N_ACT = len(ACTIONS)
 
 WALK = {A_QUEUE: 15, A_GATES: 30, A_INFO: 20, A_WAIT: 0, A_FOOD: 20, A_LEAVE: 20}
@@ -164,6 +165,12 @@ class Station:
                 self.zone[i] = Z_CONCOURSE
                 self.busy_until[i] = step + WALK[a] + DWELL[a]
 
+    def present(self):
+        return self.n
+
+    def outcomes(self):
+        return dict(boarded=self.boarded, missed=self.missed, left=self.left, turned_away=self.turned_away)
+
     def perceive_queue(self):
         L = len(self.queue)
         while self.qb < len(Q_EDGES) and L >= Q_EDGES[self.qb] + Q_HYST:
@@ -192,3 +199,6 @@ class Station:
         if late.size:
             self.missed += late.size
             self.train_at[late] = step + 20 * 60      # the next one, twenty minutes later
+
+
+World = Station

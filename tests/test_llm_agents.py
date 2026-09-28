@@ -170,3 +170,55 @@ def test_menu_stops_probing_a_small_model_that_never_helps():
     s = Run(300, "parity", P, LAT, seed=0, cap=10.0, small=(P15, LAT15)).run(900).summary()
     assert s["small_frac"] < 0.01 and s["probes"] <= 35
     assert s["over_cap_frac"] == 0.0 and s["dmax"] <= 10.0 + 1e-9
+
+
+def museum_policy(seed=0):
+    """Synthetic museum policy: calm people browse, alarmed people mostly head for an exit."""
+    from llm import museum as M
+    rng = np.random.default_rng(seed)
+    p, a, x, g, z = M.ctx_parts(np.arange(M.N_CTX))
+    logit = (rng.normal(0, 1, (6, N_ACT))[p] + rng.normal(0, 1, (3, N_ACT))[x] + rng.normal(0, 1, (3, N_ACT))[g]
+             + rng.normal(0, 1, (4, N_ACT))[z] + 0.7 * rng.normal(0, 1, (M.N_CTX, N_ACT)))
+    logit[:, M.A_BROWSE] += 3.0 * (a == 0)
+    logit[:, M.A_MAIN] += 2.5 * (a > 0)
+    logit[:, M.A_EMERG] += 2.0 * (a > 0)
+    P = np.maximum(np.exp(logit) / np.exp(logit).sum(1, keepdims=True), 1e-4)
+    return M, P / P.sum(1, keepdims=True)
+
+
+def test_museum_contexts_round_trip_and_the_crowd_drains_after_the_alarm():
+    M, PM = museum_policy()
+    c = np.arange(M.N_CTX)
+    assert (M.ctx_index(*M.ctx_parts(c)) == c).all()
+    assert "smell smoke" in M.prompt(M.ctx_index(0, 2, 0, 0, 0)) and "no alarm" in M.prompt(0)
+    r = Run(300, "reference", PM, LAT, seed=0, scenario=M).run(900)
+    s = r.summary()
+    # nobody new comes in after the alarm, everyone inside then is either out or still inside
+    assert s["inside"] + len(r.st.out_t) == r.st.at_alarm
+    assert np.isfinite(s["t50"]) and s["t50"] <= s["t90"]
+    # a departed slot never decides again and never counts as present
+    gone = np.flatnonzero(~r.st.inside)
+    assert gone.size > 0 and (r.st.busy_until[gone] == M.NEVER).all() and r.st.present() == s["inside"]
+
+
+def test_rehearsal_buys_unseen_neighbours_and_serves_no_decision():
+    M, PM = museum_policy()
+    r = Run(1000, "parity", PM, LAT, seed=0, scenario=M, rehearse=0.25)
+    asked = []
+    submit = r.server.submit
+
+    def spy(agent, ctx, step, model=0):
+        if agent < 0:
+            asked.append((ctx, ctx in r.drift.p))
+        submit(agent, ctx, step, model)
+    r.server.submit = spy
+    r.run(600)
+    s = r.summary()
+    assert r.stats["rehearsals"] == len(asked) > 0
+    assert not any(seen for _, seen in asked)             # only contexts nobody had asked about
+    assert len({c for c, _ in asked}) == len(asked)       # each at most once
+    # every rehearsal reply is learned, and the ledger still holds
+    assert all(c in r.drift.p for c, _ in asked[:-5])
+    assert s["dmax"] <= 10.0 + 1e-9
+    # the share it takes from the budget is the share it was given
+    assert len(asked) <= 0.25 * r.rate * 600 + 2

@@ -11,6 +11,7 @@ calibration frames nearest to f. Time comes from whichever source the sweep had
 (CUDA events on the T4, the model under the simulator).
 
 python -m order.adaptive --calib bench/logs/order_sweep.csv --test bench/logs/order_sweep_test.csv
+python -m order.adaptive --fixed    # every density/size group of both CSVs: fixed w against Morton
 """
 import argparse
 import csv
@@ -84,12 +85,39 @@ def evaluate(policy, rows, tol=1e-3):
     return "\n".join(out), ok
 
 
+def fixed(rows, w=0.1):
+    """Per (density, n): the key at weight w against pure Morton order (w = 1), frame by frame
+    (the same snapshot sorted both ways, so the ratio is paired), and every fixed w's regret
+    against the best fixed w of each group."""
+    g, _ = _groups(rows)
+    out, ratios, regret = [], [], defaultdict(list)
+    for d, n in sorted({(k[0], k[1]) for k in g}, key=lambda x: (x[0], x[1])):
+        keys = [k for k in g if k[0] == d and k[1] == n]
+        r = [g[k][1.0] / g[k][w] for k in keys]
+        ratios += r
+        mean = {v: np.mean([g[k][v] for k in keys]) for v in g[keys[0]]}
+        best = min(mean.values())
+        for v, t in mean.items():
+            regret[v].append(t / best - 1)
+        out.append(f"{d:6s} n={n:6d} Morton / w={w}: " + " ".join(f"{x:.2f}" for x in r)
+                   + f" | best fixed w {min(mean, key=mean.get):.1f}")
+    out.append(f"Morton slower on {sum(x > 1 for x in ratios)} of {len(ratios)} frames, "
+               f"ratio {min(ratios):.2f}-{max(ratios):.2f}, median {np.median(ratios):.2f}")
+    out.append("fixed w, regret against each group's best (max / mean): " + ", ".join(
+        f"{v:.1f} {100 * max(x):.0f}/{100 * np.mean(x):.0f}%" for v, x in sorted(regret.items())))
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--calib", default="bench/logs/order_sweep.csv")
     ap.add_argument("--test", default="bench/logs/order_sweep_test.csv")
     ap.add_argument("--bandwidth", type=float, default=0.5)
+    ap.add_argument("--fixed", action="store_true")
     args = ap.parse_args()
+    if args.fixed:
+        print(fixed(list(csv.DictReader(open(args.calib))) + list(csv.DictReader(open(args.test)))))
+        return
     pol = Policy(args.bandwidth).fit(list(csv.DictReader(open(args.calib))))
     print(f"calibrated on {len(pol.curves)} frames, w grid {pol.ws.tolist()}")
     for name, path in (("calibration", args.calib), ("held-out", args.test)):
