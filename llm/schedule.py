@@ -41,8 +41,11 @@ class Server:
     """One GPU serving requests in order. Model 0 is the reference (7B); model 1, when given, a
     smaller one (1.5B) whose calls take its own measured latencies."""
 
-    def __init__(self, P, latency, rng, small=None):
+    def __init__(self, P, latency, rng, small=None, rotations=None, rot_rng=None):
         self.P = [P] + ([small[0]] if small else [])
+        # rotations: the model's answers with the options in each of the six rotated orders; each
+        # call is asked in a uniformly random one, so a decision is a draw from their mean
+        self.R, self.rot_rng = rotations, rot_rng
         self.lat = [np.asarray(latency)] + ([np.asarray(small[1])] if small else [])
         self.rng = rng
         self.q = deque()
@@ -76,7 +79,7 @@ class Server:
         return max(self.busy_until - step, 0.0) + sum(float(self.lat[m].mean()) for *_, m in self.q)
 
     def poll(self, step):
-        """Replies complete by the end of this step, as (agent, ctx, p, model)."""
+        """Replies complete by the end of this step, as (agent, ctx, p, model, rotation or -1)."""
         out = []
         while self.q and max(self.busy_until, self.q[0][2]) <= step + 1:
             agent, ctx, t_req, model = self.q.popleft()
@@ -84,12 +87,13 @@ class Server:
             dt = float(self.rng.choice(self.lat[model]))
             self.busy_until = start + dt
             self.busy_s += dt
-            self.done.append((self.busy_until, agent, ctx, model))
+            rot = int(self.rot_rng.integers(len(self.R))) if self.R is not None and model == 0 else -1
+            self.done.append((self.busy_until, agent, ctx, model, rot))
         keep = []
         for item in self.done:
-            t, agent, ctx, model = item
+            t, agent, ctx, model, rot = item
             if t <= step + 1:
-                out.append((agent, ctx, self.P[model][ctx], model))
+                out.append((agent, ctx, self.P[model][ctx] if rot < 0 else self.R[rot][ctx], model, rot))
             else:
                 keep.append(item)
         self.done = keep
@@ -98,7 +102,8 @@ class Server:
 
 # The reference policy carries a probability floor (llm/policy.FLOOR), so no action is ever below
 # FLOOR / (1 + N_ACT * FLOOR), and ONE surrogate decision can never drift more than this from it.
-E_MAX = float(np.log((1 + N_ACT * FLOOR) / FLOOR))
+PMIN = FLOOR / (1 + N_ACT * FLOOR)
+E_MAX = float(np.log(1 / PMIN))
 
 
 class DriftBound:
@@ -136,8 +141,12 @@ class DriftBound:
     #              version: a stretch's expected true drift is within the cap. The margin needs
     #              about E_MAX / (eps E[charge]) calibration replies to exist at all, so a small
     #              delta is only affordable when the model serves a large share of decisions.
-    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station):
+    def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station,
+                 rotations=False):
         self.n_ctx = scn.N_CTX
+        # order-free reference (rotations): a reply shows the answer under ONE order, the reference
+        # is the mean over all six; the charge is a bound that is exact once all six are seen
+        self.rotations, self.rot_seen = rotations, {}
         self.p = {}                    # context -> LLM distribution, from paid replies
         self.exact = {}
         self.p15, self.exact15 = {}, {}  # the small model's answers, and its exact drift from the LLM
@@ -152,8 +161,10 @@ class DriftBound:
             self.K = np.exp(-h / tau)
             np.fill_diagonal(self.K, 0.0)            # a context never predicts itself
 
-    def observe(self, c, p, calib=False):
+    def observe(self, c, p, calib=False, rot=-1):
         self.p[int(c)] = p
+        if rot >= 0:
+            self.rot_seen.setdefault(int(c), {})[rot] = p
         (self.cal if calib else self.train).append((int(c), p))
         if int(c) in self.p15:
             self.exact15[int(c)] = float(kl(self.p15[int(c)], p)[0])
@@ -168,10 +179,27 @@ class DriftBound:
         else the worst case."""
         return np.array([self.exact15.get(int(x), E_MAX) for x in np.atleast_1d(c)])
 
+    def certify(self, c, q):
+        """Upper bound on KL(q || reference) at context c from the replies seen there. Plain: the
+        reply IS the reference, so it is exact. Order-free: with k of the six orders seen, every
+        action's mean probability is at least (sum of the seen answers) / 6 + (6 - k) / 6 * PMIN
+        (no answer is below PMIN), and KL is decreasing in the reference, so KL(q || that lower
+        envelope) bounds it -- E_MAX at k = 0 (up to q's entropy), exact at k = 6."""
+        if not self.rotations:
+            return float(kl(q, self.p[int(c)])[0])
+        seen = self.rot_seen[int(c)]
+        m = sum(seen.values()) / N_ACT + (N_ACT - len(seen)) / N_ACT * PMIN
+        q = np.atleast_2d(q)[0]
+        return float((q * (np.log(q) - np.log(m))).sum())
+
     def refresh(self, sur):
         if not self.p:
             return
         c = np.fromiter(self.p.keys(), np.int64)
+        if self.rotations:
+            q = sur(c)
+            self.exact = {int(x): self.certify(x, q[j]) for j, x in enumerate(c)}
+            return
         k = kl(sur(c), np.vstack([self.p[int(x)] for x in c]))
         self.exact = dict(zip(c.tolist(), k.tolist()))
         if self.novel and self.bound != "worst":
@@ -241,7 +269,7 @@ class Run:
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
-                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None):
+                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -258,11 +286,14 @@ class Run:
         self.scn = station if scenario is None else scenario
         assert self.scn.N_ACT == N_ACT
         self.st = self.scn.World(n, np.random.default_rng(seed + 1))
-        self.server = Server(P, latency, np.random.default_rng(seed + 2), small)
+        assert rotations is None or not (novel or small), "the order-free reference is for the plain ledger"
+        # P is the reference drift is measured against; with rotations it must be their mean
+        self.server = Server(P, latency, np.random.default_rng(seed + 2), small, rotations,
+                             np.random.default_rng(seed + 3) if rotations is not None else None)
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
-        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn)
+        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None)
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
         # cannot under-charge) still runs to the cap -- else before calibration nothing fits
@@ -302,14 +333,18 @@ class Run:
             # a warm-up batch so the surrogate and the drift bound start from something
             c = self.st.context(0)[self.rng.choice(n, min(calib_calls, n), replace=False)]
             for x in c:
-                self._learn(x, P[x])
+                if rotations is None:
+                    self._learn(x, P[x])
+                else:                               # asked like any call: in a random order
+                    r = int(self.server.rot_rng.integers(len(rotations)))
+                    self._learn(x, rotations[r][x], rot=r)
             self.stats["calib"] = len(c)
             self._refit()
 
     # -- learning from replies --------------------------------------------------------
-    def _learn(self, c, p, calib=False):
+    def _learn(self, c, p, calib=False, rot=-1):
         self.sur.observe(c, p)
-        self.drift.observe(c, p, calib)
+        self.drift.observe(c, p, calib, rot)
         self.seen += 1
 
     def _refit(self):
@@ -347,7 +382,7 @@ class Run:
         st = self.st
         st.tick(t)
         self._respawned()
-        for agent, c, p, model in self.server.poll(t):
+        for agent, c, p, model, rot in self.server.poll(t):
             if model == 1:
                 # the small model's answer: learned for its drift, and a decision if one asked
                 self.drift.observe_small(c, p)
@@ -377,9 +412,11 @@ class Run:
             fresh = c not in self.drift.p
             calib = agent in self.calib_req
             self.calib_req.discard(agent)
-            self._learn(c, p, calib)
+            self._learn(c, p, calib, rot)
             if self.seen % self.refit_every == 0:
                 self._refit()
+            elif self.drift.rotations:
+                self.drift.exact[c] = self.drift.certify(c, self.sur(c))   # each new order tightens it
             elif fresh and not self.drift.novel:
                 self.drift.exact[c] = float(kl(self.sur(c), p)[0])
 

@@ -229,3 +229,37 @@ def test_the_cap_holds_with_a_surrogate_that_learns_between_refits():
     # with every reply (the marginal did) made them stale and true drift passed the cap
     s = Run(1000, "parity", P, LAT, seed=0, cap=10.0, surrogate="marginal").run(600).summary()
     assert s["dmax"] <= 10.0 + 1e-9 and s["overflow_frac"] == 0.0
+
+
+def rotated_policy(seed=0):
+    """Six answers per context, as if the options had been shown in six orders: the order-free
+    reference is their mean."""
+    rng = np.random.default_rng(seed)
+    R = np.stack([P * np.exp(0.8 * rng.normal(0, 1, P.shape)) for _ in range(N_ACT)])
+    R = np.maximum(R / R.sum(-1, keepdims=True), 1e-4)
+    R = R / R.sum(-1, keepdims=True)
+    return R, R.mean(0)
+
+
+def test_order_free_charge_bounds_the_mixture_and_is_exact_once_all_orders_are_seen():
+    R, M = rotated_policy()
+    d = DriftBound(rotations=True)
+    rng = np.random.default_rng(1)
+    q = Distilled()
+    q.observe(np.arange(0, N_CTX, 3), M[::3]); q.fit(iters=300)
+    for c in rng.choice(N_CTX, 40, replace=False):
+        qc = q(c)
+        prev = E_MAX
+        for r in rng.permutation(N_ACT):
+            d.observe(c, R[r, c], rot=int(r))
+            b = d.certify(c, qc)
+            assert b >= float(kl(qc, M[c])[0]) - 1e-9     # never below the true drift
+            assert b <= prev + 1e-9                       # every order seen tightens it
+            prev = b
+        assert b == pytest.approx(float(kl(qc, M[c])[0]), abs=1e-9)   # all six: exact
+
+
+def test_parity_holds_the_cap_against_the_order_free_reference():
+    R, M = rotated_policy()
+    s = Run(1000, "parity", M, LAT, seed=0, cap=10.0, rotations=R).run(600).summary()
+    assert s["dmax"] <= 10.0 + 1e-9 and s["overflow_frac"] == 0.0

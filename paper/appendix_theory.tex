@@ -1,0 +1,172 @@
+% Theory appendix for the PARITY paper. Needs amsmath, amssymb, amsthm, url.
+% Every statement here is checked by a test named in brackets.
+\section{Guarantees and Proofs}\label{app:theory}
+
+\subsection{Setting}
+A crowd of agents makes discrete decisions over a finite action set $\mathcal{A}$, $|\mathcal{A}|=6$.
+A decision by agent $i$ is made in a context $c$ (the prompt's slots). The \emph{reference policy}
+$p(\cdot\mid c)$ is the language model's action distribution at $c$, read from the log-probabilities
+of a one-token answer at temperature~0, with every action outside the model's top-20 tokens given
+probability $\phi=10^{-4}$ before normalisation; hence
+\begin{equation}
+  p(a\mid c)\ \ge\ p_{\min} := \frac{\phi}{1+|\mathcal{A}|\phi}\quad\text{for all } a, c. \label{eq:pmin}
+\end{equation}
+In the \emph{order-free} variant the options are shown in one of the $R=6$ cyclic rotations, drawn
+uniformly per call, so a model decision is a draw from $p=\frac1R\sum_{r} p_r$, where $p_r$ is the
+answer under rotation $r$; each $p_r$ satisfies \eqref{eq:pmin}, hence so does $p$.
+
+Each decision is served either by the model or by a surrogate $q(\cdot\mid c)$. The surrogate is
+\emph{piecewise frozen}: it changes only at refits, and every charge below is recomputed at each refit.
+The \emph{drift} of a surrogate decision is $d=\mathrm{KL}\big(q(\cdot\mid c)\,\|\,p(\cdot\mid c)\big)$.
+A \emph{stretch} of agent $i$ runs from its arrival or its last model decision to its next model
+decision or departure; its drift is $D=\sum d_k$ over the surrogate decisions in it. The ledger $L$
+sums the \emph{charges} $e_k$ of those decisions, and a surrogate decision with charge $e$ is admitted
+only if $L+e\le \kappa$ (the cap); otherwise the agent waits for the model.
+
+\subsection{Certified charges}
+\begin{lemma}[Certified charge]\label{lem:charge}
+Let $q$ be the surrogate in use at context $c$. Each of the following is an upper bound on
+$\mathrm{KL}(q\,\|\,p)$ that the scheduler can compute from replies it paid for:
+\begin{enumerate}
+  \item (seen, plain) $e=\mathrm{KL}(q\,\|\,p)$ once the model has answered at $c$ (exact);
+  \item (unseen) $e=E_{\max}:=\log(1/p_{\min})$;
+  \item (order-free) with the answers $\{p_r\}_{r\in S}$ seen at $c$, $|S|=k$,
+  \[
+    e_S=\sum_a q_a\log\frac{q_a}{m_a},\qquad m_a=\frac1R\sum_{r\in S}p_{r,a}+\frac{R-k}{R}\,p_{\min}.
+  \]
+\end{enumerate}
+Moreover $e_S$ is non-increasing as $S$ grows, $e_\emptyset=\log(1/p_{\min})-H(q)\le E_{\max}$, and
+$e_S=\mathrm{KL}(q\,\|\,p)$ when $|S|=R$.
+\end{lemma}
+\begin{proof}
+$\mathrm{KL}(q\|p)=\sum_a q_a\log q_a-\sum_a q_a\log p_a$ is decreasing in each $p_a$. (2): $p_a\ge p_{\min}$
+gives $\mathrm{KL}(q\|p)\le -H(q)+\log(1/p_{\min})\le E_{\max}$. (3): by \eqref{eq:pmin},
+$p_a=\frac1R\sum_r p_{r,a}\ge m_a$; adding a rotation to $S$ replaces a $p_{\min}/R$ term by
+$p_{r,a}/R\ge p_{\min}/R$, so $m_a$ does not decrease; at $|S|=R$, $m=p$.
+[\path{test_order_free_charge_bounds_the_mixture_and_is_exact_once_all_orders_are_seen}]
+\end{proof}
+The charge must be computed for the surrogate \emph{in use}: a surrogate that moves between
+recomputations makes a charge stale and can under-charge (we observed true drift at $1.1\kappa$
+with a running-average surrogate before freezing it between refits;
+[\path{test_the_cap_holds_with_a_surrogate_that_learns_between_refits}]).
+
+\subsection{The per-agent cap}
+\begin{theorem}[Deterministic cap]\label{thm:cap}
+If every surrogate decision is charged a certified charge (Lemma~\ref{lem:charge}) and admitted only
+when $L+e\le\kappa$, then every stretch of every agent satisfies $D\le\kappa$, on every sample path.
+\end{theorem}
+\begin{proof}
+Charges dominate drifts decision by decision, so $D=\sum d_k\le\sum e_k=L$, and admission keeps
+$L\le\kappa$ after every surrogate decision. A model decision closes the stretch. The rule never
+deadlocks: waiting for the model is always admissible (it has drift $0$), which is the analogue of
+the non-empty mask in the allocator's guarantee.
+\end{proof}
+\begin{remark}[What the cap means]
+By the chain rule for relative entropy, $\mathbb{E}[D]$ is the KL divergence between the laws of the
+agent's action sequence over the stretch under the served policy and under the model, given the
+contexts it meets; since $D\le\kappa$ pathwise, that divergence is at most $\kappa$. It is also the
+expected log-likelihood ratio an observer who knows both policies accumulates in favour of
+``surrogate'' over the stretch (the Chernoff--Stein exponent of the best test).
+\end{remark}
+\begin{remark}[The price]
+The guarantee is free when the calls it requires fit the budget (no agent ever waits), and is paid in
+waiting otherwise: an unseen context is charged $E_{\max}$, so with $\kappa<2E_{\max}$ a second unseen
+context in a stretch forces a wait. Waiting delays a decision the reference would have taken at once, a
+departure from the reference that the drift does not measure; it is therefore reported separately.
+\end{remark}
+
+\subsection{The whole crowd}
+\begin{theorem}[Crowd trajectory bound]\label{thm:crowd}
+Suppose no agent waits, so that decision times are the same functions of the history under the
+served policy $Q$ and under the all-model reference $P$, and the environment (arrivals, queues, service,
+call latencies, option rotations) has the same kernel under both. Then for the joint law of the whole
+crowd's trajectory on $[0,T]$, interactions included,
+\[
+  \mathrm{KL}\big(Q_{[0,T]}\,\|\,P_{[0,T]}\big)\ \le\ \mathbb{E}_Q\Big[\sum_{\text{surrogate decisions in }[0,T]} d\Big],
+\]
+and for any crowd statistic $Y$ (trains boarded, evacuation times),
+$\mathrm{KL}(Q_Y\|P_Y)$ obeys the same bound.
+\end{theorem}
+\begin{proof}
+Order all decisions in time (ties by agent index). Include the scheduler's randomness and the
+environment noise as auxiliary variables whose conditional law given the past is the same under $Q$
+and $P$; they contribute zero to the chain rule. A decision served by the model contributes zero; one
+served by the surrogate contributes $\mathrm{KL}(q\|p)$ at its realised context. The chain rule gives
+equality for the extended trajectory, and marginalising the auxiliary variables, or mapping the
+trajectory to $Y$, can only decrease KL (data processing).
+\end{proof}
+The bound is informative only when the crowd's total drift is small; at tens of nats per agent-hour
+over thousands of agents it is vacuous, and we observed that low per-decision drift then need not give
+the closest crowd outcomes (museum v1). We therefore measure crowd outcomes directly.
+
+\subsection{Contexts that never repeat: conformal risk control}
+When no reply can be reused exactly, the charge is a prediction $\hat e(c)$ plus a margin $\lambda$
+chosen by conformal risk control on $m$ calibration decisions (bought for uniformly random decisions)
+for the loss $\ell_\lambda=(d-\min(\hat e+\lambda,E_{\max}))_+-\varepsilon\min(\hat e+\lambda,E_{\max})$,
+with $\varepsilon=\delta\eta$, taking the smallest $\lambda$ with
+$\frac{m}{m+1}\hat R(\lambda)+\frac{E_{\max}}{m+1}\le 0$.
+\begin{theorem}[Overflow probability]\label{thm:crc}
+If decisions are exchangeable with the calibration decisions and i.i.d. within a stretch, and stretches
+holding any estimated charge run to $\kappa'=\kappa/(1+\eta)$, then
+$\mathbb{E}[(d-e)_+]\le\varepsilon\,\mathbb{E}[e]$ per decision and
+$\Pr(D>\kappa)\le\varepsilon/\eta=\delta$ per stretch.
+\end{theorem}
+\begin{proof}
+The first claim is the conformal risk control guarantee (Angelopoulos et al., 2022, Thm.~1) for a loss
+non-increasing in $\lambda$ and bounded by $E_{\max}$. Let $U=\sum_k(d_k-e_k)_+$ over a stretch, whose
+length $\tau$ is a stopping time. By Wald's identity $\mathbb{E}[U]=\mathbb{E}[\tau]\,\mathbb{E}[(d-e)_+]
+\le\varepsilon\,\mathbb{E}[\tau]\,\mathbb{E}[e]=\varepsilon\,\mathbb{E}[L]\le\varepsilon\kappa'$. Since
+$D\le L+U\le\kappa'+U$, the event $D>\kappa$ implies $U>\eta\kappa'$, and Markov's inequality gives
+$\Pr(D>\kappa)\le\varepsilon\kappa'/(\eta\kappa')=\delta$. Stretches charged only $E_{\max}$ cannot
+under-charge and keep the full cap.
+\end{proof}
+This bounds the \emph{share} of stretches that overflow, not the worst agent; with thousands of agents
+some stretches overflow, as the guarantee allows.
+
+\subsection{Bounded wait}
+\begin{proposition}[Bounded wait contract]\label{prop:wait}
+With a wait bound $W$, an agent held by its ledger waits at most $W$ seconds (plus one step), then takes
+the surrogate decision, which is counted as \emph{forced}. Every stretch without a forced decision
+satisfies Theorem~\ref{thm:cap}; its unstarted model request is withdrawn (the budget refunded), and
+mandatory requests are ranked by salience times charge and limited to $(W+1)$ seconds of model time,
+so the model's backlog stays within the horizon at which a reply can still be used.
+\end{proposition}
+\begin{proof}
+Immediate from the rule: a held decision is re-examined every step; once $W$ has elapsed it is admitted
+regardless of the ledger and counted. Stretches without such a decision are admitted by the ledger alone.
+\end{proof}
+
+\subsection{Visible pops}
+\begin{theorem}[Pop bound]\label{thm:pops}
+With a token bucket per viewer and agent of capacity $C$ refilled at rate $r$, where a change of the
+agent's visual tiers while in view spends a token and an agent with no token has its visual tiers held,
+every agent shows at most $C+rT$ visible changes in any window of length $T$, plus any holds the
+allocator releases to meet the frame budget, which are counted.
+\end{theorem}
+\begin{proof}
+A token bucket admits at most its capacity plus its refill over any window (the $(\sigma,\rho)$
+arrival-curve argument of network calculus). Released holds are the only other source and are logged.
+[\path{tests/test_views.py}]
+\end{proof}
+The three budgets are ordered: divergence cap $>$ frame budget $>$ pop budget. Hard constraints are
+reserved for the safety property; every preference enters the objective, where it is priced.
+
+\subsection{Exact factored allocation}
+\begin{theorem}[Factored allocator]\label{thm:factored}
+Let agent $i$'s utility be $a_i\,q_s(s)+b_i\,q_v(v)$ over configurations $(s,v)\in\mathcal{S}\times\mathcal{V}$
+(state pairs: behaviour and navigation; view pairs: animation and geometry), with cost
+$c_s(s)+c_v(v)$ and divergence depending on $s$ only. For any multiplier $\lambda\ge0$ and any
+headroom mask on $\mathcal{S}$, the maximiser of $a_iq_s(s)+b_iq_v(v)-\lambda(c_s(s)+c_v(v))$ is
+$(s^*,v^*)$ with $s^*$ maximising $a_iq_s-\lambda c_s$ over the admissible state pairs and $v^*$
+maximising $b_iq_v-\lambda c_v$ over $\mathcal{V}$. Each is an upper-concave-hull query in
+$\theta=\lambda/a_i$ resp. $\lambda/b_i$, so one evaluation costs $O(K\log n)$ after sorting agents
+by each salience.
+\end{theorem}
+\begin{proof}
+The objective and the feasible set separate across the two halves, so the maximum of the sum is the sum of
+the maxima. For a shared menu, $\arg\max_j (a q_j-\lambda c_j)=\arg\max_j(q_j-\theta c_j)$ walks the upper
+concave hull of $\{(c_j,q_j)\}$ as $\theta$ grows, so agents sorted by salience receive hull vertices
+in contiguous blocks found by binary search. With $a_i=b_i$ this reproduces the single-salience
+allocator to $10^{-12}$; the C\# port agrees on every one of 158{,}560 decisions.
+[\path{tests/test_factored.py}, \path{tools/gen_oracle_cases.py}]
+\end{proof}

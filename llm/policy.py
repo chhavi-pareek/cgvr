@@ -38,9 +38,10 @@ FLOOR = 1e-4          # probability given to an option outside the model's top-2
 TABLES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tables")
 
 
-def prompt(c):
+def prompt(c, rot=0):
+    """rot: the options shown rotated, letter j naming action (j + rot) % 6 (rot 0: the original)."""
     p, t, k, q, z = (int(v) for v in ctx_parts(c))
-    opts = "\n".join(f"{LETTERS[i]}) {a}" for i, a in enumerate(ACTIONS))
+    opts = "\n".join(f"{LETTERS[i]}) {ACTIONS[(i + rot) % N_ACT]}" for i in range(N_ACT))
     return (f"You are simulating one person in a busy train station. Decide what they do next.\n"
             f"Person: {PERSONAS[p]}.\n"
             f"Their train leaves in {T_WORDS[t]}.\n"
@@ -50,9 +51,10 @@ def prompt(c):
             f"What do they do next?\n{opts}\nAnswer with a single letter.")
 
 
-def ask(c, model=MODEL, timeout=120, scn=None):
-    """(distribution over the six actions, seconds taken) for context c."""
-    text = prompt(c) if scn is None else scn.prompt(c)
+def ask(c, model=MODEL, timeout=120, scn=None, rot=0):
+    """(distribution over the six actions, seconds taken) for context c, the options shown rotated
+    by rot; the distribution is returned over the actions in their original order."""
+    text = prompt(c, rot) if scn is None else scn.prompt(c, rot)
     body = {"model": model, "messages": [{"role": "user", "content": text}], "stream": False,
             "options": {"temperature": 0, "num_predict": 1}, "logprobs": True, "top_logprobs": 20}
     req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
@@ -63,34 +65,43 @@ def ask(c, model=MODEL, timeout=120, scn=None):
     for tok in out["logprobs"][0]["top_logprobs"]:
         s = tok["token"].strip()
         if len(s) == 1 and s in LETTERS:
-            p[LETTERS.index(s)] = max(p[LETTERS.index(s)], math.exp(tok["logprob"]))
+            j = (LETTERS.index(s) + rot) % N_ACT
+            p[j] = max(p[j], math.exp(tok["logprob"]))
     return p / p.sum(), dt
 
 
-def table_path(model=MODEL, scn=None):
+def table_path(model=MODEL, scn=None, rot=0):
     pr, n = (prompt, N_CTX) if scn is None else (scn.prompt, scn.N_CTX)
-    h = hashlib.sha1((model + pr(0) + pr(n - 1)).encode()).hexdigest()[:10]
+    h = hashlib.sha1((model + pr(0, rot) + pr(n - 1, rot)).encode()).hexdigest()[:10]
     return os.path.join(TABLES, f"llm_table_{model.replace(':', '_')}_{h}.npz")
 
 
-def build_table(model=MODEL, force=False, log=print, scn=None):
+def build_table(model=MODEL, force=False, log=print, scn=None, rot=0):
     """The LLM's exact distribution at every context, plus the latency of every call. scn: a
-    scenario module (llm/museum.py); the station by default."""
-    path = table_path(model, scn)
+    scenario module (llm/museum.py); the station by default. rot: the options shown rotated."""
+    path = table_path(model, scn, rot)
     n_ctx = N_CTX if scn is None else scn.N_CTX
     if os.path.exists(path) and not force:
         t = np.load(path)
         return t["P"], t["latency"]
-    ask(0, model, scn=scn)                          # load the model before timing anything
+    ask(0, model, scn=scn, rot=rot)                 # load the model before timing anything
     P = np.empty((n_ctx, N_ACT))
     lat = np.empty(n_ctx)
     for c in range(n_ctx):
-        P[c], lat[c] = ask(c, model, scn=scn)
+        P[c], lat[c] = ask(c, model, scn=scn, rot=rot)
         if log and c % 96 == 95:
             log(f"  {c + 1}/{n_ctx} contexts, median call {np.median(lat[:c + 1]) * 1e3:.0f} ms")
     os.makedirs(TABLES, exist_ok=True)
     np.savez(path, P=P, latency=lat, model=model)
     return P, lat
+
+
+def build_rotations(model=MODEL, scn=None, log=print):
+    """The answers under all six rotations of the options, (6, contexts, actions), and the latency
+    of every call. Asking with the options in a uniformly random order makes the model's decision a
+    draw from their mean: that mixture is the order-free reference, and one call still decides."""
+    tabs = [build_table(model, scn=scn, rot=r, log=log) for r in range(N_ACT)]
+    return np.stack([t[0] for t in tabs]), np.concatenate([t[1] for t in tabs])
 
 
 def kl(q, p):

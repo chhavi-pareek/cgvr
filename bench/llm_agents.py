@@ -20,6 +20,7 @@ the model's exact answer for that situation (tabulated once, never shown to the 
     python -m bench.llm_agents --scenario museum   # an evacuation: every context changes at the alarm
     python -m bench.llm_agents --rehearse 0.2      # adds PARITY buying replies ahead (llm/schedule.py)
     python -m bench.llm_agents --model qwen2.5:14b # another reference model
+    python -m bench.llm_agents --order-free        # the reference asked with the options shuffled
 
 With more than two seeds each column is the mean with a 95% t-interval over seeds, and every
 policy is also compared with PARITY seed by seed (same station, same arrivals: paired).
@@ -35,12 +36,13 @@ overflow is the share of stretches (from one model decision, or a new person, to
 TRUE drift passed the cap -- the quantity risk control bounds by delta.
 """
 import argparse
+import csv
 
 import numpy as np
 from scipy import stats
 
 from llm import museum, station
-from llm.policy import build_table
+from llm.policy import build_rotations, build_table
 from llm.schedule import Run
 
 # crowd outcomes printed per scenario (Station.outcomes / Museum.outcomes)
@@ -87,6 +89,9 @@ def main():
                     help="also run PARITY with each of these bounded waits (seconds; with --rehearse, rehearsing too)")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
+    ap.add_argument("--csv", default=None, help="also write one row per run (policy, N, seed, every summary field)")
+    ap.add_argument("--order-free", action="store_true",
+                    help="reference = the model with the options in a random order (mean over six rotations)")
     a = ap.parse_args()
     scn = museum if a.scenario == "museum" else station
     conds = [(p, {}) for p in POLICIES]
@@ -111,9 +116,14 @@ def main():
     # every scenario is served at one measured speed
     P = build_table(a.model, scn=None if scn is station else scn)[0]
     lat = build_table(a.model)[1]
+    extra = {}
+    if a.order_free:
+        R = build_rotations(a.model, scn=None if scn is station else scn)[0]
+        P, extra = R.mean(0), dict(rotations=R)
     for i, (name, kw) in enumerate(conds):
-        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate))
+        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, **extra))
     outk = OUTCOMES[a.scenario]
+    rows_out = []
     if a.menu:
         assert scn is station, "the small model is tabulated for the station only"
         small = build_table("qwen2.5:1.5b")
@@ -142,6 +152,10 @@ def main():
             if "curve" in rs[0]:
                 for r, r0 in zip(rs, rsum):
                     r["w1"] = evac_w1(r, r0)
+            if a.csv:
+                rows_out += [dict(scenario=a.scenario, model=a.model, order_free=a.order_free, cap=a.cap, condition=name,
+                                  n=n, seed=sd, **{k: v for k, v in r.items() if k not in ("curve", "policy", "n")})
+                             for sd, r in zip(a.seeds, rs)]
             runs[name] = rs
             m = lambda k: float(np.mean([r[k] for r in rs]))  # noqa: E731
             print(f"  {name:15s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
@@ -168,6 +182,13 @@ def main():
                 mu, h, p, w = paired(base, rs, key)
                 parts.append(f"{lab} {mu:+.2f} +- {h:.2f} (p {p:.3f}, {w}/{len(rs)})")
             print(f"    vs {name:13s} " + "; ".join(parts))
+    if a.csv and rows_out:
+        keys = sorted({k for r in rows_out for k in r})
+        with open(a.csv, "w", newline="") as f:
+            w = csv.DictWriter(f, keys)
+            w.writeheader()
+            w.writerows(rows_out)
+        print(f"{len(rows_out)} runs written to {a.csv}")
 
 if __name__ == "__main__":
     main()

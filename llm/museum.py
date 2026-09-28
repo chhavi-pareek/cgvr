@@ -76,9 +76,9 @@ def ctx_parts(c):
     return c // N_A, a, x, g, z
 
 
-def prompt(c):
+def prompt(c, rot=0):
     p, a, x, g, z = (int(v) for v in ctx_parts(c))
-    opts = "\n".join(f"{'ABCDEF'[i]}) {s}" for i, s in enumerate(ACTIONS))
+    opts = "\n".join(f"{'ABCDEF'[i]}) {ACTIONS[(i + rot) % N_ACT]}" for i in range(N_ACT))
     return (f"You are simulating one person in a large museum. Decide what they do next.\n"
             f"Person: {PERSONAS[p]}.\n"
             f"{ALARM_WORDS[a]}\n"
