@@ -11,6 +11,8 @@ the model's exact answer for that situation (tabulated once, never shown to the 
   parity          ledger + worst-case charge for unseen situations + salience x drift
   view_lod        the LOD way: agents the viewer can see first, then the rest; no ledger
   round_robin     everyone in turn; no ledger
+  parity/wait W   the ledger holds an agent at most W seconds, then it decides by the surrogate and
+                  the overflow is counted (forced/agent-h)
   cascade         the LLM-cascade rule: the least confident surrogate decisions first; no ledger
   parity_nocap    PARITY's priority with the ledger switched off (the ablation)
   surrogate_only  never ask the model after warm-up
@@ -42,7 +44,13 @@ from llm.policy import build_table
 from llm.schedule import Run
 
 # crowd outcomes printed per scenario (Station.outcomes / Museum.outcomes)
-OUTCOMES = {"station": ("boarded", "missed"), "museum": ("t50", "t90", "inside", "coats")}
+OUTCOMES = {"station": ("boarded", "missed"), "museum": ("t50", "inside", "w1")}
+
+
+def evac_w1(run, ref):
+    """W1 (seconds) between a run's evacuation-time distribution and the reference's with the same
+    seed: the area between the two evacuation curves on the 30 s grid, over 600 s after the alarm."""
+    return 30.0 * float(np.abs(run["curve"] - ref["curve"]).sum())
 
 POLICIES = ("parity", "parity_nocap", "cascade", "view_lod", "round_robin", "surrogate_only")
 
@@ -75,11 +83,20 @@ def main():
     ap.add_argument("--scenario", choices=("station", "museum"), default="station")
     ap.add_argument("--model", default="qwen2.5:7b")
     ap.add_argument("--rehearse", type=float, default=0.0, help="also run PARITY with this rehearsal share")
+    ap.add_argument("--max-wait", nargs="+", type=float, default=[],
+                    help="also run PARITY with each of these bounded waits (seconds; with --rehearse, rehearsing too)")
+    ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     a = ap.parse_args()
     scn = museum if a.scenario == "museum" else station
     conds = [(p, {}) for p in POLICIES]
     if a.rehearse > 0:
         conds.insert(1, (f"parity/reh {a.rehearse:g}", dict(rehearse=a.rehearse)))
+        conds.insert(4, (f"cascade/reh {a.rehearse:g}", dict(rehearse=a.rehearse)))
+    for w in a.max_wait:
+        kw = dict(max_wait=w, rehearse=a.rehearse) if a.rehearse > 0 else dict(max_wait=w)
+        conds.insert(len(conds) - len(POLICIES) + 1, (f"parity/wait {w:g}" + (" reh" if a.rehearse > 0 else ""), kw))
+    if a.policies:
+        conds = [c for c in conds if c[0] in a.policies]
     if a.novel:
         conds = [("parity/worst", dict(novel=True, bound="worst")),
                  ("parity/plugin", dict(novel=True, bound="plugin")),
@@ -106,36 +123,47 @@ def main():
     for n in a.agents:
         ref = [Run(n, "reference", P, lat, seed=s, scenario=scn).run(a.seconds) for s in a.seeds]
         dec_rate = np.mean([r.stats["llm"] for r in ref]) / a.seconds
-        ro = {k: np.nanmean([r.summary()[k] for r in ref]) for k in outk}
+        rsum = [r.summary() for r in ref]
+        if "curve" in rsum[0]:
+            for r in rsum:
+                r["w1"] = 0.0
+        ro = {k: np.nanmean([r[k] for r in rsum]) for k in outk}
         print(f"\nN = {n}: {dec_rate:.1f} decisions/s needed for every decision to be the model's "
               f"({100 * min(1.0, 0.9 / lat.mean() / dec_rate):.0f}% servable);  reference "
               + ", ".join(f"{k} {v:.0f}" for k, v in ro.items()))
         many = len(a.seeds) > 2
-        print("  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  "
+        print("  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  forced  "
               + "  ".join(f"{k:>7s}" for k in outk) + "  coverage  overflow")
         runs = {}
         for name, kw in conds:
             pol = "view_lod" if name == "model_lod" else name.split("/")[0]
             rs = [Run(n, pol, P, lat, seed=s, cap=a.cap, **kw).run(a.seconds).summary() for s in a.seeds]
+            if "curve" in rs[0]:
+                for r, r0 in zip(rs, rsum):
+                    r["w1"] = evac_w1(r, r0)
             runs[name] = rs
             m = lambda k: float(np.mean([r[k] for r in rs]))  # noqa: E731
             print(f"  {name:15s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
                   f"{m('kl_per_agent_h'):13.2f} {m('kl_steady_per_agent_h'):7.2f} {m('kl_view_per_agent_h'):9.2f} {m('llm_frac'):12.2f} {m('calls_per_s'):8.2f} "
-                  f"{m('stall_per_agent_h'):13.1f}  " + "  ".join(f"{np.nanmean([r[k] for r in rs]):7.0f}" for k in outk)
+                  f"{m('stall_per_agent_h'):13.1f}  {m('forced_per_agent_h'):6.1f}  " + "  ".join(f"{np.nanmean([r[k] for r in rs]):7.0f}" for k in outk)
                   + f"  {100 * m('coverage'):6.1f}%  {100 * m('overflow_frac'):6.2f}%")
         if not many:
             continue
-        print(f"  over {len(a.seeds)} seeds, mean +- 95% CI:  worst/cap | drift/agent-h | steady | in view | overflow %")
+        print(f"  over {len(a.seeds)} seeds, mean +- 95% CI:  worst/cap | drift/agent-h | steady | in view | overflow % | "
+              + " | ".join(outk))
         for name, rs in runs.items():
             cols = [ci([r["dmax"] / a.cap for r in rs]), ci([r["kl_per_agent_h"] for r in rs]),
                     ci([r["kl_steady_per_agent_h"] for r in rs]), ci([r["kl_view_per_agent_h"] for r in rs]),
-                    ci([100 * r["overflow_frac"] for r in rs])]
+                    ci([100 * r["overflow_frac"] for r in rs])] + [ci([r[k] for r in rs]) for k in outk]
             print(f"  {name:15s} " + " | ".join(f"{mu:6.2f} +- {h:4.2f}" for mu, h in cols))
         base = runs[conds[0][0]]
         print(f"  {conds[0][0]} minus each, paired (mean +- 95% CI, Wilcoxon p, seeds {conds[0][0]} lower):")
         for name, rs in list(runs.items())[1:]:
             parts = []
-            for key, lab in (("kl_per_agent_h", "drift"), ("kl_steady_per_agent_h", "steady"), ("kl_view_per_agent_h", "in view"), ("dmax", "worst")):
+            keys = (("kl_per_agent_h", "drift"), ("kl_steady_per_agent_h", "steady"), ("kl_view_per_agent_h", "in view"), ("dmax", "worst"))
+            if "w1" in rs[0]:
+                keys += (("w1", "evac W1"),)
+            for key, lab in keys:
                 mu, h, p, w = paired(base, rs, key)
                 parts.append(f"{lab} {mu:+.2f} +- {h:.2f} (p {p:.3f}, {w}/{len(rs)})")
             print(f"    vs {name:13s} " + "; ".join(parts))

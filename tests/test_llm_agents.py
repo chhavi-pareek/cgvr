@@ -195,7 +195,7 @@ def test_museum_contexts_round_trip_and_the_crowd_drains_after_the_alarm():
     s = r.summary()
     # nobody new comes in after the alarm, everyone inside then is either out or still inside
     assert s["inside"] + len(r.st.out_t) == r.st.at_alarm
-    assert np.isfinite(s["t50"]) and s["t50"] <= s["t90"]
+    assert np.isfinite(s["t50"]) and not s["t50"] > s["t90"]         # t90 is nan if 90% never got out
     # a departed slot never decides again and never counts as present
     gone = np.flatnonzero(~r.st.inside)
     assert gone.size > 0 and (r.st.busy_until[gone] == M.NEVER).all() and r.st.present() == s["inside"]

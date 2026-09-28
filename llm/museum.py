@@ -39,10 +39,13 @@ COMPANY_WORDS = ("They came alone.", "The people they came with are beside them.
 ZONES = ("in a gallery far from the exits", "in the central hall", "in a side gallery next to an emergency exit",
          "at the main exit")
 Z_FAR, Z_HALL, Z_SIDE, Z_MAIN = range(4)
-ACTIONS = ("walk to the main exit", "walk to the nearest emergency exit", "look for the people they came with",
-           "stay where they are and wait for instructions", "go to the cloakroom to collect their coat and bag",
-           "keep looking at the exhibits")
-A_MAIN, A_EMERG, A_SEARCH, A_WAIT, A_COAT, A_BROWSE = range(6)
+# Browsing comes first: the 7B rarely picks a late option (the station showed the same position
+# bias), and with browsing last (v1) calm visitors kept leaving, so the crowd was mostly out
+# before the alarm and the shift barely happened.
+ACTIONS = ("keep looking at the exhibits", "walk to the main exit", "walk to the nearest emergency exit",
+           "look for the people they came with", "stay where they are and wait for instructions",
+           "go to the cloakroom to collect their coat and bag")
+A_BROWSE, A_MAIN, A_EMERG, A_SEARCH, A_WAIT, A_COAT = range(6)
 
 N_P, N_A, N_X, N_G, N_Z = len(PERSONAS), 3, 3, 3, len(ZONES)
 N_CTX = N_P * N_A * N_X * N_G * N_Z
@@ -156,7 +159,7 @@ class Museum:
             self.activity[i] = a
             if a in (A_MAIN, A_EMERG):
                 self._walk(i, step)
-                self.busy_until[i] = step + WALK[self.zone[i], a]      # joins the queue on arrival
+                self.busy_until[i] = step + WALK[self.zone[i], int(a == A_EMERG)]   # queues on arrival
             elif a == A_SEARCH:
                 if self.comp[i] == 2 and r.random() < FIND_P:
                     self.comp[i] = 1
@@ -216,12 +219,16 @@ class Museum:
 
     def outcomes(self):
         """Evacuation from the alarm: seconds until half and 90% of the people inside at the
-        alarm were out (nan if never), how many were still inside at the end, and how many went
-        back for their coat after the alarm."""
+        alarm were out (nan if never), how many were still inside at the end, how many went back
+        for their coat after the alarm, and the evacuation curve (bench/llm_agents.py compares it
+        with the reference's: W1 between evacuation-time distributions, capped at 600 s)."""
         t = np.sort(self.out_t)
         m = self.at_alarm or 0
         q = lambda f: float(t[int(np.ceil(f * m)) - 1]) if m and len(t) >= np.ceil(f * m) else float("nan")  # noqa: E731
-        return dict(t50=q(0.5), t90=q(0.9), inside=self.present(), coats=self.coats, left=self.left)
+        # share of the people inside at the alarm who are out by 30, 60, ... 600 s after it
+        grid = np.arange(30, 601, 30)
+        curve = np.searchsorted(t, grid, side="right") / max(m, 1)
+        return dict(t50=q(0.5), t90=q(0.9), inside=self.present(), coats=self.coats, left=self.left, curve=curve)
 
 
 World = Museum

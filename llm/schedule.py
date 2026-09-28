@@ -59,6 +59,18 @@ class Server:
         else:
             self.small_calls += 1
 
+    def cancel(self, agent):
+        """Withdraw an agent's requests the model has not started; returns how many."""
+        keep = deque(r for r in self.q if r[0] != agent)
+        gone = [r for r in self.q if r[0] == agent]
+        self.q = keep
+        for *_, m in gone:
+            if m == 0:
+                self.calls -= 1
+            else:
+                self.small_calls -= 1
+        return len(gone)
+
     def backlog(self, step):
         """Seconds until a request made now would be answered, on average."""
         return max(self.busy_until - step, 0.0) + sum(float(self.lat[m].mean()) for *_, m in self.q)
@@ -229,7 +241,7 @@ class Run:
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
-                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0):
+                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -269,6 +281,11 @@ class Run:
         self.inflight = np.zeros(n, bool)
         self.pending = {}                                     # agent -> (ctx, p, generation)
         self.stalled = set()                                  # agents waiting for the model
+        # bounded wait: an agent the ledger holds for the model waits at most max_wait seconds,
+        # then decides by the surrogate anyway and the overflow is counted (forced), not hidden --
+        # waiting is itself a departure from the reference, which the drift accounting cannot see
+        self.max_wait = max_wait
+        self.wait_from = np.full(n, -1, np.int64)
         self.req_gen = {}                                     # generation each request was made for
         self.ndec = np.zeros(n, np.int64)                     # decisions made per slot
         self.req_dec = {}                                     # which decision each request is for
@@ -276,7 +293,7 @@ class Run:
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0,
-                          small=0, probes=0, rehearsals=0)
+                          small=0, probes=0, rehearsals=0, forced=0)
         self.dmax_t = []
         # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
         # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
@@ -308,6 +325,7 @@ class Run:
         self.stats["stretches"] += int(had.size)
         self.stats["overflowed"] += int(self.over[had].sum())
         self.L[idx] = 0.0; self.Ls[idx] = 0.0; self.D[idx] = 0.0; self.nsur[idx] = 0; self.over[idx] = False
+        self.wait_from[idx] = -1
 
     def _respawned(self):
         new = np.flatnonzero(self.st.gen != self.gen_seen)
@@ -410,6 +428,7 @@ class Run:
                 self.nsur[i] += 1
                 self.over[i] |= self.D[i] > self.cap + 1e-9
                 self.stats["small"] += 1
+                self.wait_from[i] = -1
                 self.stats["kl"] += d
                 if self.salience(t)[i] == 1.0:
                     self.stats["kl_view"] += d
@@ -422,7 +441,17 @@ class Run:
             # was on its way); acting on it would be drift nobody charged, so it is discarded
             self.stats["stale"] += 1
         e = float(self.drift(c)[0])
-        if self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e):
+        held = self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e)
+        if held and self.wait_from[i] < 0:
+            self.wait_from[i] = t
+        if held and self.max_wait is not None and t - self.wait_from[i] >= self.max_wait:
+            held = False
+            self.stats["forced"] += 1
+            gone = self.server.cancel(i)       # nobody will wait for that reply any more
+            if gone:
+                self.inflight[i] = False
+                self.tokens += gone            # the model never spent the time
+        if held:
             # the ledger cannot absorb another surrogate decision: wait for the model
             self.st.busy_until[i] = t + 1
             self.stats["stall"] += 1
@@ -442,6 +471,7 @@ class Run:
         self.D[i] += d
         self.nsur[i] += 1
         self.over[i] |= self.D[i] > self.cap + 1e-9
+        self.wait_from[i] = -1
         self.stats["covered"] += int(d <= e + 1e-12)
         self.stats["sur"] += 1
         self.stats["kl"] += d
@@ -455,7 +485,7 @@ class Run:
             return
         st = self.st
         self.tokens = min(self.tokens + (1 - self.rehearse) * self.rate, 3 * self.rate + 1)
-        if self.rehearse > 0 and self.policy == "parity":
+        if self.rehearse > 0:
             self._rehearse(t)
         # people in the ticket queue included: their decision time is estimated from their place
         cand = np.flatnonzero(~self.inflight & (st.busy_until > t))
@@ -516,10 +546,20 @@ class Run:
             # even too late to avoid a wait; anyone else only if the reply can arrive in time
             must = (self.L[cand] + e > self._limit(cand, e)) & self.ledger
             val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
-            order = list(np.flatnonzero(must)) + [j for j in np.argsort(-val) if not must[j] and val[j] >= 0]
+            if self.max_wait is None:
+                mo = list(np.flatnonzero(must))
+            else:
+                # bounded wait: a mandatory reply is only worth asking for if it can come before the
+                # wait runs out, so the overdraft is held to that horizon, most valuable first --
+                # else every agent past its cap is mandatory at once and the queue floods
+                mv = self.salience(t)[cand] * e
+                mo = [j for j in np.argsort(-mv, kind="stable") if must[j]]
+            order = mo + [j for j in np.argsort(-val) if not must[j] and val[j] >= 0]
             for j in order:
                 if not must[j] and self.tokens < 1:
                     break
+                if must[j] and self.max_wait is not None and self.tokens < 1 - self.rate * (self.max_wait + 1):
+                    continue
                 if must[j] and self.tokens < 1:
                     self.stats["overrun"] += 1
                 self.server.submit(cand[j], xhat[j], t)
@@ -686,4 +726,5 @@ class Run:
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
+                    forced_per_agent_h=s["forced"] / max(hours, 1e-9),
                     **st.outcomes())
