@@ -33,7 +33,7 @@ def test_distilled_surrogate_generalises_better_than_the_marginal():
     train = rng.choice(N_CTX, 150, replace=False)
     test = np.setdiff1d(np.arange(N_CTX), train)
     m, d = Marginal(), Distilled()
-    m.observe(train, P[train]); d.observe(train, P[train]); d.fit(iters=600)
+    m.observe(train, P[train]); m.fit(); d.observe(train, P[train]); d.fit(iters=600)
     assert kl(d(test), P[test]).mean() < 0.7 * kl(m(test), P[test]).mean()
 
 
@@ -222,3 +222,10 @@ def test_rehearsal_buys_unseen_neighbours_and_serves_no_decision():
     assert s["dmax"] <= 10.0 + 1e-9
     # the share it takes from the budget is the share it was given
     assert len(asked) <= 0.25 * r.rate * 600 + 2
+
+
+def test_the_cap_holds_with_a_surrogate_that_learns_between_refits():
+    # the charges are exact only for the surrogate they were computed for; a surrogate that moved
+    # with every reply (the marginal did) made them stale and true drift passed the cap
+    s = Run(1000, "parity", P, LAT, seed=0, cap=10.0, surrogate="marginal").run(600).summary()
+    assert s["dmax"] <= 10.0 + 1e-9 and s["overflow_frac"] == 0.0

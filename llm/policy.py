@@ -110,17 +110,24 @@ def features(c, scn=station):
 
 
 class Marginal:
-    """The average reply per persona (the global average before a persona has been seen)."""
+    """The average reply per persona (the global average before a persona has been seen). Like
+    Distilled it changes only when fitted: the ledger's exact charges are computed for the
+    surrogate in use and recomputed after every fit, so a surrogate that moved with each reply
+    would make them stale (it did: true drift reached 1.1x the cap)."""
 
     def __init__(self, scn=station):
         self.scn = scn
         self.sum = np.zeros((scn.SIZES[0], N_ACT))
         self.cnt = np.zeros(scn.SIZES[0])
+        self.new_sum, self.new_cnt = self.sum.copy(), self.cnt.copy()
 
     def observe(self, c, p):
         per = self.scn.ctx_parts(np.atleast_1d(c))[0]
-        np.add.at(self.sum, per, np.atleast_2d(p))
-        np.add.at(self.cnt, per, 1)
+        np.add.at(self.new_sum, per, np.atleast_2d(p))
+        np.add.at(self.new_cnt, per, 1)
+
+    def fit(self):
+        self.sum, self.cnt = self.new_sum.copy(), self.new_cnt.copy()
 
     def __call__(self, c):
         per = self.scn.ctx_parts(np.atleast_1d(c))[0]

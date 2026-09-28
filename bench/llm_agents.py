@@ -86,6 +86,7 @@ def main():
     ap.add_argument("--max-wait", nargs="+", type=float, default=[],
                     help="also run PARITY with each of these bounded waits (seconds; with --rehearse, rehearsing too)")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
+    ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
     a = ap.parse_args()
     scn = museum if a.scenario == "museum" else station
     conds = [(p, {}) for p in POLICIES]
@@ -111,7 +112,7 @@ def main():
     P = build_table(a.model, scn=None if scn is station else scn)[0]
     lat = build_table(a.model)[1]
     for i, (name, kw) in enumerate(conds):
-        conds[i] = (name, dict(kw, scenario=scn))
+        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate))
     outk = OUTCOMES[a.scenario]
     if a.menu:
         assert scn is station, "the small model is tabulated for the station only"
