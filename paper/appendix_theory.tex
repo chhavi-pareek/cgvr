@@ -128,8 +128,8 @@ some stretches overflow, as the guarantee allows.
 With a wait bound $W$, an agent held by its ledger waits at most $W$ seconds (plus one step), then takes
 the surrogate decision, which is counted as \emph{forced}. Every stretch without a forced decision
 satisfies Theorem~\ref{thm:cap}; its unstarted model request is withdrawn (the budget refunded), and
-mandatory requests are ranked by salience times charge and limited to $(W+1)$ seconds of model time,
-so the model's backlog stays within the horizon at which a reply can still be used.
+mandatory requests are ranked by salience times charge and may overdraw the call budget by at most
+$(W+1)$ seconds of it, so the model's backlog stays within the horizon at which a reply can still be used.
 \end{proposition}
 \begin{proof}
 Immediate from the rule: a held decision is re-examined every step; once $W$ has elapsed it is admitted
