@@ -51,9 +51,11 @@ def prompt(c, rot=0):
             f"What do they do next?\n{opts}\nAnswer with a single letter.")
 
 
-def ask(c, model=MODEL, timeout=120, scn=None, rot=0):
+def ask(c, model=MODEL, timeout=120, scn=None, rot=0, mass=False):
     """(distribution over the six actions, seconds taken) for context c, the options shown rotated
-    by rot; the distribution is returned over the actions in their original order."""
+    by rot; the distribution is returned over the actions in their original order. It is the first
+    token restricted to the six letters, i.e. the model under single-letter constrained decoding;
+    mass=True also returns the probability the unconstrained model put on the letters."""
     text = prompt(c, rot) if scn is None else scn.prompt(c, rot)
     body = {"model": model, "messages": [{"role": "user", "content": text}], "stream": False,
             "options": {"temperature": 0, "num_predict": 1}, "logprobs": True, "top_logprobs": 20}
@@ -67,7 +69,8 @@ def ask(c, model=MODEL, timeout=120, scn=None, rot=0):
         if len(s) == 1 and s in LETTERS:
             j = (LETTERS.index(s) + rot) % N_ACT
             p[j] = max(p[j], math.exp(tok["logprob"]))
-    return p / p.sum(), dt
+    on = float(np.where(p > FLOOR, p, 0).sum())
+    return (p / p.sum(), dt, on) if mass else (p / p.sum(), dt)
 
 
 def table_path(model=MODEL, scn=None, rot=0):
@@ -87,12 +90,13 @@ def build_table(model=MODEL, force=False, log=print, scn=None, rot=0):
     ask(0, model, scn=scn, rot=rot)                 # load the model before timing anything
     P = np.empty((n_ctx, N_ACT))
     lat = np.empty(n_ctx)
+    on = np.empty(n_ctx)
     for c in range(n_ctx):
-        P[c], lat[c] = ask(c, model, scn=scn, rot=rot)
+        P[c], lat[c], on[c] = ask(c, model, scn=scn, rot=rot, mass=True)
         if log and c % 96 == 95:
             log(f"  {c + 1}/{n_ctx} contexts, median call {np.median(lat[:c + 1]) * 1e3:.0f} ms")
     os.makedirs(TABLES, exist_ok=True)
-    np.savez(path, P=P, latency=lat, model=model)
+    np.savez(path, P=P, latency=lat, model=model, letter_mass=on)
     return P, lat
 
 
