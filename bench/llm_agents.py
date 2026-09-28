@@ -123,7 +123,7 @@ def main():
     for i, (name, kw) in enumerate(conds):
         conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, **extra))
     outk = OUTCOMES[a.scenario]
-    rows_out = []
+    rows_out, series = [], {}
     if a.menu:
         assert scn is station, "the small model is tabulated for the station only"
         small = build_table("qwen2.5:1.5b")
@@ -135,6 +135,11 @@ def main():
         ref = [Run(n, "reference", P, lat, seed=s, scenario=scn).run(a.seconds) for s in a.seeds]
         dec_rate = np.mean([r.stats["llm"] for r in ref]) / a.seconds
         rsum = [r.summary() for r in ref]
+        if a.csv:
+            for sd, r in zip(a.seeds, ref):
+                if hasattr(r.st, "out_t"):
+                    series[f"reference|{n}|{sd}|out_t"] = np.array(r.st.out_t, float)
+                    series[f"reference|{n}|{sd}|at_alarm"] = np.array([r.st.at_alarm or 0])
         if "curve" in rsum[0]:
             for r in rsum:
                 r["w1"] = 0.0
@@ -148,7 +153,15 @@ def main():
         runs = {}
         for name, kw in conds:
             pol = "view_lod" if name == "model_lod" else name.split("/")[0]
-            rs = [Run(n, pol, P, lat, seed=s, cap=a.cap, **kw).run(a.seconds).summary() for s in a.seeds]
+            rr = [Run(n, pol, P, lat, seed=s, cap=a.cap, **kw).run(a.seconds) for s in a.seeds]
+            rs = [r.summary() for r in rr]
+            if a.csv:
+                for sd, r in zip(a.seeds, rr):
+                    series[f"{name}|{n}|{sd}|kl"] = np.array(r.kl_t)
+                    series[f"{name}|{n}|{sd}|agent_s"] = np.array(r.agent_s_t)
+                    if hasattr(r.st, "out_t"):
+                        series[f"{name}|{n}|{sd}|out_t"] = np.array(r.st.out_t, float)
+                        series[f"{name}|{n}|{sd}|at_alarm"] = np.array([r.st.at_alarm or 0])
             if "curve" in rs[0]:
                 for r, r0 in zip(rs, rsum):
                     r["w1"] = evac_w1(r, r0)
@@ -188,7 +201,8 @@ def main():
             w = csv.DictWriter(f, keys)
             w.writeheader()
             w.writerows(rows_out)
-        print(f"{len(rows_out)} runs written to {a.csv}")
+        np.savez_compressed(a.csv.rsplit(".", 1)[0] + "_series.npz", **series)
+        print(f"{len(rows_out)} runs written to {a.csv} (time series beside it)")
 
 if __name__ == "__main__":
     main()

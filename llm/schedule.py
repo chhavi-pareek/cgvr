@@ -269,7 +269,8 @@ class Run:
 
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
-                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None):
+                 delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
+                 far_salience=FAR_SALIENCE):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -326,6 +327,8 @@ class Run:
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0,
                           small=0, probes=0, rehearsals=0, forced=0)
         self.dmax_t = []
+        self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
+        self.far = far_salience
         # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
         # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
         self.steady_from, self.kl_at, self.agent_s_at = 300, None, None
@@ -376,7 +379,7 @@ class Run:
     # -- one second ----------------------------------------------------------------------
     def salience(self, step):
         view = (step // VIEW_PERIOD) % self.scn.N_Z
-        return np.where(self.st.zone == view, 1.0, FAR_SALIENCE)
+        return np.where(self.st.zone == view, 1.0, self.far)
 
     def step(self, t):
         st = self.st
@@ -439,6 +442,8 @@ class Run:
         self.stats["dmax"] = max(self.stats["dmax"], float(self.D.max()))
         self.stats["over_cap"] += int((self.D > self.cap + 1e-9).sum())
         self.dmax_t.append(float(self.D.max()))
+        self.kl_t.append(self.stats["kl"])
+        self.agent_s_t.append(self.stats["agent_s"])
 
     def _decide(self, i, c, t):
         P, rng = self.P, self.rng
