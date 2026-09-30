@@ -54,6 +54,7 @@ class Server:
         self.done = []
         self.live = None                    # prune: is a request still worth serving when it starts?
         self.prio = None                    # prune: request class, smaller served first (FIFO within)
+        self.rot_req = {}                   # rehearsal context -> the option order to ask it under
         self.dropped = 0
         self.calls = 0                      # reference-model calls
         self.small_calls = 0
@@ -101,6 +102,8 @@ class Server:
             self.busy_until = start + dt
             self.busy_s += dt
             rot = int(self.rot_rng.integers(len(self.R))) if self.R is not None and model == 0 else -1
+            if agent < 0 and ctx in self.rot_req:
+                rot = self.rot_req.pop(ctx)       # a rehearsal serves no decision, so it may pick the order
             self.done.append((self.busy_until, agent, ctx, model, rot))
         keep = []
         for item in self.done:
@@ -223,21 +226,35 @@ class DriftBound:
         if self.rotations:
             q = sur(c)
             self.exact = {int(x): self.certify(x, q[j]) for j, x in enumerate(c)}
+            if self.bound == "risk":
+                self._predict()
             return
         k = kl(sur(c), np.vstack([self.p[int(x)] for x in c]))
         self.exact = dict(zip(c.tolist(), k.tolist()))
         if self.novel and self.bound != "worst":
             self._conformal(sur)
         elif self.bound == "risk":
-            s = np.fromiter(self.exact.keys(), np.int64)
-            w = self.K[:, s].sum(1)
-            self.pred = np.where(w > 0, self.K[:, s] @ np.fromiter(self.exact.values(), float) / np.maximum(w, 1e-300),
-                                 E_MAX)
+            self._predict()
+
+    def _predict(self):
+        """Risk: each context's predicted charge, the kernel average of its neighbours' charges."""
+        s = np.fromiter(self.exact.keys(), np.int64)
+        w = self.K[:, s].sum(1)
+        self.pred = np.where(w > 0, self.K[:, s] @ np.fromiter(self.exact.values(), float) / np.maximum(w, 1e-300),
+                             E_MAX)
 
     def residual(self, c, q, p):
-        """A calibration reply at a context nobody had paid for: its drift minus the prediction."""
+        """A calibration reply at a context nobody had paid for: its drift minus the prediction.
+        Order-free: one reply shows one option order, so the drift is replaced by its certified
+        bound from that order alone -- an upper bound, which keeps the margin valid (conservative)."""
         if self.pred[int(c)] < E_MAX:
-            self.res.append(float(kl(q, p)[0]) - float(self.pred[int(c)]))
+            if self.rotations:
+                m = np.asarray(p) / N_ACT + (N_ACT - 1) / N_ACT * PMIN
+                q = np.atleast_2d(q)[0]
+                d = float((q * (np.log(q) - np.log(m))).sum())
+            else:
+                d = float(kl(q, p)[0])
+            self.res.append(d - float(self.pred[int(c)]))
 
     def charge_at(self, c, alpha):
         """Risk mode: exact where seen; else prediction + the conformal (1 - alpha) quantile of the
@@ -315,7 +332,7 @@ class Run:
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
-                 far_salience=FAR_SALIENCE, prune=False, cal_adapt=False):
+                 far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -334,7 +351,7 @@ class Run:
         self.st = self.scn.World(n, np.random.default_rng(seed + 1))
         assert rotations is None or not (novel or small), "the order-free reference is for the plain ledger"
         self.risk = bound == "risk" and not novel
-        assert not (self.risk and (small or rotations is not None)), "risk charges: plain reference, no small model"
+        assert not (self.risk and small), "risk charges: no small model"
         # P is the reference drift is measured against; with rotations it must be their mean
         self.server = Server(P, latency, np.random.default_rng(seed + 2), small, rotations,
                              np.random.default_rng(seed + 3) if rotations is not None else None)
@@ -342,6 +359,7 @@ class Run:
         self.tokens = 0.0
         self.ctokens = 0.0                                    # risk: calibration's own budget
         self.cal_adapt = cal_adapt                            # risk: size the calibration share by its value
+        self.rehearse_orders = rehearse_orders and rotations is not None
         self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
         self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None)
@@ -791,6 +809,22 @@ class Run:
         if here.size == 0:
             return
         occ, cnt = np.unique(st.context(t, here), return_counts=True)
+        if self.rehearse_orders:
+            # order-free reference: a busy context seen under only some option orders is charged a
+            # loose certificate (~ln 6 after one order); asking it under a missing order tightens it
+            # for everyone there. Up to half the rehearsal tokens go to the largest people x charge.
+            gaps = [(w * self.drift.exact.get(c, E_MAX), c) for c, w in zip(occ.tolist(), cnt.tolist())
+                    if c in self.drift.rot_seen and len(self.drift.rot_seen[c]) < N_ACT
+                    and c not in self.rehearsing]
+            for _, c in sorted(gaps, reverse=True)[:int(self.rtokens) // 2 or (1 if self.rtokens >= 1 else 0)]:
+                missing = [r for r in range(N_ACT) if r not in self.drift.rot_seen[c]]
+                self.server.rot_req[c] = int(self.rng.choice(missing))
+                self.server.submit(-1, c, t)
+                self.rehearsing.add(c)
+                self.rtokens -= 1
+                self.stats["rehearsals"] += 1
+            if self.rtokens < 1:
+                return
         parts = np.stack(scn.ctx_parts(occ), 1)
         score = {}
         for f, size in enumerate(scn.SIZES):

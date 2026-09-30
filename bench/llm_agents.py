@@ -110,6 +110,8 @@ def main():
         conds.insert(1, (f"parity/risk {a.risk[0]:g}", risk))
         if a.rehearse > 0:
             conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse)))
+            for w in a.max_wait:
+                conds.insert(3, (f"parity/risk {a.risk[0]:g} reh wait {w:g}", dict(risk, rehearse=a.rehearse, max_wait=w)))
     if a.policies:
         conds = [c for c in conds if c[0] in a.policies]
     if a.novel:

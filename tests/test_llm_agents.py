@@ -322,3 +322,24 @@ def test_the_calibration_share_is_zero_when_nothing_is_unseen():
     cand = np.arange(50)
     r._size_calibration(cand, cand % N_CTX, np.zeros(50, bool))
     assert r.explore_eff == 0.0
+
+
+def test_order_free_residual_uses_a_bound_that_never_undercounts():
+    R, PM = rotated_policy()
+    b = DriftBound(bound="risk", rotations=True)
+    q = np.full(N_ACT, 1 / N_ACT)
+    for c in range(0, 60):
+        for r in range(N_ACT):
+            b.pred[c] = 0.0
+            b.residual(c, q, R[r, c])
+            assert b.res[-1] >= float(kl(q, PM[c])[0]) - 1e-9        # one order's bound >= the true drift
+
+
+def test_a_rehearsal_is_asked_under_the_option_order_it_names():
+    from llm.schedule import Server
+    R, PM = rotated_policy()
+    s = Server(PM, LAT, np.random.default_rng(0), rotations=R, rot_rng=np.random.default_rng(1))
+    s.rot_req[7] = 4
+    s.submit(-1, 7, 0)
+    (agent, c, p, model, rot), = s.poll(0)
+    assert rot == 4 and np.allclose(p, R[4, 7])
