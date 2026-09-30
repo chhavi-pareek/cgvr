@@ -87,6 +87,8 @@ def main():
     ap.add_argument("--rehearse", type=float, default=0.0, help="also run PARITY with this rehearsal share")
     ap.add_argument("--max-wait", nargs="+", type=float, default=[],
                     help="also run PARITY with each of these bounded waits (seconds; with --rehearse, rehearsing too)")
+    ap.add_argument("--risk", nargs=2, type=float, default=None, metavar=("ALPHA", "SHARE"),
+                    help="also run PARITY with risk charges: per-stretch risk budget ALPHA, calibration SHARE of the budget")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
     ap.add_argument("--csv", default=None, help="also write one row per run (policy, N, seed, every summary field)")
@@ -101,6 +103,11 @@ def main():
     for w in a.max_wait:
         kw = dict(max_wait=w, rehearse=a.rehearse) if a.rehearse > 0 else dict(max_wait=w)
         conds.insert(len(conds) - len(POLICIES) + 1, (f"parity/wait {w:g}" + (" reh" if a.rehearse > 0 else ""), kw))
+    if a.risk:
+        risk = dict(bound="risk", alpha=a.risk[0], explore=a.risk[1])
+        conds.insert(1, (f"parity/risk {a.risk[0]:g}", risk))
+        if a.rehearse > 0:
+            conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse / 2)))
     if a.policies:
         conds = [c for c in conds if c[0] in a.policies]
     if a.novel:

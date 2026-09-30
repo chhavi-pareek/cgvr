@@ -263,3 +263,36 @@ def test_parity_holds_the_cap_against_the_order_free_reference():
     R, M = rotated_policy()
     s = Run(1000, "parity", M, LAT, seed=0, cap=10.0, rotations=R).run(600).summary()
     assert s["dmax"] <= 10.0 + 1e-9 and s["overflow_frac"] == 0.0
+
+
+def test_risk_charge_is_exact_where_seen_and_the_worst_case_until_calibrated():
+    b = DriftBound(bound="risk")
+    sur = Distilled()
+    for c in range(0, N_CTX, 7):
+        sur.observe(c, P[c]); b.observe(c, P[c])
+    sur.fit(); b.refresh(sur)
+    seen, unseen = 0, 1
+    assert b.charge_at(seen, 0.1)[0] == pytest.approx(float(kl(sur(seen), P[seen])[0]))
+    assert b.charge_at(unseen, 0.1)[0] == E_MAX                       # no residuals yet
+    for c in range(1, N_CTX, 7)[:40]:
+        b.residual(c, sur(c)[0], P[c])
+    lo, hi = b.charge_at(unseen, 0.2)[0], b.charge_at(unseen, 0.05)[0]
+    assert lo < E_MAX and lo <= hi                                    # a smaller risk costs more
+    assert b.charge_at(unseen, 1 / 1000)[0] == E_MAX                  # 40 residuals cannot certify 0.1%
+
+
+def test_risk_mode_calibrates_only_unseen_contexts_and_keeps_stretch_overflow_under_the_budget():
+    M, PM = museum_policy()
+    r = Run(1000, "parity", PM, LAT, seed=0, scenario=M, bound="risk", alpha=0.2, explore=0.3)
+    s = r.run(900).summary()
+    assert len(r.drift.res) > 20 and s["est"] > 0
+    # per stretch: P(true drift > cap) <= alpha (union bound over alpha/2 + alpha/4 + ...)
+    assert s["overflow_frac"] <= 0.2
+    w = Run(1000, "parity", PM, LAT, seed=0, scenario=M).run(900).summary()
+    assert s["stall_per_agent_h"] <= w["stall_per_agent_h"]           # never more waits than the worst case
+
+
+def test_risk_mode_leaves_the_default_ledger_untouched():
+    a = Run(300, "parity", P, LAT, seed=3).run(600).summary()
+    b = Run(300, "parity", P, LAT, seed=3, bound="worst").run(600).summary()
+    assert a["kl_per_agent_h"] == b["kl_per_agent_h"] and a["est"] == 0

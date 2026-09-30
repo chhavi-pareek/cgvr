@@ -55,8 +55,8 @@ class Server:
         self.calls = 0                      # reference-model calls
         self.small_calls = 0
 
-    def submit(self, agent, ctx, step, model=0):
-        self.q.append((int(agent), int(ctx), float(step), int(model)))
+    def submit(self, agent, ctx, step, model=0, front=False):
+        (self.q.appendleft if front else self.q.append)((int(agent), int(ctx), float(step), int(model)))
         if model == 0:
             self.calls += 1
         else:
@@ -141,8 +141,17 @@ class DriftBound:
     #              version: a stretch's expected true drift is within the cap. The margin needs
     #              about E_MAX / (eps E[charge]) calibration replies to exist at all, so a small
     #              delta is only affordable when the model serves a large share of decisions.
+    #
+    # risk (contexts that DO repeat): seen contexts keep their exact charge; an unseen context is
+    # charged the kernel prediction plus the split-conformal quantile of recent residuals at level
+    # alpha, the residuals taken when a calibration reply lands on a context still unseen at that
+    # moment (so neither the surrogate nor the predictor has been fitted to it). The caller spends
+    # a per-stretch risk budget over these charges (Run: alpha/2, alpha/4, ...), so by a union
+    # bound a stretch's true drift passes the cap with probability at most the budget; stretches
+    # with no estimated charge keep the deterministic cap. Too few residuals for a level and the
+    # charge is E_MAX, the certified worst case.
     def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station,
-                 rotations=False):
+                 rotations=False, window=200):
         self.n_ctx = scn.N_CTX
         # order-free reference (rotations): a reply shows the answer under ONE order, the reference
         # is the mean over all six; the charge is a bound that is exact once all six are seen
@@ -155,7 +164,9 @@ class DriftBound:
         self.train, self.cal = [], []  # (ctx, p) of paid replies; cal = the random ones
         self.charge = np.full(self.n_ctx, E_MAX)
         self.q_hat = np.inf
-        if novel:
+        self.res = deque(maxlen=window)          # risk: residuals at contexts unseen when paid
+        self.pred = np.full(self.n_ctx, E_MAX)
+        if novel or bound == "risk":
             parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1)
             h = (parts[:, None, :] != parts[None, :, :]).sum(2).astype(np.float64)
             self.K = np.exp(-h / tau)
@@ -204,6 +215,27 @@ class DriftBound:
         self.exact = dict(zip(c.tolist(), k.tolist()))
         if self.novel and self.bound != "worst":
             self._conformal(sur)
+        elif self.bound == "risk":
+            s = np.fromiter(self.exact.keys(), np.int64)
+            w = self.K[:, s].sum(1)
+            self.pred = np.where(w > 0, self.K[:, s] @ np.fromiter(self.exact.values(), float) / np.maximum(w, 1e-300),
+                                 E_MAX)
+
+    def residual(self, c, q, p):
+        """A calibration reply at a context nobody had paid for: its drift minus the prediction."""
+        if self.pred[int(c)] < E_MAX:
+            self.res.append(float(kl(q, p)[0]) - float(self.pred[int(c)]))
+
+    def charge_at(self, c, alpha):
+        """Risk mode: exact where seen; else prediction + the conformal (1 - alpha) quantile of the
+        residuals, or E_MAX when there are too few residuals for that level."""
+        c, alpha = np.atleast_1d(c), np.broadcast_to(alpha, np.shape(np.atleast_1d(c)))
+        r = np.sort(np.fromiter(self.res, float)) if self.res else np.zeros(0)
+        m = r.size
+        k = np.ceil((m + 1) * (1 - alpha)).astype(np.int64)
+        q = np.where(k <= m, r[np.clip(k - 1, 0, max(m - 1, 0))] if m else np.inf, np.inf)
+        est = np.clip(self.pred[c] + q, 0.0, E_MAX)
+        return np.array([self.exact.get(int(x), e) for x, e in zip(c, est)])
 
     def _conformal(self, sur):
         if not self.train:
@@ -288,11 +320,14 @@ class Run:
         assert self.scn.N_ACT == N_ACT
         self.st = self.scn.World(n, np.random.default_rng(seed + 1))
         assert rotations is None or not (novel or small), "the order-free reference is for the plain ledger"
+        self.risk = bound == "risk" and not novel
+        assert not (self.risk and (small or rotations is not None)), "risk charges: plain reference, no small model"
         # P is the reference drift is measured against; with rotations it must be their mean
         self.server = Server(P, latency, np.random.default_rng(seed + 2), small, rotations,
                              np.random.default_rng(seed + 3) if rotations is not None else None)
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
+        self.ctokens = 0.0                                    # risk: calibration's own budget
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
         self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None)
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
@@ -301,7 +336,9 @@ class Run:
         self.cap_eff = cap / (1 + eta) if novel and bound == "crc" else cap
         # novel contexts: this share of the call budget goes to uniformly random decisions, whose
         # replies calibrate the conformal margin (and still serve those decisions)
-        self.explore = explore if novel and bound in ("conformal", "crc") else 0.0
+        self.explore = explore if (novel and bound in ("conformal", "crc")) or self.risk else 0.0
+        self.alpha_tot = alpha
+        self.R = np.full(n, alpha)                            # risk: budget left in this stretch
         self.calib_req = set()
         self.refit_every, self.seen = refit_every, 0
         self.L = np.zeros(n)                                  # charged ledger
@@ -324,7 +361,7 @@ class Run:
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
-                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0,
+                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, est=0, est_miss=0,
                           small=0, probes=0, rehearsals=0, forced=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
@@ -363,6 +400,7 @@ class Run:
         self.stats["stretches"] += int(had.size)
         self.stats["overflowed"] += int(self.over[had].sum())
         self.L[idx] = 0.0; self.Ls[idx] = 0.0; self.D[idx] = 0.0; self.nsur[idx] = 0; self.over[idx] = False
+        self.R[idx] = self.alpha_tot
         self.wait_from[idx] = -1
 
     def _respawned(self):
@@ -370,6 +408,13 @@ class Run:
         if new.size:
             self._close(new)
             self.gen_seen[new] = self.st.gen[new]
+
+    def _charge(self, i, c):
+        """What agent(s) i are charged for a surrogate decision at c: in risk mode the level is half
+        of the risk budget the agent has left in this stretch."""
+        if self.risk:
+            return self.drift.charge_at(c, self.R[np.atleast_1d(i)] / 2)
+        return self.drift(c)
 
     def _limit(self, i, e):
         """The ledger limit a surrogate decision charged e must fit under."""
@@ -414,6 +459,8 @@ class Run:
                 self.probe_q.append(c)
             fresh = c not in self.drift.p
             calib = agent in self.calib_req
+            if self.risk and calib and fresh:
+                self.drift.residual(c, self.sur(c)[0], p)
             self.calib_req.discard(agent)
             self._learn(c, p, calib, rot)
             if self.seen % self.refit_every == 0:
@@ -482,7 +529,7 @@ class Run:
             # the reply answers a situation the agent is no longer in (the queue changed while it
             # was on its way); acting on it would be drift nobody charged, so it is discarded
             self.stats["stale"] += 1
-        e = float(self.drift(c)[0])
+        e = float(self._charge(np.array([i]), np.array([c]))[0])
         held = self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e)
         if held and self.wait_from[i] < 0:
             self.wait_from[i] = t
@@ -510,6 +557,10 @@ class Run:
         self.L[i] += e
         if e < E_MAX:
             self.Ls[i] += e
+        if self.risk and e < E_MAX and int(c) not in self.drift.exact:
+            self.R[i] /= 2                     # this estimated charge spent half the budget left
+            self.stats["est"] += 1
+            self.stats["est_miss"] += int(d > e + 1e-12)
         self.D[i] += d
         self.nsur[i] += 1
         self.over[i] |= self.D[i] > self.cap + 1e-9
@@ -526,7 +577,12 @@ class Run:
         if self.policy in ("reference", "surrogate_only"):
             return
         st = self.st
-        self.tokens = min(self.tokens + (1 - self.rehearse) * self.rate, 3 * self.rate + 1)
+        share = 1 - self.rehearse - (self.explore if self.risk else 0.0)
+        self.tokens = min(self.tokens + share * self.rate, 3 * self.rate + 1)
+        if self.risk:
+            # calibration gets its own slice, which mandatory requests cannot overdraw: else a
+            # shift floods the budget with E_MAX-charged requests and the margin never forms
+            self.ctokens = min(self.ctokens + self.explore * self.rate, 3 * self.explore * self.rate + 1)
         if self.rehearse > 0:
             self._rehearse(t)
         # people in the ticket queue included: their decision time is estimated from their place
@@ -569,21 +625,32 @@ class Run:
             # A request for a random decision is what breaks that, so it overrides the budget
             # (as a mandatory request does). The calibration set is those decisions only -- not
             # the warm-up at t = 0, whose contexts (everyone just arrived) are unrepresentative.
-            uncal = not np.isfinite(self.drift.q_hat)
-            if (self.explore > 0 and (self.tokens >= 1 or uncal) and in_time.any()
+            uncal = self.drift.novel and not np.isfinite(self.drift.q_hat)
+            if self.risk:
+                # any upcoming decision at a context nobody has paid for, in time or not: the reply
+                # is for measuring the margin (it jumps the queue), serving the decision is a bonus
+                pool = np.flatnonzero(~np.isin(xhat, list(self.drift.p))) if self.ctokens >= 1 else []
+                j = int(self.rng.choice(pool)) if len(pool) else -1
+            elif (self.explore > 0 and (self.tokens >= 1 or uncal) and in_time.any()
                     and (uncal or self.rng.random() < self.explore)):
                 j = int(self.rng.choice(np.flatnonzero(in_time)))
-                self.server.submit(cand[j], xhat[j], t)
+            else:
+                j = -1
+            if j >= 0:
+                self.server.submit(cand[j], xhat[j], t, front=self.risk)
                 self.req_gen[int(cand[j])] = int(self.st.gen[cand[j]])
                 self.req_dec[int(cand[j])] = int(self.ndec[cand[j]])
                 self.inflight[cand[j]] = True
                 self.calib_req.add(int(cand[j]))
-                self.tokens -= 1
+                if self.risk:
+                    self.ctokens -= 1
+                else:
+                    self.tokens -= 1
                 keep = np.arange(len(cand)) != j
                 cand, when, in_time, xhat = cand[keep], when[keep], in_time[keep], xhat[keep]
                 if cand.size == 0:
                     return
-            e = self.drift(xhat)
+            e = self._charge(cand, xhat)
             # an agent whose ledger cannot take its next surrogate decision is asked for now,
             # even too late to avoid a wait; anyone else only if the reply can arrive in time
             must = (self.L[cand] + e > self._limit(cand, e)) & self.ledger
@@ -766,6 +833,7 @@ class Run:
                     kl_view_per_agent_h=s["kl_view"] / max(s["view_s"] / 3600.0, 1e-9),
                     dmax=s["dmax"], over_cap_frac=s["over_cap"] / max(s["agent_s"], 1),
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
+                    est=s["est"], est_miss_frac=s["est_miss"] / max(s["est"], 1),
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),
