@@ -104,10 +104,12 @@ def main():
         kw = dict(max_wait=w, rehearse=a.rehearse) if a.rehearse > 0 else dict(max_wait=w)
         conds.insert(len(conds) - len(POLICIES) + 1, (f"parity/wait {w:g}" + (" reh" if a.rehearse > 0 else ""), kw))
     if a.risk:
-        risk = dict(bound="risk", alpha=a.risk[0], explore=a.risk[1])
+        # risk charges with the value-aware model queue (pruned, stuck agents first) and a
+        # calibration share sized by its value, at most SHARE
+        risk = dict(bound="risk", alpha=a.risk[0], explore=a.risk[1], prune=True, cal_adapt=True)
         conds.insert(1, (f"parity/risk {a.risk[0]:g}", risk))
         if a.rehearse > 0:
-            conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse / 2)))
+            conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse)))
     if a.policies:
         conds = [c for c in conds if c[0] in a.policies]
     if a.novel:

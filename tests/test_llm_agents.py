@@ -296,3 +296,29 @@ def test_risk_mode_leaves_the_default_ledger_untouched():
     a = Run(300, "parity", P, LAT, seed=3).run(600).summary()
     b = Run(300, "parity", P, LAT, seed=3, bound="worst").run(600).summary()
     assert a["kl_per_agent_h"] == b["kl_per_agent_h"] and a["est"] == 0
+
+
+def test_the_model_queue_serves_held_agents_first():
+    from llm.schedule import Server
+    s = Server(P, LAT, np.random.default_rng(0))
+    for a in (1, 2, 3):
+        s.submit(a, a, 0)
+    s.prio = lambda agent, model: 1 if agent == 3 else 3
+    assert [r[0] for r in s.poll(0)][0] == 3
+
+
+def test_pruning_skips_replies_nobody_can_use_and_refunds_them():
+    M, PM = museum_policy()
+    kw = dict(scenario=M, bound="risk", alpha=0.2, explore=0.3)
+    a = Run(1000, "parity", PM, LAT, seed=0, **kw).run(900)
+    b = Run(1000, "parity", PM, LAT, seed=0, prune=True, **kw).run(900)
+    assert b.server.dropped > 0 and b.late <= a.late
+    assert b.summary()["overflow_frac"] <= 0.2
+
+
+def test_the_calibration_share_is_zero_when_nothing_is_unseen():
+    r = Run(300, "parity", P, LAT, seed=0, bound="risk", alpha=0.2, explore=0.5, cal_adapt=True)
+    r.drift.p = {c: P[c] for c in range(N_CTX)}
+    cand = np.arange(50)
+    r._size_calibration(cand, cand % N_CTX, np.zeros(50, bool))
+    assert r.explore_eff == 0.0

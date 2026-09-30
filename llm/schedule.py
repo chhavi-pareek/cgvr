@@ -52,6 +52,9 @@ class Server:
         self.busy_until = 0.0
         self.busy_s = 0.0                   # model-seconds used
         self.done = []
+        self.live = None                    # prune: is a request still worth serving when it starts?
+        self.prio = None                    # prune: request class, smaller served first (FIFO within)
+        self.dropped = 0
         self.calls = 0                      # reference-model calls
         self.small_calls = 0
 
@@ -82,8 +85,18 @@ class Server:
         """Replies complete by the end of this step, as (agent, ctx, p, model, rotation or -1)."""
         out = []
         while self.q and max(self.busy_until, self.q[0][2]) <= step + 1:
+            if self.prio is not None and len(self.q) > 1:
+                k = min(range(len(self.q)), key=lambda j: self.prio(self.q[j][0], self.q[j][3]))
+                if k:
+                    self.q.rotate(-k)
+                    item = self.q.popleft()
+                    self.q.rotate(k)
+                    self.q.appendleft(item)
             agent, ctx, t_req, model = self.q.popleft()
             start = max(self.busy_until, t_req)
+            if self.live is not None and not self.live(agent, ctx, model, start):
+                self.dropped += 1                # nobody can use the reply: the model skips it
+                continue
             dt = float(self.rng.choice(self.lat[model]))
             self.busy_until = start + dt
             self.busy_s += dt
@@ -302,7 +315,7 @@ class Run:
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
-                 far_salience=FAR_SALIENCE):
+                 far_salience=FAR_SALIENCE, prune=False, cal_adapt=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -328,6 +341,8 @@ class Run:
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
         self.ctokens = 0.0                                    # risk: calibration's own budget
+        self.cal_adapt = cal_adapt                            # risk: size the calibration share by its value
+        self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
         self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None)
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
@@ -350,6 +365,10 @@ class Run:
         self.inflight = np.zeros(n, bool)
         self.pending = {}                                     # agent -> (ctx, p, generation)
         self.stalled = set()                                  # agents waiting for the model
+        self.must_req = set()                                 # agents whose request was mandatory
+        if prune:
+            self.server.live = self._live
+            self.server.prio = self._prio
         # bounded wait: an agent the ledger holds for the model waits at most max_wait seconds,
         # then decides by the surrogate anyway and the overflow is counted (forced), not hidden --
         # waiting is itself a departure from the reference, which the drift accounting cannot see
@@ -409,6 +428,45 @@ class Run:
             self._close(new)
             self.gen_seen[new] = self.st.gen[new]
 
+    def _live(self, agent, ctx, model, start):
+        """Checked when a request reaches the model, not when it was queued: a reply is worth the
+        model's time only if the decision it was asked for has not been made (same person, same
+        decision number) and either the agent is or will be held for it, or it can land before the
+        decision. A dropped request costs no model time and its token is refunded."""
+        if agent < 0 or model != 0 or agent in self.calib_req:
+            return True
+        ok = (self.req_gen.get(agent, -1) == int(self.st.gen[agent]) and self.req_dec.get(agent, -1) == int(self.ndec[agent])
+              and (agent in self.stalled or agent in self.must_req
+                   or self.st.busy_until[agent] >= start + float(self.server.lat[0].mean())))
+        if not ok:
+            self.inflight[agent] = False
+            self.must_req.discard(agent)
+            self.tokens += 1
+        return ok
+
+    def _size_calibration(self, cand, xhat, must):
+        """The calibration share for the next second: the most it may take (explore), times how
+        much an estimated charge saves over the worst case at the unseen contexts coming up (1 -
+        mean estimate / E_MAX), times how many of the coming decisions are at unseen contexts (full
+        at 10%). Not the mandatory share: estimated charges that work make fewer agents mandatory,
+        and calibration would be cut exactly when it pays. Until 20 residuals exist the value is
+        unknown, so the full share goes to calibration whenever unseen contexts are coming."""
+        un = ~np.isin(xhat, list(self.drift.p))
+        if len(self.drift.res) < 20:
+            self.explore_eff = self.explore * min(1.0, float(un.mean()) / 0.1)
+            return
+        # judged at the first level (alpha/2), not each agent's remaining budget: an agent whose
+        # level needs more residuals than exist is charged E_MAX, and that is when more pay most
+        v = 1.0 - (float(self.drift.charge_at(xhat[un], self.alpha_tot / 2).mean()) / E_MAX if un.any() else 1.0)
+        self.explore_eff = self.explore * max(v, 0.0) * min(1.0, float(un.mean()) / 0.1)
+
+    def _prio(self, agent, model):
+        """Which queued request the model serves next: calibration, then agents already held,
+        then mandatory requests, then the rest (each class first come, first served)."""
+        if agent < 0 or model != 0:
+            return 3
+        return 0 if agent in self.calib_req else 1 if agent in self.stalled else 2 if agent in self.must_req else 3
+
     def _charge(self, i, c):
         """What agent(s) i are charged for a surrogate decision at c: in risk mode the level is half
         of the risk budget the agent has left in this stretch."""
@@ -445,6 +503,7 @@ class Run:
                 self.rehearsing.discard(c)    # a rehearsal: learned from, no decision waits for it
             else:
                 self.inflight[agent] = False
+                self.must_req.discard(agent)
                 if self.req_dec.get(agent, -1) == self.ndec[agent]:
                     self.pending[agent] = (c, p, self.req_gen.get(agent, -1), 0)
                 else:
@@ -577,12 +636,13 @@ class Run:
         if self.policy in ("reference", "surrogate_only"):
             return
         st = self.st
-        share = 1 - self.rehearse - (self.explore if self.risk else 0.0)
+        xs = (self.explore_eff if self.cal_adapt else self.explore) if self.risk else 0.0
+        share = 1 - self.rehearse - xs
         self.tokens = min(self.tokens + share * self.rate, 3 * self.rate + 1)
         if self.risk:
             # calibration gets its own slice, which mandatory requests cannot overdraw: else a
             # shift floods the budget with E_MAX-charged requests and the margin never forms
-            self.ctokens = min(self.ctokens + self.explore * self.rate, 3 * self.explore * self.rate + 1)
+            self.ctokens = min(self.ctokens + xs * self.rate, 3 * self.explore * self.rate + 1)
         if self.rehearse > 0:
             self._rehearse(t)
         # people in the ticket queue included: their decision time is estimated from their place
@@ -654,6 +714,8 @@ class Run:
             # an agent whose ledger cannot take its next surrogate decision is asked for now,
             # even too late to avoid a wait; anyone else only if the reply can arrive in time
             must = (self.L[cand] + e > self._limit(cand, e)) & self.ledger
+            if self.risk and self.cal_adapt:
+                self._size_calibration(cand, xhat, must)
             val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
             if self.max_wait is None:
                 mo = list(np.flatnonzero(must))
@@ -672,6 +734,8 @@ class Run:
                 if must[j] and self.tokens < 1:
                     self.stats["overrun"] += 1
                 self.server.submit(cand[j], xhat[j], t)
+                if must[j]:
+                    self.must_req.add(int(cand[j]))
                 self.req_gen[int(cand[j])] = int(self.st.gen[cand[j]])
                 self.req_dec[int(cand[j])] = int(self.ndec[cand[j]])
                 self.inflight[cand[j]] = True
