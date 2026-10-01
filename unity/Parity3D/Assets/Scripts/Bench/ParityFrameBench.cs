@@ -206,7 +206,7 @@ public static class ParityFrameBench
                                         "parity_sw0_gain0.02", "parity_sw0_gain0.005",
                                         "parity_sw0_vs0.1", "parity_sw0_vs0.05", "parity_sw0_vs0.02", "parity_area_sw0_vs0.1",
                                         "parity_refill120", "parity_refill60", "parity_refill30",
-                                        "parity_rawview", "parity_sw0_rawview" })
+                                        "parity_rawview", "parity_sw0_rawview", "parity_quantile" })
                 foreach (var k in targets) cells.Add((abl, Policy.Parity, k));
         // -policies a,b: only these
         if (Arg("-policies") is string only_) cells.RemoveAll(c => Array.IndexOf(only_.Split(','), c.name) < 0);
@@ -300,6 +300,7 @@ public static class ParityFrameBench
                     if (Token(name, "_vs") is float vsm) w.ViewSmoothing = vsm;
                     // _refill<f>: the pop ledger refills a token every f frames (default 300)
                     if (name.Contains("_rawview")) w.NormaliseView = false;
+                    if (name.Contains("_quantile")) w.QuantileMargin = true;
                     if (Token(name, "_refill") is float rf)
                         foreach (var pt in w.Pops) pt.Refill = 1f / rf;
                     if (name.Contains("_area")) w.Occlusion = false;
@@ -314,6 +315,11 @@ public static class ParityFrameBench
                 float scEma = 0f; int scOver = 0, scUnder = 0, prevOption = 0, applied = 0;
                 var optFrames = new long[options?.Length ?? 1];
                 double stepMs = 0, allocMs = 0, cpuMs = 0, waitMs = 0, gpuRec = 0;
+                // -trace <dir>: per-frame controller trace of every controlled cell
+                string traceDir = name != "masslod" && name != "timeslice" ? Arg("-trace") : null;
+                var trace = traceDir != null ? new StringBuilder("f,ms,cpu_ms,step_ms,fine_ms,pred_ms,budget_ms,margin_ms,overhead_ms,beh_shed,nav_full,anim0,geo0,pred_state_ms,cpu_pred_ms,cpu_budget_ms,gpu_budget_ms,cpu_overhead_ms,rho\n") : null;
+                var thA = new double[ParityTable.NAxes, ParityTable.NTiers];
+                double prevFine = 0;
                 var pend = default(UnityEngine.Rendering.AsyncGPUReadbackRequest);
                 bool hasPend = false;
                 float lastCpu = -1f, lastGpu = -1f, prevDone = 0f;
@@ -385,6 +391,25 @@ public static class ParityFrameBench
                     {
                         ft.Add(last);
                         stepMs += w.StepMs; allocMs += w.AllocMs;
+                        if (trace != null)
+                        {
+                            w.Cost.ThetaAxis(thA);
+                            int shed = 0, navFull = 0, anim0 = 0, geo0 = 0; double predState = 0;
+                            for (int i = 0; i < n; i++)
+                            {
+                                int nr = NavRun(w, i);
+                                if (w.Beh[i] != 0) shed++;
+                                if (nr == 0) navFull++;
+                                if (w.AnimV[0][i] == 0) anim0++;
+                                if (w.GeoV[0][i] == 0) geo0++;
+                                predState += thA[0, w.Beh[i]] + thA[1, nr];
+                            }
+                            trace.Append(string.Join(",", f.ToString(), F(last), F(lastCpu), F(w.StepMs), F((float)(w.Prof[3] - prevFine)),
+                                                     F(w.AppliedCostMs), F(w.BudgetMs), F(w.MarginMs), F(w.OverheadMs),
+                                                     shed.ToString(), navFull.ToString(), anim0.ToString(), geo0.ToString(), F((float)predState),
+                                                     F(w.AppliedCpuMs), F(w.BudgetCpuMs), F(w.BudgetGpuMs), F(w.OverheadCpuMs), F(w.Rho))).Append('\n');
+                        }
+                        prevFine = w.Prof[3];
                         for (int i = 0; i < n; i++)
                         {
                             double q = 0;
@@ -420,6 +445,11 @@ public static class ParityFrameBench
                 }
                 w.Join();
                 if (hasPend) pend.WaitForCompletion();
+                if (trace != null)
+                {
+                    Directory.CreateDirectory(traceDir);
+                    File.WriteAllText(Path.Combine(traceDir, $"trace_s{seed}_{name}_{knob.ToString("G3", CultureInfo.InvariantCulture)}.csv"), trace.ToString());
+                }
                 int measured = Math.Max(ft.Count, 1);
                 double img = ImageQuality(w, rend, cam, spec, snaps, shot, rt, shown, options != null ? applyOption : null, out double pop);
                 if (options != null) applyOption(0);

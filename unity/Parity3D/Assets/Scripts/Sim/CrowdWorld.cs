@@ -146,7 +146,32 @@ namespace Parity
         /// <summary>The target is a PERCENTILE of frame time, not its mean: the budget leaves
         /// z * std of headroom (z = 1.65 is the 95th percentile of a normal).</summary>
         public float FrameZ = 1.65f;
-        float frameEma, frameVar, overheadEma = float.NaN, appliedCost = -1f;
+        /// <summary>With QuantileMargin the margin tracks the percentile itself: each frame over
+        /// the target raises it by MarginGain * T* * FramePct, each frame under lowers it by
+        /// MarginGain * T* * (1 - FramePct), so it settles where 1 - FramePct of frames are over.
+        /// No normality assumption, and a stutter counts once whatever its size -- under z * std
+        /// one 10 ms stutter cut the budget by 2-4.5 ms for dozens of frames, and with geometry
+        /// held by the pop ledger the cut came out of simulation. The overhead takes Huber steps
+        /// for the same reason. Off by default (bench `_quantile` turns it on): it hit the target
+        /// more tightly on a throttled Mac, but at equal p95 it bought no quality on a cool Mac
+        /// (image -0.03) or on the stutter-prone RTX 3050 (perceived -0.08 at 20-38 ms). Anti-windup: for
+        /// the first BurnIn frames the overhead takes plain steps and the margin is z * std (a
+        /// tracker started at 0 climbed to its clamp while the overhead first converged, and
+        /// then came down at 0.1% of T* a frame), and the margin never rises while the budget
+        /// sits at its floor, where cutting more is impossible.</summary>
+        public bool QuantileMargin;
+        public float FramePct = 0.95f, MarginGain = 0.02f;
+        public int BurnIn = 30;
+        float frameEma, frameVar, overheadEma = float.NaN, overheadMad, qMargin, appliedCost = -1f;
+        int ctrlFrames;
+        bool budgetAtFloor;
+        /// <summary>Diagnostics (bench -trace): the controller's margin, its overhead estimate,
+        /// and the predicted spend of the allocation that last ran.</summary>
+        public float MarginMs => QuantileMargin ? qMargin : FrameZ * Mathf.Sqrt(frameVar);
+        public float OverheadMs => overheadEma;
+        public float AppliedCostMs => appliedCost;
+        public float AppliedCpuMs => appliedCpu;
+        public float OverheadCpuMs => ovCpu;
 
         /// <summary>Frames overlap -- the CPU prepares frame t + 1 while the GPU draws frame t --
         /// so a frame costs max(CPU, GPU), not their sum, and a millisecond is not one currency.
@@ -669,14 +694,35 @@ namespace Parity
                 if (measuredFrameMs > 0f && pairedCost >= 0f)
                 {
                     float o = measuredFrameMs - pairedCost;
-                    overheadEma = float.IsNaN(overheadEma) ? o : overheadEma + FrameGain * (o - overheadEma);
+                    bool robust = QuantileMargin && ++ctrlFrames > BurnIn;
+                    if (float.IsNaN(overheadEma)) { overheadEma = o; overheadMad = 0.05f * FrameTargetMs; }
+                    else if (robust)
+                    {
+                        // a step is at most 3 MADs; a lasting shift grows the MAD ~10% a frame
+                        // until the overhead follows it
+                        float c = 3f * Mathf.Max(overheadMad, 0.01f * FrameTargetMs);
+                        float d = Mathf.Clamp(o - overheadEma, -c, c);
+                        overheadEma += FrameGain * d;
+                        overheadMad += 0.05f * (Mathf.Abs(d) - overheadMad);
+                    }
+                    else
+                    {
+                        overheadMad += 0.05f * (Mathf.Abs(o - overheadEma) - overheadMad);
+                        overheadEma += FrameGain * (o - overheadEma);
+                    }
                     if (frameEma <= 0f) frameEma = measuredFrameMs;
                     float dev = measuredFrameMs - frameEma;
                     frameEma += 0.2f * dev;
                     frameVar = Mathf.Lerp(frameVar, dev * dev, 0.05f);
+                    float over = measuredFrameMs > FrameTargetMs ? 1f : 0f;
+                    if (!robust) qMargin = FrameZ * Mathf.Sqrt(frameVar);
+                    else if (over == 0f || !budgetAtFloor)
+                        qMargin = Mathf.Clamp(qMargin + MarginGain * FrameTargetMs * (over - (1f - FramePct)),
+                                              -0.5f * FrameTargetMs, 0.5f * FrameTargetMs);
                 }
                 float b = float.IsNaN(overheadEma) ? N * cmin
-                        : FrameTargetMs - FrameZ * Mathf.Sqrt(frameVar) - overheadEma;
+                        : FrameTargetMs - MarginMs - overheadEma;
+                budgetAtFloor = b <= N * cmin;
                 BudgetMs = Mathf.Clamp(b, N * cmin, N * cmax);
             }
             else

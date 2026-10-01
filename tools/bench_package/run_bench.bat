@@ -1,7 +1,7 @@
 @echo off
 rem PARITY frame bench, standalone: no Unity needed. Run from this folder (double-click works).
 rem
-rem   run_bench.bat           full protocol: 3 seeds x 37 cells at N = 8000, 3-minute cooldown
+rem   run_bench.bat           full protocol: 3 seeds x 44 cells at N = 8000, 3-minute cooldown
 rem                           between seeds (about 45-60 minutes); targets 10-38 ms, so both a
 rem                           fast machine and a slow one have targets above their floor
 rem   run_bench.bat quick     1 seed, 10 cells at targets 16 and 24 ms: a check that the build runs
