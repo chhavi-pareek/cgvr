@@ -206,7 +206,8 @@ public static class ParityFrameBench
                                         "parity_sw0_gain0.02", "parity_sw0_gain0.005",
                                         "parity_sw0_vs0.1", "parity_sw0_vs0.05", "parity_sw0_vs0.02", "parity_area_sw0_vs0.1",
                                         "parity_refill120", "parity_refill60", "parity_refill30",
-                                        "parity_rawview", "parity_sw0_rawview", "parity_quantile" })
+                                        "parity_rawview", "parity_sw0_rawview", "parity_quantile",
+                                        "parity_stepprice", "parity_ssw0", "parity_ssw0.2" })
                 foreach (var k in targets) cells.Add((abl, Policy.Parity, k));
         // -policies a,b: only these
         if (Arg("-policies") is string only_) cells.RemoveAll(c => Array.IndexOf(only_.Split(','), c.name) < 0);
@@ -262,6 +263,64 @@ public static class ParityFrameBench
             Log($"N={n} calibrated us/agent: behaviour {ct[0, 0] * 1000:F2}/{ct[0, 1] * 1000:F2}/{ct[0, 2] * 1000:F2}" +
                 $"  navigation {ct[1, 0] * 1000:F2}/{ct[1, 1] * 1000:F2}/{ct[1, 2] * 1000:F2}" +
                 $"  animation {ct[2, 0] * 1000:F2}/{ct[2, 1] * 1000:F2}/{ct[2, 2] * 1000:F2}  floor {floor * 1000:F2}");
+            // Simulation priced by what it saves in a whole frame. CalibrateAxes times the step
+            // alone (fastest block); in a frame the step shares the CPU with the pipelined decision
+            // and the render submission, and on a hot Mac about 1/6 of the step's saving reached
+            // the frame. Every agent is pinned live, then shed, in ABBA blocks against drift, with
+            // the allocator still running; the medians' difference over the step's prediction
+            // scales PARITY's behaviour and navigation prices (measured, so invariant 1 holds).
+            // `_stepprice` cells keep the step-only prices.
+            var framePriced = (double[,])ct.Clone();
+            {
+                var pw = new CrowdWorld(Policy.Parity, n, spec, 7u, table) { Pipelined = Pipelined, Instrumented = false };
+                pw.ApplyCalibration(floor, ct); pw.FrameTargetMs = 16f;
+                sbyte[] live = { 0, 0, 3, 3 }, shed = { 2, 3, 3, 3 };
+                var blockMs = new[] { new List<float>(), new List<float>() };
+                var ppend = default(UnityEngine.Rendering.AsyncGPUReadbackRequest);
+                bool pHas = false;
+                float plast = 0f;
+                const int Lead = 60, Block = 30, Settle = 5;
+                int[] abba = { 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0 };
+                for (int f = 0; f < Lead + abba.Length * Block; f++)
+                {
+                    int blk = f < Lead ? -1 : (f - Lead) / Block, cond = blk < 0 ? 0 : abba[blk];
+                    pw.PinTiers = cond == 0 ? live : shed;
+                    float t0 = Time.realtimeSinceStartup;
+                    Orbit(cam, spec, f / 2400f, out var pxz, out float pyaw);
+                    var ppm = cam.projectionMatrix;
+                    pw.SetView(0, ppm * cam.worldToCameraMatrix, ppm.m00, ppm.m11);
+                    pw.Step(pxz, pyaw, plast);
+                    rend.Draw(pw, cam);
+                    cam.Render();
+                    if (full != null) Graphics.Blit(rt, full);
+                    if (Overlap)
+                    {
+                        Graphics.Blit(shown, tiny[f & 1]);
+                        var req = UnityEngine.Rendering.AsyncGPUReadback.Request(tiny[f & 1]);
+                        if (pHas) ppend.WaitForCompletion();
+                        ppend = req; pHas = true;
+                    }
+                    else
+                    {
+                        var prev = RenderTexture.active;
+                        RenderTexture.active = shown;
+                        probe.ReadPixels(new Rect(0, 0, 1, 1), 0, 0, false);
+                        RenderTexture.active = prev;
+                    }
+                    plast = (Time.realtimeSinceStartup - t0) * 1000f;
+                    if (blk >= 0 && (f - Lead) % Block >= Settle) blockMs[cond].Add(plast);
+                }
+                pw.Join();
+                if (pHas) ppend.WaitForCompletion();
+                pw.Dispose();
+                float Median(List<float> l) { l.Sort(); return l[l.Count / 2]; }
+                double saved = Median(blockMs[0]) - Median(blockMs[1]);
+                double predicted = n * (ct[0, 0] - ct[0, 2] + ct[1, 0] - ct[1, 3]);
+                double kappa = predicted > 1e-3 ? Math.Min(Math.Max(saved / predicted, 0.0), 1.5) : 1.0;
+                for (int t = 0; t < ParityTable.NTiers; t++) { framePriced[0, t] *= kappa; framePriced[1, t] *= kappa; }
+                Log($"N={n} simulation's whole-frame saving: live {Median(blockMs[0]):F2} ms, shed {Median(blockMs[1]):F2} ms, " +
+                    $"saved {saved:F2} of {predicted:F2} ms the step predicts -> pass-through {kappa:F2}");
+            }
             foreach (var (name, pol, knob) in cells)
             {
                 // the baseline's measured divergence is an instrument, kept out of the timed frame
@@ -282,11 +341,11 @@ public static class ParityFrameBench
                     w.ApplyCalibration(baseFloor, baseTheta);
                     w.RenderKnapsack = true; w.FrameTargetMs = knob;
                     if (name.StartsWith("knapsack_fullsim")) w.TimeSlice = 1;
-                    w.PopLedger = false; w.SwitchCost = 0f;      // neither is Funkhouser's
+                    w.PopLedger = false; w.SwitchCost = 0f; w.StateSwitchCost = 0f;      // none is Funkhouser's
                 }
                 else
                 {
-                    w.ApplyCalibration(floor, CrowdWorld.CalibratedTheta); w.FrameTargetMs = knob;
+                    w.ApplyCalibration(floor, name.Contains("_stepprice") ? CrowdWorld.CalibratedTheta : framePriced); w.FrameTargetMs = knob;
                     w.Uncapped = name == "parity_nocap";
                     w.DualResource = name == "parity_dual";
                     // ablations: _free drops pop bounding (ledger, switching cost, salience
@@ -301,6 +360,8 @@ public static class ParityFrameBench
                     // _refill<f>: the pop ledger refills a token every f frames (default 300)
                     if (name.Contains("_rawview")) w.NormaliseView = false;
                     if (name.Contains("_quantile")) w.QuantileMargin = true;
+                    // _ssw<c>: state switching cost c per unit of state salience
+                    if (Token(name, "_ssw") is float ssw) w.StateSwitchCost = ssw;
                     if (Token(name, "_refill") is float rf)
                         foreach (var pt in w.Pops) pt.Refill = 1f / rf;
                     if (name.Contains("_area")) w.Occlusion = false;

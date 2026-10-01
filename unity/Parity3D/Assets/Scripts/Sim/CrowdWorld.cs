@@ -89,9 +89,17 @@ namespace Parity
         public float SwitchCost = 0f;
         /// <summary>The same price on changing an agent's state pair, per unit of its state
         /// salience (alloc/factored.py state_switch_cost): frame-time noise moves the budget every
-        /// frame, and this keeps marginal agents from flipping with it. Off by default: in the dense
-        /// plaza the flips are the ledger forcing restorations, which it must not resist.</summary>
-        public float StateSwitchCost;
+        /// frame, and this keeps marginal agents from flipping with it, so a budget dip comes out of
+        /// the view half instead of simulation. The ledger still forces restorations: a previous
+        /// pair the agent's headroom no longer affords is dropped from its options. Measured on a
+        /// cool Mac (N = 8000, 2 seeds, 10-20 ms targets): 0.05 kept full simulation at every target
+        /// (state 0.93 vs 0.88-0.92 without) and matched the full-simulation knapsack's perceived
+        /// quality at equal p95 (+0.008, 8 of 9 cells); 0.2 was too sticky (image -0.1 at 16-20 ms).</summary>
+        public float StateSwitchCost = 0.05f;
+        /// <summary>Calibration only: every agent held at these (behaviour, navigation, animation,
+        /// geometry) tiers after the decision is applied. The allocator still runs, so the frame
+        /// carries its usual load around the pinned tiers.</summary>
+        public sbyte[] PinTiers;
         /// <summary>Ablation: PARITY with no divergence cap (Python's parity_nocap).</summary>
         public bool Uncapped;
         int[] visit, keyStart;
@@ -554,6 +562,11 @@ namespace Parity
             decided = false;
             if (Mode == Policy.Baseline) { ApplyBaselineTiers(); appliedCost = AllocatableMs; }
             else { ApplyDecision(); appliedCost = AllocatableMs; appliedCpu = SpendCpuMs; appliedGpu = SpendGpuMs; }
+            if (PinTiers != null)
+                for (int i = 0; i < N; i++)
+                {
+                    Beh[i] = PinTiers[0]; Nav[i] = PinTiers[1]; Anim[i] = AnimV[0][i] = PinTiers[2]; Geo[i] = PinTiers[3];
+                }
             Lap(1);
 
             StepCore();
