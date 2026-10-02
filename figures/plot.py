@@ -385,7 +385,7 @@ def fig4():
     order = load("order_sweep.csv", ["density", "n", "seed", "w", "bytes_per_agent", "wee"])
     speed = load("speedup.csv", ["n", "impl", "ms"])
     if order is None and speed is None:
-        print("  SKIP: neither order_sweep.csv nor speedup.csv present - run t4_runs.ipynb")
+        print("  SKIP: neither order_sweep.csv nor speedup.csv present - run notebooks/t4_runs.ipynb")
         return
 
     fig = plt.figure(figsize=(7.0, 2.8))

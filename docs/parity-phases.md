@@ -12,7 +12,7 @@ eight files, plus the STATE.md seed.
 mkdir -p .claude/commands bench/logs figures
 python3 - <<'PY'
 import os, re, pathlib, sys
-src = pathlib.Path("parity-phases.md").read_text()
+src = pathlib.Path("docs/parity-phases.md").read_text()
 blocks = re.findall(r"<!-- FILE: (.+?) -->\n```text\n(.*?)```", src, re.S)
 for name, body in blocks:
     p = pathlib.Path(name); p.parent.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,7 @@
 """The behaviour corpus authored by a language model, as the proposal specifies (section 6.1).
 
     python -m latent.llm_corpus author            # ~5000 descriptions via qwen2.5:7b (resumable)
-    python -m latent.llm_corpus anchor [n] [workers]   # rewrite with quoted evidence per field (t4_corpus.ipynb)
+    python -m latent.llm_corpus anchor [n] [workers]   # rewrite with quoted evidence per field (notebooks/t4_corpus.ipynb)
     python -m latent.llm_corpus compare           # against the template corpus
 
 The field combinations (intent, social context, gesture, manner, place) are drawn exactly as the
