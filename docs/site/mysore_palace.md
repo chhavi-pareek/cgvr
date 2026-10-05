@@ -459,6 +459,45 @@ is the other reading.
     arch.
   - **5. Engine:** the export carries the audited gates and zones. Closed gates are drawn with their
     grille shut. The engine plan defaults to "balanced" until rates are measured for the new gate set.
+- **Results with the audited gates (v2, 2026-10-05).** 48,000 people, one run each; logs
+  `bench/logs/palace/v2_*`. Spectator gates: Jayamarthanda (10 m), Varaha (4.2 m), Brahmapuri? (4 m),
+  Karikal Thotti? (3 m), 21.2 m of clear width in all. Leaving means reaching the rim of the 40 m
+  approach zone.
+
+  **Exit after the procession:**
+
+  | Gate plan | Half out | 95% out | All out | Note |
+  |---|---|---|---|---|
+  | Nearest gate | 38.9 min | 148.7 min | 165.0 min | Varaha takes 29,600 people through 4.2 m |
+  | Shared by gate width | 32.2 min | 74.2 min | 111.9 min | The two west gates set the tail; 23 people (0.05%) wedged at the 3 m gate |
+  | Shared by measured gate rates | *running* | | | |
+  | Width-shared, north gates also opened to spectators | *running* | | | |
+
+  The audited gate set is much tighter than v1, which wrongly used the north gates for
+  spectators. Even the better plan takes nearly two hours to clear.
+
+  **Arrival before the procession** (entry is by pass through door-frame metal detectors with
+  frisking). A fluid model of the stated assumptions (`python -m bench.palace --mode capacity`,
+  DER, no crowd simulation) gives the headline:
+
+  | Screening lanes x rate | Gates open before the start | Seated when the procession starts | Most waiting at once |
+  |---|---|---|---|
+  | 15 lanes x 600/h (1 lane per 1.5 m of gate) | 2 h | 33% | 31,700 |
+  | 15 lanes x 600/h | 4 h | 61% | 18,700 |
+  | 28 lanes x 600/h (1 per 0.75 m) | 3 h | 80% | 10,800 |
+  | 28 lanes x 600/h | 4 h | 96% | 4,300 |
+  | 15 lanes x 1,200/h | 4 h | 99% | 3,000 |
+
+  - The crowd simulation of the first row agrees: 29.9% seated when the procession starts. That
+    run used nearest-gate pass assignment and no cap on the approach zones, so its densities are
+    not physical. Reruns with the zone cap and capacity-shared passes are under way.
+  - **Planning reading:** at Jamboo Savari scale, the number of screening lanes and how early the
+    gates open decide whether people are seated in time and how many wait in the street. Gate width
+    matters much less on the way in. On the way out, without screening, width and the gate plan
+    decide.
+- **Engine check on the audited gates:** 8,000 people, width-shared plan. 7,992 out by 18 min;
+  8 stalled at the 3 m west gate (it was 320 with v1's gates). A second-stage nudge (one cell
+  along the field) is now in both models; a rerun is under way.
 - Step 4 (calibration through the tiered pipeline) is moved after the checkpoint. It needs the
   invariant core generalised to routes with more than three waypoints and one capacity counter
   per gate, which changes code under every existing scene.
