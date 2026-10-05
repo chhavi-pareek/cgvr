@@ -322,8 +322,19 @@ class Palace:
         self.phase = np.zeros(n, np.int8)  # 0 not arrived, 1 to the gate, 2 screening, 3 to the seat, 4 seated
         self.snaps = 0
         self.spill_max = 0
+        st = self.site
+        from .site import RES as _res
+        self.zone_cap = {}
+        for k in st.open:
+            near = np.linalg.norm((np.argwhere(st.zone) + 0.5) * _res - st.gates[k]["at"], axis=1) <= 45.0
+            self.zone_cap[k] = int(self.SPILL_AT * near.sum() * _res * _res)
+        self._in_zone = {k: 0 for k in st.open}
         self._crowd = np.zeros((int(self.site.size[0] // 2) + 1, int(self.site.size[1] // 2) + 1))
         self.join = np.full(n, -1, np.int64)
+        # first waypoint of each way in that lies inside the walls: where a screened agent resumes
+        inside = ~self.site.walkable(self.ewp.reshape(-1, 2), self.site.zone).reshape(n, -1)
+        inside[np.arange(inside.shape[1])[None, :] >= self.nwp[:, None]] = True
+        self.k_in = inside.argmax(1)
         st = self.site
         self.screen_at = {}
         self.lanes = {}
@@ -350,10 +361,21 @@ class Palace:
                 ij = np.clip((a.pos[w] // 2).astype(np.int64), 0, np.array(self._crowd.shape) - 1)
                 np.add.at(self._crowd, (ij[:, 0], ij[:, 1]), 0.25)
             self.spill_max = max(self.spill_max, int(((self.phase == 0) & (self.t_arrive <= frame)).sum()))
+            self._in_zone = {k: int(((self.phase == 1) | (self.phase == 2))[self.gate == k].sum()) for k in st.open}
         arr = np.flatnonzero((self.phase == 0) & (self.t_arrive <= frame))
         if arr.size:
             ij = np.clip((self.ewp[arr, 0] // 2).astype(np.int64), 0, np.array(self._crowd.shape) - 1)
             arr = arr[self._crowd[ij[:, 0], ij[:, 1]] <= self.SPILL_AT]
+        if arr.size:
+            # and a zone already holding SPILL_AT persons per m2 of its area takes nobody more
+            room = {k: self.zone_cap[k] - self._in_zone[k] for k in st.open}
+            take = []
+            for i in arr:
+                k = int(self.gate[i])
+                if room[k] > 0:
+                    take.append(i)
+                    room[k] -= 1
+            arr = np.array(take, np.int64)
         if arr.size:
             jitter = rng.normal(0.0, 1.5, (arr.size, 2))
             p = self.ewp[arr, 0] + jitter
@@ -362,8 +384,9 @@ class Palace:
             a.pos[arr] = p
             a.vel[arr] = 0.0
             self.phase[arr] = 1
-            self.k[arr] = 1
-            a.goal[arr] = self.ewp[arr, 1]
+            self.k[arr] = self.k_in[arr]
+            # outside, everyone heads for the gate opening itself: the approach zone is open ground
+            a.goal[arr] = np.array([st.gates[int(g)]["at"] for g in self.gate[arr]])
         # stepping into the gate passage (the only way in): join that gate's queue, in order of
         # arrival there; the door frames stand at the passage's outer end
         walk = np.flatnonzero(self.phase == 1)
@@ -395,10 +418,10 @@ class Palace:
                 self.phase[i] = 3
                 self.screened.append((i, k, int(self.join[i]), frame))
                 a.goal[i] = self.ewp[i, self.k[i]]
-            for i in q:
-                a.goal[i] = a.pos[i]
-        # walking: pass waypoints; seated on reaching the seat
-        live = np.flatnonzero((self.phase == 1) | (self.phase == 3))
+            if q:
+                a.goal[q] = a.pos[q]
+        # walking: pass waypoints (inside only); seated on reaching the seat
+        live = np.flatnonzero(self.phase == 3)
         if not live.size:
             return
         # a screened agent the crowd has pinned against a wall for STALL_S seconds is put back on

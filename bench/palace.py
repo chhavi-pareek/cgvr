@@ -154,8 +154,11 @@ def run_entry(seats, plan="nearest", window=120.0, peak=45.0, service=600.0, lan
     site = site0 if width_scale == 1.0 else Site(open_gates=open_gates,
                                                   widths={g["key"]: g["width"] * width_scale for g in site0.gates})
     rates = measured_rates(rates_from) if plan == "measured" else None
-    sc = Palace(site=site, plan=plan, rates=rates, mode="entry", window=window, peak=peak,
-                service=service, lanes_per_m=lanes_per_m, fps=fps)
+    if plan == "capacity":
+        # pass gates shared by screening capacity (lanes x service), walking distance included
+        rates = {k: max(1, int(round(site.gates[k]["width"] * lanes_per_m))) * service / 60.0 for k in site.open}
+    sc = Palace(site=site, plan="measured" if plan == "capacity" else plan, rates=rates, mode="entry", window=window,
+                peak=peak, service=service, lanes_per_m=lanes_per_m, fps=fps)
     a = Agents(seats)
     t0 = time.perf_counter()
     sc.spawn(a, rng)
@@ -227,16 +230,52 @@ def run_entry(seats, plan="nearest", window=120.0, peak=45.0, service=600.0, lan
     return tag
 
 
+def capacity_table(seats=48000, peak=45.0, walk=8.0):
+    """Fluid model of entry (DER from the stated assumptions, no crowd simulation): arrivals
+    triangular over the window with the mode `peak` minutes before the start, served at the total
+    screening capacity, then `walk` minutes to a seat. Share seated at the start, the largest
+    number waiting at once, and when the last person clears screening."""
+    st = Site()
+    width = sum(st.gates[k]["width"] for k in st.open)
+    rows = []
+    for per_m in (1 / 1.5, 2 / 1.5):
+        lanes = sum(max(1, int(round(st.gates[k]["width"] * per_m))) for k in st.open)
+        for service in (300.0, 600.0, 1200.0):
+            for window in (120.0, 180.0, 240.0):
+                t = np.linspace(-window, 120.0, int((window + 120.0) * 60) + 1)  # one-second steps
+                a, b, c = -window, -peak, 0.0
+                cdf = np.where(t < b, (t - a) ** 2 / ((c - a) * (b - a)),
+                               1 - (c - t) ** 2 / ((c - a) * (c - b)))
+                arrived = seats * np.clip(np.where(t <= a, 0.0, np.where(t >= c, 1.0, cdf)), 0, 1)
+                cap = lanes * service / 3600.0
+                served = np.zeros_like(arrived)
+                for i in range(1, len(t)):
+                    served[i] = min(arrived[i], served[i - 1] + cap)
+                at0 = np.searchsorted(t, -walk)
+                done = t[np.searchsorted(served, seats - 0.5)] if served[-1] >= seats - 0.5 else np.inf
+                rows.append((lanes, service, window, 100 * served[at0] / seats, int((arrived - served).max()), done))
+    lines = [f"entry fluid model: {seats} pass holders, {len(st.open)} spectator gates ({width:g} m of clear width), "
+             f"arrivals triangular with the mode {peak:g} min before the start, {walk:g} min from screening to a seat",
+             "lanes  per lane/h  window min  seated at start  most waiting at once  last screened (min after start)"]
+    for lanes, service, window, pct, qmax, done in rows:
+        lines.append(f"{lanes:5d}  {service:10.0f}  {window:10.0f}  {pct:14.1f}%  {qmax:20d}  "
+                     f"{('%.0f' % done) if np.isfinite(done) and done > 0 else ('before the start' if np.isfinite(done) else 'after +120')}")
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "entry_capacity.txt").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["egress", "entry"], default="egress")
+    p.add_argument("--mode", choices=["egress", "entry", "capacity"], default="egress")
     p.add_argument("--seats", type=int, default=48000)
     p.add_argument("--service", type=float, default=600.0, help="entry: persons per hour per screening lane")
     p.add_argument("--lane-m", type=float, default=1.5, help="entry: metres of gate clear width per lane")
     p.add_argument("--window", type=float, default=120.0, help="entry: minutes of arrivals before the start")
     p.add_argument("--peak", type=float, default=45.0, help="entry: most arrivals this many minutes before the start")
     p.add_argument("--open", help="comma list of open gate keys (default: the spectator gates)")
-    p.add_argument("--plan", choices=["nearest", "balanced", "measured"], default="nearest")
+    p.add_argument("--plan", choices=["nearest", "balanced", "measured", "capacity"], default="nearest",
+                   help="capacity (entry): pass gates shared by screening lanes x service rate")
     p.add_argument("--rates-from", help="tag of an earlier run whose sustained gate rates the 'measured' plan uses")
     p.add_argument("--waves", type=float, default=0.0, help="seconds between block releases (0: all at once)")
     p.add_argument("--width-scale", type=float, default=1.0)
@@ -247,6 +286,9 @@ def main():
     a = p.parse_args()
     if a.plan == "measured" and not a.rates_from:
         p.error("--plan measured needs --rates-from")
+    if a.mode == "capacity":
+        capacity_table(a.seats, a.peak)
+        return
     if a.mode == "entry":
         run_entry(a.seats, a.plan, a.window, a.peak, a.service, 1.0 / a.lane_m, a.width_scale,
                   a.open.split(",") if a.open else None, tag=a.tag, seed=a.seed, rates_from=a.rates_from)
