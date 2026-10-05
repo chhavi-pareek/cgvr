@@ -306,7 +306,7 @@ is the other reading.
   |---|---|---|---|---|---|
   | Nearest gate (north 19,200, south 28,800; 3 gates unused) | 39.8 min | 95.7 min | 105.6 min | 7.36M cell-s | 48.8 min (others 39.1) |
   | Shared by gate width (all 5 public gates) | 26.3 min | 53.3 min | 85.4 min | 4.52M cell-s | 37.5 min (others 25.5) |
-  | Shared by the gate rates measured in the run above | *running* | | | | |
+  | Shared by the gate rates measured in the run above (north 17,600, south 14,000, east 6,000 + 6,400, west 4,000) | 26.1 min | 49.5 min | **54.3 min** | 4.40M cell-s | 33.9 min (others 25.5) |
 
   - Using every public gate halves the time to get 95% out (95.7 to 53.3 min).
   - Sharing by width is not balanced in time. The west route squeezes through narrow passages
@@ -314,7 +314,9 @@ is the other reading.
     That is 21 per metre, where the other gates sustained 41-47. The west gate's 8,000 people set
     the 85-minute tail.
   - The twin's own measurements give the third plan: north 17,600, south 14,000, east 6,000 + 6,400,
-    west 4,000.
+    west 4,000. It estimated about 50 min per gate. The run gave 45-54 min per gate and everyone out
+    in 54.3 min, against 85.4 when sharing by width and 105.6 at the nearest gate. Measure, re-plan,
+    check: that loop is what the twin is for.
   - What the simple formula cannot show: total width says about 40 min at the measured
     rate. The simulation shows where it fails, at an overloaded nearest gate and a throttled route.
   - These are comparisons under assumed gate widths and layout. Whether the west passages are

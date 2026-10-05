@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+from matplotlib import patheffects  # noqa: E402
 from matplotlib.colors import ListedColormap  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
@@ -59,7 +60,10 @@ def panel(ax, st, tag):
         ax.plot(*g["at"], marker="^", ms=8, color=INK, mec=SURFACE, mew=1.5)
         txt = f"{NAME.get(g['key'], g['key'])}, {g['width']:g} m\n" + (f"{int(m.sum()):,} out, last {((ex[m, 2].max() - rel) / 30 / 60):.0f} min"
                                                     if m.any() else "unused")
-        ax.annotate(txt, g["at"], xytext=(8, 6), textcoords="offset points", fontsize=8, color=INK)
+        east = g["at"][0] > 0.6 * st.size[0]  # labels on the east edge go left, inside the panel
+        ax.annotate(txt, g["at"], xytext=(-8 if east else 8, 6), textcoords="offset points", fontsize=8,
+                    color=INK, ha="right" if east else "left",
+                    path_effects=[patheffects.withStroke(linewidth=3, foreground=SURFACE)])
     t100 = (ex[:, 2].max() - rel) / 30 / 60 if len(ex) else float("nan")
     plan = next((v for k, v in PLAN.items() if f"_{k}_" in tag), tag)
     ax.set_title(f"{plan}: all out in {t100:.0f} min", fontsize=11, color=INK, loc="left")
