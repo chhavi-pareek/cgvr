@@ -111,3 +111,14 @@ def test_palace_seats_follow_the_layout_assumptions():
     assert pdist(a.pos).min() >= Palace.SEAT - 1e-6
     st = _site()
     assert st.walkable(a.pos, st.clear).all()
+
+
+def test_measured_plan_evens_out_the_estimated_finish():
+    sc = Palace(site=_site(), plan="measured", rates={0: 350.0, 2: 122.0, 3: 132.0, 4: 278.0, 5: 84.0})
+    corners = sc.blocks(60)
+    bw, bh = Palace.ROWS * Palace.ROW, Palace.COLS * Palace.SEAT
+    starts = np.concatenate([corners + (bw / 2, -Palace.AISLE / 2), corners + (bw / 2, bh + Palace.AISLE / 2)])
+    gate = sc._by_rate(starts, len(corners))
+    seats = np.array([(gate == k).sum() * 400 / sc.rates[k] for k in sc.rates])
+    assert set(np.unique(gate)) <= set(sc.rates)
+    assert seats.max() / seats.min() < 1.3  # queue minutes per gate within 30% of each other

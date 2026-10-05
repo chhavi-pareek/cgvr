@@ -56,12 +56,25 @@ def step(a, sc, frame, active):
     sc.after_step(a, frame, None)
 
 
-def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes=90.0, tag=None, seed=0):
+def measured_rates(tag):
+    """Sustained persons per minute per gate in an earlier run: the median over the minutes
+    in which the gate passed anyone."""
+    ex = np.loadtxt(OUT / f"{tag}_exits.csv", delimiter=",", skiprows=1)
+    out = {}
+    for g in np.unique(ex[:, 1]).astype(int):
+        per = np.bincount((ex[ex[:, 1] == g, 2] // int(60 / DT)).astype(int))
+        out[g] = float(np.median(per[per > 0]))
+    return out
+
+
+def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes=90.0, tag=None, seed=0,
+        rates_from=None):
     rng = np.random.default_rng(seed)
     site0 = Site(gardens_walkable=gardens)
     widths = {g["key"]: g["width"] * width_scale for g in site0.gates}
     site = site0 if width_scale == 1.0 else Site(gardens_walkable=gardens, widths=widths)
-    sc = Palace(site=site, plan=plan, waves=waves)
+    rates = measured_rates(rates_from) if plan == "measured" else None
+    sc = Palace(site=site, plan=plan, waves=waves, rates=rates)
     a = Agents(seats)
     t0 = time.perf_counter()
     sc.spawn(a, rng)
@@ -88,15 +101,17 @@ def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes
     wall = time.perf_counter() - t0
     ex = np.array(sc.left, np.int64).reshape(-1, 3)
     tag = tag or f"s{seats}_{plan}_w{waves:g}_x{width_scale:g}" + ("" if gardens else "_nolawn")
+    keys = [g["key"] for g in site.gates]
     OUT.mkdir(parents=True, exist_ok=True)
     np.savetxt(OUT / f"{tag}_exits.csv", np.column_stack([ex, sc.block[ex[:, 0]] if len(ex) else ex[:, :0],
                                                           a.speed[ex[:, 0]] if len(ex) else ex[:, :0]]),
                fmt=["%d", "%d", "%d", "%d", "%.3f"], delimiter=",", header="agent,gate,frame,block,speed", comments="")
     np.savez_compressed(OUT / f"{tag}_density.npz", peak=peak, cell=CELL)
-    keys = [g["key"] for g in site.gates]
     t_rel = sc.t_release.min()
     mins = (ex[:, 2] - t_rel) * DT / 60 if len(ex) else np.zeros(0)
-    lines = [f"palace egress {tag}: seats {seats}, plan {plan}, waves {waves:g} s, gate widths x{width_scale:g}, "
+    lines = [f"palace egress {tag}: seats {seats}, plan {plan}"
+             + (f" (rates from {rates_from}: {', '.join(f'{keys[k]} {r:.0f}/min' for k, r in rates.items())})" if rates else "")
+             + f", waves {waves:g} s, gate widths x{width_scale:g}, "
              f"lawns {'walkable' if gardens else 'blocked'}, seed {seed}; {f + 1} frames in {wall:.0f} s wall",
              f"left {len(ex)}/{seats}" + ("" if len(ex) == seats else f" (stopped at {minutes:g} min)")]
     if len(ex):
@@ -132,7 +147,8 @@ def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--seats", type=int, default=48000)
-    p.add_argument("--plan", choices=["nearest", "balanced"], default="nearest")
+    p.add_argument("--plan", choices=["nearest", "balanced", "measured"], default="nearest")
+    p.add_argument("--rates-from", help="tag of an earlier run whose sustained gate rates the 'measured' plan uses")
     p.add_argument("--waves", type=float, default=0.0, help="seconds between block releases (0: all at once)")
     p.add_argument("--width-scale", type=float, default=1.0)
     p.add_argument("--no-lawns", action="store_true")
@@ -140,7 +156,9 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tag")
     a = p.parse_args()
-    run(a.seats, a.plan, a.waves, a.width_scale, not a.no_lawns, a.minutes, a.tag, a.seed)
+    if a.plan == "measured" and not a.rates_from:
+        p.error("--plan measured needs --rates-from")
+    run(a.seats, a.plan, a.waves, a.width_scale, not a.no_lawns, a.minutes, a.tag, a.seed, a.rates_from)
 
 
 if __name__ == "__main__":

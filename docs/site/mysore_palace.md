@@ -299,7 +299,26 @@ is the other reading.
   - everyone out in 27.1 min (T50 11.9 min, T95 24.9 min);
   - south gate: 6,800 people;
   - the slowest walkers' median exit is 15.4 min, against 11.6 min for everyone else.
-- Running: 48,000 seats, nearest plan against balanced plan.
+- **48,000 seats, everyone released at once** (1 seed each; logs in `bench/logs/palace/`; figure
+  `python -m figures.palace`):
+
+  | Gate plan | Half out | 95% out | All out | Crowd time at Fruin F | Slowest walkers, median |
+  |---|---|---|---|---|---|
+  | Nearest gate (north 19,200, south 28,800; 3 gates unused) | 39.8 min | 95.7 min | 105.6 min | 7.36M cell-s | 48.8 min (others 39.1) |
+  | Shared by gate width (all 5 public gates) | 26.3 min | 53.3 min | 85.4 min | 4.52M cell-s | 37.5 min (others 25.5) |
+  | Shared by the gate rates measured in the run above | *running* | | | | |
+
+  - Using every public gate halves the time to get 95% out (95.7 to 53.3 min).
+  - Sharing by width is not balanced in time. The west route squeezes through narrow passages
+    between the palace's west wing and the compound wall, so its 4 m gate passed only 84 persons/min.
+    That is 21 per metre, where the other gates sustained 41-47. The west gate's 8,000 people set
+    the 85-minute tail.
+  - The twin's own measurements give the third plan: north 17,600, south 14,000, east 6,000 + 6,400,
+    west 4,000.
+  - What the simple formula cannot show: total width says about 40 min at the measured
+    rate. The simulation shows where it fails, at an overloaded nearest gate and a throttled route.
+  - These are comparisons under assumed gate widths and layout. Whether the west passages are
+    really that narrow should be checked against the site before anyone acts on it.
 - Step 4 (calibration through the tiered pipeline) is moved after the checkpoint. It needs the
   invariant core generalised to routes with more than three waypoints and one capacity counter
   per gate, which changes code under every existing scene.

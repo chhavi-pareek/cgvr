@@ -149,14 +149,16 @@ class Palace:
     # ... stops aiming at its next waypoint and follows its gate's distance field from wherever
     # the crowd pushed it (a waypoint behind a wall is otherwise a trap)
 
-    def __init__(self, site=None, release=0, waves=0.0, plan="nearest"):
+    def __init__(self, site=None, release=0, waves=0.0, plan="nearest", rates=None):
         """release: frame the procession leaves; waves > 0 releases blocks in order of their
-        gate distance, one block every `waves` seconds; plan: 'nearest' gate, or 'balanced'
-        (blocks assigned so each gate's seats are proportional to its width)."""
+        gate distance, one block every `waves` seconds; plan: 'nearest' gate, 'balanced'
+        (each gate's seats proportional to its width) or 'measured' (each block side to the gate
+        that would finish it soonest, given `rates`: {gate index: persons per minute sustained,
+        as measured by an earlier run})."""
         from .site import Site
 
         self.site = site or Site()
-        self.release, self.waves, self.plan = release, waves, plan
+        self.release, self.waves, self.plan, self.rates = release, waves, plan, rates
         self.left = []  # (agent, gate, frame)
         self._blocks = None
 
@@ -203,7 +205,27 @@ class Palace:
         gate, dist = st.nearest_gate(starts)
         if self.plan == "balanced":
             gate = self._balance(starts)
+        elif self.plan == "measured":
+            gate = self._by_rate(starts, len(corners))
         return starts, gate, [st.route(p, int(k)) for p, k in zip(starts, gate)]
+
+    def _by_rate(self, starts, nb):
+        """Greedy: sides nearest their best gate first; each takes the gate with the earliest
+        estimated finish, (seats already sent + its own) / measured rate + walk at mean speed."""
+        st = self.site
+        keys = [k for k in st.open if self.rates.get(k, 0) > 0]
+        d = np.stack([st.distance(starts, k) for k in keys], 1)
+        rate = np.array([self.rates[k] for k in keys], np.float64)
+        load = np.zeros(len(keys))
+        seats = self.ROWS * self.COLS / 2
+        out = np.zeros(len(starts), np.int64)
+        for i in np.argsort(d.min(1), kind="stable"):
+            finish = (load + seats) / rate + d[i] / self.SPEED / 60.0
+            finish[~np.isfinite(d[i])] = np.inf
+            j = int(np.argmin(finish))
+            load[j] += seats
+            out[i] = keys[j]
+        return out
 
     def _balance(self, starts):
         """Greedy: sides in order of their best-gate distance take the nearest gate with room,

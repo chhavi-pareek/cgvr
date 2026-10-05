@@ -1,6 +1,6 @@
 """Palace egress figure: peak crowding by Fruin level, one panel per run.
 
-    python -m figures.palace s48000_nearest_w0_x1 s48000_balanced_w0_x1
+    python -m figures.palace s48000_nearest_w0_x1 s48000_balanced_w0_x1 s48000_measured_w0_x1
 
 Reads bench/logs/palace/<tag>_density.npz and <tag>_exits.csv; writes figures/out/palace_egress.png.
 Crowding is the peak walking density per 2 m cell over the run, binned at Fruin's walkway levels;
@@ -25,7 +25,8 @@ SURFACE, INK, MUTED = "#fcfcfb", "#0b0b0b", "#52514e"
 GROUND, BUILDING = "#f0efec", "#b9b7b0"
 LEVELS = [(1 / 1.39, "D  (0.72-1.08 /m²)", "#86b6ef"), (1 / 0.93, "E  (1.08-2.17 /m²)", "#2a78d6"),
           (1 / 0.46, "F  (over 2.17 /m²)", "#104281")]
-PLAN = {"nearest": "Everyone to the nearest gate", "balanced": "Seats shared by gate width"}
+PLAN = {"nearest": "Everyone to the nearest gate", "balanced": "Seats shared by gate width",
+        "measured": "Seats shared by measured gate rates"}
 NAME = {"north": "North", "south": "South (Varaha)", "east_n": "East side, N", "east_s": "East side, S",
         "west_n": "West"}
 
@@ -91,4 +92,4 @@ def main(tags):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] or ["s48000_nearest_w0_x1", "s48000_balanced_w0_x1"])
+    main(sys.argv[1:] or ["s48000_nearest_w0_x1", "s48000_balanced_w0_x1", "s48000_measured_w0_x1"])
