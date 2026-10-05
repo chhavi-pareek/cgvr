@@ -366,6 +366,27 @@ is the other reading.
   - That points at the GPU work in the plan: the coverage pass and the core step as compute
     shaders, each with its C# version as the oracle (CLAUDE.md). Until then, the 48,000-seat
     study runs in `bench/palace.py`, and the live twin shows a sector (8,000 people) at full rate.
+- **Demo video (2026-10-05):** `figures/out/palace_demo.mp4` (1080p, 2:11, 126 MB) and
+  `palace_demo_720p.mp4` (19 MB; neither is in git).
+  - Made by `ParityVideo` (Unity editor script, run on a clone of the project) and
+    `python -m figures.palace_video`.
+  - Contents: a title card; 45 s in real time of baseline | PARITY as 8,000 seated people stand up
+    (baseline worst drift reaches 18 times its cap, PARITY's stays at 0.00); a 15x fast-forward from
+    above as they walk to the gates; an end card with the 48,000-seat plan comparison.
+  - **Known issue:** in the engine's ORCA crowd, 315 of the 1,600 people sent to the two 3 m east
+    openings never get out, and 5 elsewhere. 7,680 of 8,000 are out by 13.75 min, then nobody
+    leaves. The Python model clears the same gates, so this is a narrow-gate jam in the engine's
+    motion, to fix with the gate work.
+- **Known gaps against the real site (2026-10-05, from the team's review):**
+  - The plan layout is real: footprints, spacing, walls, lawns, paths and gate positions come from
+    OSM. The look is not: boxy extrusions, generic windows, sphere domes, no Indo-Saracenic detail.
+  - Nothing outside the walls is modelled: roads, footpaths, parking.
+  - Temporary Dasara barricades, screening lanes and seating enclosures are absent.
+  - Gate roles are wrong for Jamboo Savari day. Police are posted at the Varaha (south), Brahmapuri
+    and Karikal Thotti (both west) and Jayamarthanda (east) gates [Udayavani]. Entry is by pass,
+    through door-frame metal detectors after frisking [Deccan Herald]. The model treats Jayamarthanda
+    as closed, uses the north gate (the procession's exit) for spectators, and has only one west gate.
+  - Gate widths are not published anywhere found so far.
 - Step 4 (calibration through the tiered pipeline) is moved after the checkpoint. It needs the
   invariant core generalised to routes with more than three waypoints and one capacity counter
   per gate, which changes code under every existing scene.
