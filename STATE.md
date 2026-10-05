@@ -191,6 +191,22 @@
   plus Weidmann bring the peak to 54-57 persons/m/min, against Weidmann's 58 at 1.06 m/s, so read
   results as comparisons. Not yet in the tiered pipeline: that needs Core with more than 3 waypoints
   and per-gate capacity.
+
+  48,000 seats, all out:
+  - nearest gate: 105.6 min;
+  - shared by gate width: 85.4 min (the west route is throttled);
+  - shared by the measured gate rates: 54.3 min.
+
+  Engine port:
+  - `Sim/PalaceSite.cs`: fields and routes agree with Python, 120/120 routes identical.
+  - `Sim/PalaceScene.cs` and the `Demo/StagePalace.cs` OSM set; a palace button in the HUD.
+  - Smoke test passes.
+  - `ParityShots -shots palace`, and `ParityFrameBench -scene palace`.
+
+  Scale on the M4: PARITY meets 16 ms at 8,000. At 16,000-48,000 both policies take 22-59 ms,
+  CPU-bound (the occlusion pass is 25.7 ms at 48,000). PARITY stays within its cap (0.99 at most),
+  MassLOD runs 4.2-4.5 times over. Next GPU work: the coverage pass and the core as compute
+  shaders.
 - **Paper round (2026-09-28): stronger baselines, statistics, and what the ledger actually does.** `bench/llm_agents.py` now runs 10 seeds with 95% t-intervals and seed-paired Wilcoxon tests against PARITY, and two new conditions (`llm/schedule.py`): `cascade`, the LLM-cascade rule (FrugalGPT and successors: escalate the least-confident surrogate decisions until the budget is spent), and `parity_nocap`, PARITY's priority with the ledger off. Log `bench/logs/llm_agents_v4.log`. Station, 7B, 30 min, cap 10, mean over 10 seeds (worst/cap; drift nats/agent-h; steady from 5 min):
 
   | N | PARITY | parity_nocap | cascade | view-LOD | round-robin |

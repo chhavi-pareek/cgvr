@@ -345,6 +345,27 @@ is the other reading.
     comparisons above come from `bench/palace.py`. The engine scene is the live, explorable twin
     that runs PARITY's allocator.
   - The cap and drift rates are provisional: the concourse's measured ones, until step 4.
+- **Step 8, scale check, done.** Run with `ParityFrameBench -scene palace -sizes 8000,16000,32000,48000
+  -targets 16 -knobs 16,1 -policies masslod,parity -overlap`. Apple M4, editor with Release code,
+  1080p, MSAA 4, shadows; log `bench/logs/palace/frame_bench_palace_scale.*`.
+
+  | People | MassLOD p95 | PARITY p95 (target 16 ms) | Worst drift / cap, MassLOD vs PARITY | CPU frame | Occlusion pass |
+  |---|---|---|---|---|---|
+  | 8,000 | 12.5 ms | **15.8 ms** | 4.20 vs 0.96 | 11.9 ms | 1.4 ms |
+  | 16,000 | 21.4 ms | 22.6 ms | 4.20 vs 0.99 | 20.7 ms | 5.3 ms |
+  | 32,000 | 39.2 ms | 41.1 ms | 4.48 vs 0.99 | 38.1 ms | 13.0 ms |
+  | 48,000 | 57.2 ms | 59.1 ms | 4.40 vs 0.99 | 54.7 ms | 25.7 ms |
+
+  - At 8,000 people PARITY meets the frame target with every agent within its drift cap, and
+    with twice MassLOD's perceived quality (0.062 against 0.031).
+  - Beyond about 10,000 people neither policy reaches 16 ms. The frame is CPU-bound by per-agent
+    costs no allocator can cut: the occlusion-coverage pass, the core and draw preparation. The
+    GPU waits only 0.1-0.15 ms per frame.
+  - PARITY still holds every agent at or under its cap at every size (0.99 at most); MassLOD
+    runs 4.2-4.5 times over. The drift guarantee scales; the frame rate does not, yet.
+  - That points at the GPU work in the plan: the coverage pass and the core step as compute
+    shaders, each with its C# version as the oracle (CLAUDE.md). Until then, the 48,000-seat
+    study runs in `bench/palace.py`, and the live twin shows a sector (8,000 people) at full rate.
 - Step 4 (calibration through the tiered pipeline) is moved after the checkpoint. It needs the
   invariant core generalised to routes with more than three waypoints and one capacity counter
   per gate, which changes code under every existing scene.
