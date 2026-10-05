@@ -7,8 +7,9 @@ every scene keeps positions in [0, size].
 Grid cells are RES metres. `walk` is where a body centre may be (inside the compound, outside
 buildings, walls and, unless the event uses them, gardens; plus each open gate and the apron
 beyond it). `clear` is `walk` eroded by one cell, and routes are planned on it so they keep off
-walls. A gate's field is the shortest 8-connected path length to its sink, the far end of its
-apron; agents that reach a sink have left the compound.
+walls. Outside each open gate is its approach zone: the open ground within APPROACH metres of
+the gate (outside buildings and walls excluded). A gate's sink is the zone's rim, and its field is
+the shortest 8-connected path length to that rim; agents that reach a sink have left.
 """
 import functools
 import json
@@ -24,7 +25,8 @@ DATA = pathlib.Path(__file__).resolve().parent / "data"
 RES = 0.5
 MARGIN = 20.0
 WALL_T = 0.6  # metres of wall thickness when a mapped wall is a line
-APRON = 8.0  # metres of open ground outside each gate; the outer half is the sink
+APRON = 8.0  # metres the carved gate passage runs outside the outline
+APPROACH = 40.0  # metres of outside ground in front of each open gate; its rim is the sink
 MAX_GATEHOUSE = 30.0  # metres a gate passage may run inward through buildings
 SQ2 = np.sqrt(2.0)
 NB = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0), (1, 1, SQ2), (1, -1, SQ2), (-1, 1, SQ2), (-1, -1, SQ2))
@@ -63,7 +65,7 @@ def _stroke(mask, pts, shift, half, value):
 class Site:
     def __init__(self, name="mysore_palace", gardens_walkable=True, widths=None, open_gates=None):
         """widths: {gate key: metres} overriding the site file's assumed widths.
-        open_gates: keys of the gates open for egress (default: every public gate)."""
+        open_gates: keys of the open gates (default: the spectator gates, role "entry+exit")."""
         raw = json.loads((DATA / f"{name}_site.json").read_text())
         self.raw = raw
         x0, y0, x1, y1 = raw["bounds"]
@@ -75,7 +77,7 @@ class Site:
             g["at"] = np.asarray(g["at"], np.float64) + self.shift
             if widths and g["key"] in widths:
                 g["width"] = float(widths[g["key"]])
-            g["open"] = g["public"] if open_gates is None else g["key"] in open_gates
+            g["open"] = g["role"] == "entry+exit" if open_gates is None else g["key"] in open_gates
         self.gates = gates
         self.open = [k for k, g in enumerate(gates) if g["open"]]
         self.compound = np.asarray(raw["compound"], np.float64) + self.shift
@@ -112,8 +114,19 @@ class Site:
         walk = inside & ~blocked
         # the compound outline is a wall everywhere except the gates
         _stroke(walk, self.compound, 0.0, WALL_T / 2, False)
+        outside_block = np.zeros(self.shape, bool)
+        _stroke(outside_block, self.compound, 0.0, WALL_T / 2, True)
+        for b in raw.get("outside_buildings", []):
+            for ring in b["rings"]:
+                _fill(self.building, ring, s)
+                _fill(outside_block, ring, s)
+        for w in raw.get("outside_walls", []):
+            _stroke(outside_block, w, s, WALL_T / 2, True)
+        centres = (np.indices(self.shape).transpose(1, 2, 0) + 0.5) * RES
+        self.zone = np.zeros(self.shape, bool)
         self.sink = []
         self.passage = np.zeros(self.shape, bool)
+        self.gate_passage = {}
         for g in self.gates:
             if not g["open"]:
                 self.sink.append(None)
@@ -136,10 +149,16 @@ class Site:
             _fill(gate, ring, 0.0)
             walk |= gate
             self.passage |= gate
-            sink = np.zeros(self.shape, bool)
-            _fill(sink, [g["at"] + out * (APRON / 2) - along * half, g["at"] + out * (APRON / 2) + along * half,
-                         g["at"] + out * APRON + along * half, g["at"] + out * APRON - along * half], 0.0)
-            self.sink.append(sink & walk)
+            self.gate_passage[self.gates.index(g)] = gate
+            # the approach zone: outside ground within APPROACH of the gate, connected to its passage
+            d = np.hypot(centres[..., 0] - g["at"][0], centres[..., 1] - g["at"][1])
+            zone = ((d <= APPROACH) & ~inside & ~outside_block) | (gate & ~inside)
+            lab, _ = ndimage.label(zone)
+            end = self.cell(g["at"] + out * (APRON - 1.0))
+            zone = lab == lab[tuple(end)]
+            walk |= zone
+            self.zone |= zone
+            self.sink.append(zone & (d >= APPROACH - 3.0))
         self.walk = walk
         self.sink_any = np.any([self.sink[k] for k in self.open], 0)
         self.clear = ndimage.binary_erosion(walk, structure=np.ones((3, 3), bool))

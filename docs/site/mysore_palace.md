@@ -186,6 +186,55 @@ movement.
 Daytime visits on the busiest 2024 day: 21,578 over 7.5 opening hours is 2,877 per hour, or 48 per
 minute on average through the Varaha gate and ticket counter. **DER.** The peak-hour factor is a **GAP**.
 
+## 5b. Gate audit (2026-10-05)
+
+Positions come from OSM, where mapped paths cross the compound outline. Roles come from news
+reports. Widths are estimated from Wikimedia Commons photographs, scaled by a person or a scooter
+in frame or by the gate structure's mapped footprint. These are **estimates (DER)**: no source
+publishes gate widths. Esri World Imagery was used only to check each gate's setting; no imagery
+is reproduced.
+
+| Model key | Gate | Role on Jamboo Savari day | Clear width estimate (range) | Evidence |
+|---|---|---|---|---|
+| `east` | Jayamarthanda, the main gate | Police staffed [U][DH20]; elephants enter by it [FPJ]; VIP and pass entry | **10 m** central arch (8-12), plus two ground arches of about 3 m | Structure 34 m along the wall, 15 m deep, towers 17 m (OSM); arch is 0.32 of the front width in a frontal photo [C1] |
+| `south` | Varaha, the public entry | Police staffed [U][DH20]; daily ticket entry | **4.2 m** central arch (3.5-5), plus two side doorways of about 1.1 m | People in the arch for scale [C2]; temple gopuram inside matches the Shweta Varahaswamy temple (OSM) |
+| `north` | Jayarama and Balarama, two separate arches side by side | The procession leaves by Balarama [W]; police staffed [DH20] | Per arch **4.7 m** central (4-5.5) plus two side arches of about 1.9 m; both arches about 17 m | Scooters in frame for scale [C3]; two structures [C4] |
+| `west_n` | Brahmapuri (*which west opening is which is not confirmed*) | Police staffed [U] | **4 m** ASSUMED (3-6) | West gate used by the Parakala Mutt pontiff [V]; mapped structure 22 x 10 m (OSM) |
+| `west_s` | Karikal Thotti (*not confirmed*) | Police staffed [U][DH20] | **3 m** ASSUMED (2-4) | On the west side [KT]; OSM `access=private` (daily); structure 14 x 3 m |
+| `east_s`, `east_n` | Side openings into the walled forecourt outside Jayamarthanda | Not in any report | 3 m ASSUMED | OSM pedestrian crossings; satellite shows they open into the same outer forecourt as the main gate |
+
+What the gates look like on the outside, from satellite and OSM:
+- **Varaha:** opens onto a paved approach about 35 x 80 m, then the main road.
+- **Jayamarthanda:** opens into a walled outer forecourt about 100 m across, with an avenue of about
+  20 m to the main road.
+- **North gates:** face a large parking plaza and a roundabout.
+- **West gates:** open onto the road on that side; parking lies south of the southern one.
+
+**Entry is by pass only, through door-frame metal detectors after frisking** [DH20], so on arrival
+the bottleneck is screening, not width. Industry figures for one walk-through lane are 600-1,200
+persons per hour, with a stadium tender asking at least 1,100 [2M][PB]. Full frisking is slower,
+so the model uses 600 (sweep 300-1,200). The number of lanes per gate is not published:
+ASSUMED one lane per 1.5 m of clear width.
+
+Gate sources:
+- [U] Udayavani, "Jamboo Savari: security beefed up around Mysuru Palace":
+  https://english.udayavani.com/article/jamboo-savari-security-beefed-up-around-mysuru-palace/937608
+- [DH20] Deccan Herald, "Vijayadashami procession amidst tight security":
+  https://www.deccanherald.com/india/karnataka/vijayadashami-procession-amidst-tight-security-907476.html
+- [FPJ] Free Press Journal, Mysuru Dasara 2026 elephant squad:
+  https://www.freepressjournal.in/lifestyle/mysuru-dasara-2026-majestic-elephant-squad-receives-royal-welcome-at-the-iconic-palace-marking-indias-one-of-the-celebrated-festivals
+- [W] Wikipedia, "Mysore Palace".
+- [V] vayusutha.in, Brahmapuri gate Anjaneya temple: https://vayusutha.in/vs4/temple198.html
+- [KT] Search summary: Karikal Thotti and Brahmapuri gates on the west side.
+- Wikimedia Commons, Category:Gates of the Mysore Palace:
+  - [C1] "Mysore palace gate.jpg" (CC BY-SA 4.0);
+  - [C2] "MysoreMaharajaPalaceEntrance.jpg", Ravikiran Kaja (CC BY-SA 2.5);
+  - [C3] "Mysuru Palace - North Gates - 3.jpg" and [C4] "- 2.jpg" (CC BY-SA 4.0).
+- [2M] 2M Technology, event screening queue optimisation:
+  https://www.2mtechnology.net/event-screening-queue-optimization/
+- [PB] PeoplesBank Arena metal detector RFP answers:
+  https://www.peoplesbankarena.com/assets/doc/PeoplesBank-Arena-Response-to-Questions-Metal-Detector-RFP-41177e6c70.pdf
+
 ## 6. Gaps the scene must state as assumptions
 
 - Clear width of each gate, and which gates are open for entry and for exit on Jamboo Savari day.

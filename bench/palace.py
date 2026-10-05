@@ -2,6 +2,7 @@
 
     python -m bench.palace --seats 48000 --plan nearest
     python -m bench.palace --seats 4000 --minutes 20 --tag flowcheck
+    python -m bench.palace --mode entry --seats 48000 --service 600   # arrival through screening
 
 Motion is sim.run's model (goal-seek plus separation, SEP_R, SEP_K, DT) with the cell-list
 separation, plus bodies of radius BODY that may not overlap (position projection; velocity is
@@ -25,6 +26,8 @@ import numpy as np
 from sim.neighbours import local_density, resolve, separation, weidmann
 from sim.run import DT, SEP_K, SEP_R
 from sim.scenes import Palace
+from sim.site import APPROACH
+from sim.site import RES as RES_
 from sim.site import Site
 from sim.state import Agents
 
@@ -35,9 +38,9 @@ RHO_R = 1.0  # metres, radius of the disc the local walking density is measured 
 FRUIN_E, FRUIN_F = 1 / 0.93, 1 / 0.46  # persons per m2 above which walkway LoS is E, F
 
 
-def step(a, sc, frame, active):
+def step(a, sc, frame, active, rng=None, dt=DT):
     prev = a.pos.copy()
-    mv = np.flatnonzero((sc.k > 0) & ~sc.done)
+    mv = np.flatnonzero(sc.moving())
     if mv.size:
         sep = separation(a.pos, SEP_R, active)[mv]
         d = a.goal[mv] - a.pos[mv]
@@ -49,11 +52,11 @@ def step(a, sc, frame, active):
         v = a.vel[mv] + 0.2 * (desired + SEP_K * sep - a.vel[mv])
         sp = np.sqrt(np.einsum("ij,ij->i", v, v))
         v *= np.minimum(1.0, 1.5 * a.speed[mv] * slow / np.maximum(sp, 1e-6))[:, None]
-        a.pos[mv] += v * DT
-        a.pos[:] = resolve(a.pos, BODY, active, sc.k == 0, iters=6)
+        a.pos[mv] += v * dt
+        a.pos[:] = resolve(a.pos, BODY, active, sc.fixed(), iters=6)
     sc.constrain(a, prev)
-    a.vel[mv] = (a.pos[mv] - prev[mv]) / DT
-    sc.after_step(a, frame, None)
+    a.vel[mv] = (a.pos[mv] - prev[mv]) / dt
+    sc.after_step(a, frame, rng)
 
 
 def measured_rates(tag):
@@ -68,11 +71,11 @@ def measured_rates(tag):
 
 
 def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes=90.0, tag=None, seed=0,
-        rates_from=None):
+        rates_from=None, open_gates=None):
     rng = np.random.default_rng(seed)
-    site0 = Site(gardens_walkable=gardens)
+    site0 = Site(gardens_walkable=gardens, open_gates=open_gates)
     widths = {g["key"]: g["width"] * width_scale for g in site0.gates}
-    site = site0 if width_scale == 1.0 else Site(gardens_walkable=gardens, widths=widths)
+    site = site0 if width_scale == 1.0 else Site(gardens_walkable=gardens, widths=widths, open_gates=open_gates)
     rates = measured_rates(rates_from) if plan == "measured" else None
     sc = Palace(site=site, plan=plan, waves=waves, rates=rates)
     a = Agents(seats)
@@ -84,8 +87,7 @@ def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes
     frames = int(minutes * 60 / DT)
     f = 0
     for f in range(frames):
-        active = ~sc.done
-        step(a, sc, f, active)
+        step(a, sc, f, sc.bodies())
         if f % 30 == 0:
             walk = np.flatnonzero((sc.k > 0) & ~sc.done)
             if walk.size:
@@ -144,9 +146,96 @@ def run(seats, plan="nearest", waves=0.0, width_scale=1.0, gardens=True, minutes
     return tag
 
 
+def run_entry(seats, plan="nearest", window=120.0, peak=45.0, service=600.0, lanes_per_m=1 / 1.5,
+              width_scale=1.0, open_gates=None, extra=60.0, fps=15, tag=None, seed=0, rates_from=None):
+    """Pass holders arriving through screening to their seats; frame 0 is the gates opening."""
+    rng = np.random.default_rng(seed)
+    site0 = Site(open_gates=open_gates)
+    site = site0 if width_scale == 1.0 else Site(open_gates=open_gates,
+                                                  widths={g["key"]: g["width"] * width_scale for g in site0.gates})
+    rates = measured_rates(rates_from) if plan == "measured" else None
+    sc = Palace(site=site, plan=plan, rates=rates, mode="entry", window=window, peak=peak,
+                service=service, lanes_per_m=lanes_per_m, fps=fps)
+    a = Agents(seats)
+    t0 = time.perf_counter()
+    sc.spawn(a, rng)
+    dt = 1.0 / fps
+    nx, ny = int(np.ceil(site.size[0] / CELL)), int(np.ceil(site.size[1] / CELL))
+    zone_cell = np.zeros((nx, ny), bool)
+    zc = np.argwhere(site.zone)
+    zone_cell[np.minimum(zc[:, 0] * RES_ // CELL, nx - 1).astype(int), np.minimum(zc[:, 1] * RES_ // CELL, ny - 1).astype(int)] = True
+    peak_d = np.zeros((nx, ny))
+    over_e = over_f = 0.0
+    qmax = {k: 0 for k in site.open}   # held in the gate passage, waiting for a lane
+    wmax = {k: 0 for k in site.open}   # still outside, in the gate's approach zone
+    frames = int((window + extra) * 60 * fps)
+    srng = np.random.default_rng(seed + 1)
+    f = 0
+    seated_at_start = None
+    for f in range(frames):
+        step(a, sc, f, sc.bodies(), srng, dt)
+        if f % fps == 0:
+            outside = np.flatnonzero(sc.phase == 1)
+            in_zone = outside[site.walkable(a.pos[outside], site.zone)] if outside.size else outside
+            for k in site.open:
+                qmax[k] = max(qmax[k], len(sc.queue[k]))
+                wmax[k] = max(wmax[k], int((sc.gate[in_zone] == k).sum()))
+            out = np.flatnonzero((sc.phase >= 1) & (sc.phase <= 3))
+            if out.size:
+                ij = np.floor(a.pos[out] / CELL).astype(np.int64)
+                ok = (ij[:, 0] >= 0) & (ij[:, 1] >= 0) & (ij[:, 0] < nx) & (ij[:, 1] < ny)
+                h = np.zeros((nx, ny))
+                np.add.at(h, (ij[ok, 0], ij[ok, 1]), 1.0 / CELL**2)
+                np.maximum(peak_d, h, out=peak_d)
+                over_e += float(((h > FRUIN_E) & zone_cell).sum())
+                over_f += float(((h > FRUIN_F) & zone_cell).sum())
+        if f == sc.t_start:
+            seated_at_start = int((sc.phase == 4).sum())
+        if (sc.phase == 4).all() and f >= sc.t_start:
+            break
+    wall = time.perf_counter() - t0
+    if seated_at_start is None:
+        seated_at_start = int((sc.phase == 4).sum())
+    keys = [g["key"] for g in site.gates]
+    tag = tag or f"entry_s{seats}_{plan}_svc{service:g}_x{width_scale:g}"
+    OUT.mkdir(parents=True, exist_ok=True)
+    scr = np.array(sc.screened, np.int64).reshape(-1, 4)
+    np.savetxt(OUT / f"{tag}_screened.csv", scr, fmt="%d", delimiter=",", header="agent,gate,joined,released", comments="")
+    np.savez_compressed(OUT / f"{tag}_density.npz", peak=peak_d, cell=CELL)
+    to_min = 1.0 / (60.0 * fps)
+    lines = [f"palace entry {tag}: {seats} pass holders, plan {plan}, arrivals over {window:g} min (mode {peak:g} min "
+             f"before the start), screening {service:g}/h per lane, {1 / lanes_per_m:.1f} m of gate per lane, gate widths "
+             f"x{width_scale:g}, seed {seed}; {f + 1} frames at {fps} fps in {wall:.0f} s wall",
+             f"seated when the procession starts: {seated_at_start}/{seats} ({100 * seated_at_start / seats:.1f}%); "
+             f"all seated {'%.1f min after the start' % ((max(t for _, t in sc.seated_at) - sc.t_start) * to_min) if (sc.phase == 4).all() else 'NOT within the run'}"]
+    for k in site.open:
+        g = site.gates[k]
+        m = scr[:, 1] == k
+        if not m.any():
+            lines.append(f"  {keys[k]:7s} {g['width']:4.1f} m, {sc.lanes[k]} lanes: nobody assigned")
+            continue
+        wait = (scr[m, 3] - sc.t_arrive[scr[m, 0]]) * to_min
+        lines.append(f"  {keys[k]:7s} {g['width']:4.1f} m, {sc.lanes[k]} lanes ({sc.lanes[k] * service / 60:.0f}/min): "
+                     f"{m.sum():6d} screened; at most {qmax[k]:5d} at the gate line and {wmax[k]:5d} more in the approach zone; "
+                     f"arrival to screened median {np.median(wait):5.1f} p95 {np.percentile(wait, 95):5.1f} max {wait.max():5.1f} min")
+    lines.append(f"queue spilling beyond the {APPROACH:g} m approach zones (waiting in the street): at most {sc.spill_max}")
+    lines.append(f"walkers put back on their route after a 5 s stall: {sc.snaps}")
+    lines.append(f"outside the gates (approach zones): peak {peak_d[zone_cell].max():.2f} persons/m2 in a {CELL:g} m cell; "
+                 f"{over_e / 1e3:.1f}k cell-s above Fruin E, {over_f / 1e3:.1f}k above F")
+    (OUT / f"{tag}.txt").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return tag
+
+
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["egress", "entry"], default="egress")
     p.add_argument("--seats", type=int, default=48000)
+    p.add_argument("--service", type=float, default=600.0, help="entry: persons per hour per screening lane")
+    p.add_argument("--lane-m", type=float, default=1.5, help="entry: metres of gate clear width per lane")
+    p.add_argument("--window", type=float, default=120.0, help="entry: minutes of arrivals before the start")
+    p.add_argument("--peak", type=float, default=45.0, help="entry: most arrivals this many minutes before the start")
+    p.add_argument("--open", help="comma list of open gate keys (default: the spectator gates)")
     p.add_argument("--plan", choices=["nearest", "balanced", "measured"], default="nearest")
     p.add_argument("--rates-from", help="tag of an earlier run whose sustained gate rates the 'measured' plan uses")
     p.add_argument("--waves", type=float, default=0.0, help="seconds between block releases (0: all at once)")
@@ -158,7 +247,12 @@ def main():
     a = p.parse_args()
     if a.plan == "measured" and not a.rates_from:
         p.error("--plan measured needs --rates-from")
-    run(a.seats, a.plan, a.waves, a.width_scale, not a.no_lawns, a.minutes, a.tag, a.seed, a.rates_from)
+    if a.mode == "entry":
+        run_entry(a.seats, a.plan, a.window, a.peak, a.service, 1.0 / a.lane_m, a.width_scale,
+                  a.open.split(",") if a.open else None, tag=a.tag, seed=a.seed, rates_from=a.rates_from)
+        return
+    run(a.seats, a.plan, a.waves, a.width_scale, not a.no_lawns, a.minutes, a.tag, a.seed, a.rates_from,
+        a.open.split(",") if a.open else None)
 
 
 if __name__ == "__main__":

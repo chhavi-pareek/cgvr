@@ -20,12 +20,23 @@ def _site():
     return Site()
 
 
-def test_open_gates_are_the_public_ones():
+def test_open_gates_are_the_spectator_gates():
     st = _site()
-    assert {st.gates[k]["key"] for k in st.open} == {g["key"] for g in st.raw["gates"] if g["public"]}
+    assert {st.gates[k]["key"] for k in st.open} == {g["key"] for g in st.raw["gates"] if g["role"] == "entry+exit"}
+    assert {"east", "south", "west_n", "west_s"} == {st.gates[k]["key"] for k in st.open}
 
 
-@pytest.mark.parametrize("k", [0, 2, 3, 4, 5])
+def test_every_open_gate_has_an_approach_zone_with_a_rim():
+    st = _site()
+    for k in st.open:
+        at = st.gates[k]["at"]
+        rim = np.argwhere(st.sink[k])
+        assert len(rim) > 20
+        d = np.hypot((rim[:, 0] + 0.5) * RES - at[0], (rim[:, 1] + 0.5) * RES - at[1])
+        assert d.min() > 30.0  # leaving means getting clear of the gate, not just through it
+
+
+@pytest.mark.parametrize("k", [1, 4, 5, 6])
 def test_every_open_gate_is_reachable_from_the_forecourt(k):
     st = _site()
     if k not in st.open:
@@ -114,7 +125,7 @@ def test_palace_seats_follow_the_layout_assumptions():
 
 
 def test_measured_plan_evens_out_the_estimated_finish():
-    sc = Palace(site=_site(), plan="measured", rates={0: 350.0, 2: 122.0, 3: 132.0, 4: 278.0, 5: 84.0})
+    sc = Palace(site=_site(), plan="measured", rates={1: 400.0, 4: 180.0, 5: 120.0, 6: 90.0})
     corners = sc.blocks(60)
     bw, bh = Palace.ROWS * Palace.ROW, Palace.COLS * Palace.SEAT
     starts = np.concatenate([corners + (bw / 2, -Palace.AISLE / 2), corners + (bw / 2, bh + Palace.AISLE / 2)])
@@ -122,3 +133,28 @@ def test_measured_plan_evens_out_the_estimated_finish():
     seats = np.array([(gate == k).sum() * 400 / sc.rates[k] for k in sc.rates])
     assert set(np.unique(gate)) <= set(sc.rates)
     assert seats.max() / seats.min() < 1.3  # queue minutes per gate within 30% of each other
+
+
+def test_palace_entry_everyone_is_screened_once_and_seated():
+    from bench.palace import step
+
+    st = _site()
+    sc, a = Palace(site=st, mode="entry", window=3.0, peak=1.5, fps=15), Agents(200)
+    sc.spawn(a, np.random.default_rng(4))
+    srng = np.random.default_rng(5)
+    for f in range(15 * 60 * 20):
+        step(a, sc, f, sc.bodies(), srng, 1 / 15)
+        live = sc.moving()
+        assert st.walkable(a.pos[live]).all()
+        if (sc.phase == 4).all():
+            break
+    assert (sc.phase == 4).all()
+    scr = np.array(sc.screened)
+    assert len(scr) == 200 and len(np.unique(scr[:, 0])) == 200
+    # no gate ever screens faster than its lanes allow (one second's tokens of burst)
+    for k in st.open:
+        rel = np.sort(scr[scr[:, 1] == k, 3])
+        if len(rel) > 1:
+            per_s = sc.lanes[k] * sc.service / 3600.0
+            span = (rel[-1] - rel[0]) / 15.0
+            assert len(rel) - 1 <= per_s * span + sc.lanes[k] + 1
