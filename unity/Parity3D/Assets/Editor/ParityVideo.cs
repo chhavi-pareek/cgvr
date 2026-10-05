@@ -82,6 +82,31 @@ public static class ParityVideo
         par.ApplyCalibration(floor, CrowdWorld.CalibratedTheta);
         var ps = (PalaceScene)par.Scene;
         var bs = (PalaceScene)bas.Scene;
+        if (Arg("-dry") != null || Array.IndexOf(Environment.GetCommandLineArgs(), "-dry") >= 0)
+        {
+            // no frames: step PARITY alone and log the exits per gate every simulated minute
+            bas.Dispose();
+            int perMin = Mathf.RoundToInt(60f / CrowdWorld.Dt), lim = Mathf.RoundToInt((PalaceScene.ReleaseSeconds + maxMin * 60f) / CrowdWorld.Dt);
+            var tw = System.Diagnostics.Stopwatch.StartNew();
+            for (int st = 0; st < lim && ps.Out < n; st++)
+            {
+                Orbit(cam, spec, st * CrowdWorld.Dt / 120f, out var xz, out float yaw);
+                var pm = cam.projectionMatrix;
+                par.SetView(0, pm * cam.worldToCameraMatrix, pm.m00, pm.m11);
+                par.Step(xz, yaw, par.StepMs);
+                if (st % perMin == 0 || ps.Out == n)
+                {
+                    var gs = new StringBuilder();
+                    foreach (int g in ps.Site.Open) gs.Append(ps.Site.Gates[g].Key).Append(' ').Append(ps.ExitsByGate[g]).Append("  ");
+                    Debug.Log($"[ParityVideo] dry t={(st * CrowdWorld.Dt - PalaceScene.ReleaseSeconds) / 60f:F1} min  out {ps.Out}/{n}  {gs}" +
+                              $" off-walk {ps.WallViolations(par)}  wall {tw.Elapsed.TotalSeconds:F0} s");
+                }
+            }
+            par.Dispose();
+            UnityEngine.Object.DestroyImmediate(cam.gameObject);
+            UnityEngine.Object.DestroyImmediate(set);
+            return;
+        }
 
         var half = new Texture2D(W / 2, H, TextureFormat.RGB24, false);
         var full = new Texture2D(W, H, TextureFormat.RGB24, false);

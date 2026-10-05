@@ -28,11 +28,57 @@ LEVELS = [(1 / 1.39, "D  (0.72-1.08 /m²)", "#86b6ef"), (1 / 0.93, "E  (1.08-2.1
           (1 / 0.46, "F  (over 2.17 /m²)", "#104281")]
 PLAN = {"nearest": "Everyone to the nearest gate", "balanced": "Seats shared by gate width",
         "measured": "Seats shared by measured gate rates"}
-NAME = {"north": "North", "south": "South (Varaha)", "east_n": "East side, N", "east_s": "East side, S",
-        "west_n": "West"}
+NAME = {"north": "North (Jayarama, Balarama)", "south": "Varaha (south)", "east": "Jayamarthanda (east)",
+        "east_n": "East side, N", "east_s": "East side, S", "west_n": "Brahmapuri? (west)",
+        "west_s": "Karikal Thotti? (west)"}
+
+
+def entry_panel(ax, st, tag):
+    """Arrival through screening: peak crowd outside and inside, and per gate who passed and
+    how long it took from arriving at the approach zone to clearing screening."""
+    d = np.load(LOGS / f"{tag}_density.npz")
+    peak, cell = d["peak"], float(d["cell"])
+    scr = np.loadtxt(LOGS / f"{tag}_screened.csv", delimiter=",", skiprows=1)
+    txt = (LOGS / f"{tag}.txt").read_text().splitlines()
+    ext = (0, st.shape[0] * RES, 0, st.shape[1] * RES)
+    base = np.where(st.building, 2, np.where(st.walk, 1, 0))
+    ax.imshow(base.T, origin="lower", extent=ext, cmap=ListedColormap([SURFACE, GROUND, BUILDING]),
+              vmin=0, vmax=2, interpolation="nearest")
+    lvl = np.zeros(peak.shape)
+    for k, (lo, _, _) in enumerate(LEVELS):
+        lvl[peak > lo] = k + 1
+    lvl = np.ma.masked_where(lvl == 0, lvl)
+    ax.imshow(lvl.T, origin="lower", extent=(0, peak.shape[0] * cell, 0, peak.shape[1] * cell),
+              cmap=ListedColormap([c for _, _, c in LEVELS]), vmin=0.5, vmax=3.5, interpolation="nearest")
+    for line in txt:
+        line = line.strip()
+        for k in st.open:
+            g = st.gates[k]
+            if not line.startswith(g["key"] + " "):
+                continue
+            m = scr[:, 1] == k
+            east = g["at"][0] > 0.6 * st.size[0]
+            p95 = line.split("p95")[1].split()[0] if "p95" in line else "-"
+            lanes = line.split("m, ")[1].split(" lanes")[0] if " lanes" in line else "?"
+            ax.plot(*g["at"], marker="^", ms=8, color=INK, mec=SURFACE, mew=1.5)
+            ax.annotate(f"{NAME.get(g['key'], g['key'])}, {g['width']:g} m, {lanes} lanes\n{int(m.sum()):,} in, 95% within {p95} min",
+                        g["at"], xytext=(-8 if east else 8, 6), textcoords="offset points", fontsize=8, color=INK,
+                        ha="right" if east else "left", path_effects=[patheffects.withStroke(linewidth=3, foreground=SURFACE)])
+    seated = next((l for l in txt if l.startswith("seated when")), "")
+    pct = seated.split("(")[1].split(")")[0] if "(" in seated else "?"
+    ax.set_title(f"Arrival through screening: {pct} seated when the procession starts", fontsize=11, color=INK, loc="left")
+    ax.set_xlim(10, st.size[0] - 40)
+    ax.set_ylim(10, st.size[1] - 10)
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_visible(False)
 
 
 def panel(ax, st, tag):
+    if (LOGS / f"{tag}_screened.csv").exists():
+        return entry_panel(ax, st, tag)
     d = np.load(LOGS / f"{tag}_density.npz")
     peak, cell = d["peak"], float(d["cell"])
     ex = np.loadtxt(LOGS / f"{tag}_exits.csv", delimiter=",", skiprows=1)
@@ -82,13 +128,14 @@ def main(tags):
     seats = set()
     for ax, tag in zip(np.atleast_1d(axes), tags):
         panel(ax, st, tag)
-        seats.add(len(np.loadtxt(LOGS / f"{tag}_exits.csv", delimiter=",", skiprows=1)))
+        f = LOGS / f"{tag}_exits.csv"
+        seats.add(len(np.loadtxt(f if f.exists() else LOGS / f"{tag}_screened.csv", delimiter=",", skiprows=1)))
     fig.subplots_adjust(bottom=0.12, wspace=0.02)
     fig.legend(handles=[Patch(color=c, label=lab) for _, lab, c in LEVELS], loc="lower center", ncol=3,
                frameon=False, fontsize=9, title="Peak walking crowd, Fruin level of service", title_fontsize=9,
                labelcolor=MUTED, bbox_to_anchor=(0.5, 0.025))
-    fig.text(0.5, -0.01, f"Mysore Palace grounds, {'/'.join(f'{n:,}' for n in sorted(seats))} people, all released at once. "
-             "Gate widths and seat layout are assumptions: compare the plans, not the absolute minutes. "
+    fig.text(0.5, -0.01, f"Mysore Palace grounds, {'/'.join(f'{n:,}' for n in sorted(seats))} people. Gate widths are estimated "
+             "from photographs or assumed (docs/site/mysore_palace.md, 5b); compare the plans, not the absolute minutes. "
              "Map (c) OpenStreetMap contributors.", fontsize=7.5, color=MUTED, ha="center")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(OUT, dpi=150, bbox_inches="tight", facecolor=SURFACE)

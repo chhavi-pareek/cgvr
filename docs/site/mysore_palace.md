@@ -348,7 +348,7 @@ is the other reading.
   - everyone out in 27.1 min (T50 11.9 min, T95 24.9 min);
   - south gate: 6,800 people;
   - the slowest walkers' median exit is 15.4 min, against 11.6 min for everyone else.
-- **48,000 seats, everyone released at once** (1 seed each; logs in `bench/logs/palace/`; figure
+- **v1 gate set, superseded by the gate audit:** 48,000 seats, everyone released at once (1 seed each; logs in `bench/logs/palace/`; figure
   `python -m figures.palace`, slide copy `docs/site/palace_egress_48000.png`):
 
   | Gate plan | Half out | 95% out | All out | Crowd time at Fruin F | Slowest walkers, median |
@@ -436,6 +436,29 @@ is the other reading.
     through door-frame metal detectors after frisking [Deccan Herald]. The model treats Jayamarthanda
     as closed, uses the north gate (the procession's exit) for spectators, and has only one west gate.
   - Gate widths are not published anywhere found so far.
+- **Gate work (2026-10-05), step by step.**
+  - **1. Audit:** section 5b.
+  - **2. Gates in the model:** names, roles and estimated widths now come from the audit.
+    - The spectator gates are Jayamarthanda (east), Varaha (south) and both west gates.
+    - The north gates carry the procession and are closed to spectators unless a scenario opens them.
+    - The two east forecourt side openings are in no report, so they are closed by default.
+    - Earlier results used a corrected-away gate set: north open, Jayamarthanda shut, one west gate.
+      They are kept above, marked v1.
+  - **3. Arrival through screening** (`python -m bench.palace --mode entry`):
+    - Pass holders arrive at the rim of their gate's approach zone. Arrivals are triangular over
+      120 min with the mode 45 min before the start (ASSUMED).
+    - They queue, and are screened on stepping into the gate passage: one lane per 1.5 m of
+      width, 600 per hour per lane (section 5b). The person furthest forward goes next.
+    - They then walk to their seat. The seated lean back to let late arrivals along their row.
+    - When the rim is crowded (over 3 persons/m²), arrivals wait in the street beyond the model,
+      and that spill is reported.
+    - A screened walker the crowd pins against a wall for 5 s is put back on its route line, as
+      invariant 4 binds a position to the core's route. The count is reported.
+  - **4. Outside the gates:** each open gate has an approach zone, the open ground within 40 m outside
+    it (outside buildings excluded). Leaving means reaching that zone's rim, not just passing the
+    arch.
+  - **5. Engine:** the export carries the audited gates and zones. Closed gates are drawn with their
+    grille shut. The engine plan defaults to "balanced" until rates are measured for the new gate set.
 - Step 4 (calibration through the tiered pipeline) is moved after the checkpoint. It needs the
   invariant core generalised to routes with more than three waypoints and one capacity counter
   per gate, which changes code under every existing scene.

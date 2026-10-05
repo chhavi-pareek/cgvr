@@ -24,11 +24,12 @@ namespace Parity
         public const float StallSeconds = 5f, StallMetres = 0.5f;
         public static float ReleaseSeconds = 8f;   // seated, then the procession leaves
         public static float ResetSeconds = 15f;    // after the last one is out
-        public static PalacePlan Plan = PalacePlan.Measured;
+        public static PalacePlan Plan = PalacePlan.Balanced;
         /// <summary>Sustained persons per minute per gate, measured at 48,000 seats by
-        /// bench/palace.py (s48000_balanced_w0_x1); the Measured plan shares seats by these.</summary>
-        public static readonly Dictionary<string, float> MeasuredRates = new Dictionary<string, float>
-            { { "north", 350f }, { "east_s", 122f }, { "east_n", 132f }, { "south", 278f }, { "west_n", 84f } };
+        /// bench/palace.py; the Measured plan shares seats by these. Empty until the run with the
+        /// audited gates (docs/site/mysore_palace.md, 5b) has measured them -- the earlier rates
+        /// belonged to a gate set the audit corrected.</summary>
+        public static readonly Dictionary<string, float> MeasuredRates = new Dictionary<string, float>();
 
         public PalaceSite Site { get; private set; }
         Vector2[] seat, rowEnd;
@@ -141,7 +142,8 @@ namespace Parity
                 }
                 return outG;
             }
-            // Measured: sim/scenes.py Palace._by_rate
+            // Measured: sim/scenes.py Palace._by_rate (nearest gate until rates are measured)
+            if (MeasuredRates.Count == 0) return outG;
             foreach (int s in byBest)
             {
                 int pick = -1;

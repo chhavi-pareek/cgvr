@@ -225,6 +225,10 @@ namespace Parity
             Prim(PrimitiveType.Cube, new Vector3(mid.x, h + 0.6f, mid.y), new Vector3(1.4f, 1.2f, 2f * half + 1.2f), stone, true,
                  Quaternion.LookRotation(new Vector3(along.x, 0f, along.y).normalized, Vector3.up));
             Ball(new Vector3(mid.x, h + 1.9f, mid.y), new Vector3(1.6f, 2.0f, 1.6f), cap);
+            // a gate the scenario keeps closed is a wall to the sim, so show its grille shut
+            if (!g.Open)
+                Prim(PrimitiveType.Cube, new Vector3(mid.x, 1.6f, mid.y), new Vector3(0.15f, 3.2f, 2f * half), stone, true,
+                     Quaternion.LookRotation(new Vector3(along.y, 0f, -along.x).normalized, Vector3.up));
         }
     }
 }
