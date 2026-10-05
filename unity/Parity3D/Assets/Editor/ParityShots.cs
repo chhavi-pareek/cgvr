@@ -121,7 +121,10 @@ public static class ParityShots
             cam.transform.position = foc + new Vector3(-150f, 230f, -210f);
             cam.transform.LookAt(foc + new Vector3(0f, 0f, 30f));
             cam.fieldOfView = 50f;
+            float far = cam.farClipPlane;
+            cam.farClipPlane = 6000f;
             Grab(cam, fx, rend, par, hdr, ldr, tex);
+            cam.farClipPlane = far;
             File.WriteAllBytes(Path.Combine(dir, $"{spec.Name}_aerial.png"), tex.EncodeToPNG());
         }
         // up close: from the orbit position, looking at the ground 10 m ahead, at a longer lens
