@@ -502,7 +502,14 @@ class Palace:
         every = int(round(self.STALL_S * self.fps))
         if frame % every == 0:
             moved = np.linalg.norm(a.pos[live] - self._mark[live], axis=1)
-            self.follow[live[(moved < self.STALL_M) & (frame >= self.t_release[live] + every)]] = True
+            stalled = live[(moved < self.STALL_M) & (frame >= self.t_release[live] + every)]
+            # already following the field and still stalled (a pocket by a narrow gate): one cell on
+            again = stalled[self.follow[stalled]]
+            if again.size:
+                q = a.pos[again] + 0.5 * self.site.steer(a.pos[again], self.gate[again])
+                ok = self.site.walkable(q)
+                a.pos[again[ok]] = q[ok]
+            self.follow[stalled] = True
             self._mark[live] = a.pos[live]
         fl = live[self.follow[live]]
         if fl.size:

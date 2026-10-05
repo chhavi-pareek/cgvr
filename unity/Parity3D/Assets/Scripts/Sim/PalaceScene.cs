@@ -256,7 +256,17 @@ namespace Parity
                 }
                 if (check && frame >= releaseFrame + every)
                 {
-                    if ((w.Pos[i] - mark[i]).magnitude < StallMetres) follow[i] = true;
+                    if ((w.Pos[i] - mark[i]).magnitude < StallMetres)
+                    {
+                        // already following the field and still stalled (a pocket by a narrow
+                        // gate): one cell on along it
+                        if (follow[i])
+                        {
+                            var q = w.Pos[i] + 0.5f * Site.Steer(w.Pos[i], gate[i]);
+                            if (Site.Walkable(q)) { w.Pos[i] = q; w.CoreP[i] = q; }
+                        }
+                        follow[i] = true;
+                    }
                     mark[i] = w.Pos[i];
                 }
                 if (follow[i])
