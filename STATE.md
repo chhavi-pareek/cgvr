@@ -173,6 +173,24 @@
   - Model choice: qwen2.5:1.5b was tried first and is nearly degenerate (only ever "queue" or "platform", the first two options -- position bias -- and barely sensitive to time pressure; a distilled surrogate imitates it to 0.04 nats, so there is nothing to ration). 7B uses four actions contextually and is confident (mean entropy 0.10 nats), which makes surrogate drift large and rationing meaningful. Its quirks (a parent who already holds a ticket joins the queue with probability 1.00) are the reference by definition; fidelity is measured TO it.
 
 ## IN PROGRESS
+- **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
+  site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
+  stays on the system and method. Sourced data, framing and build plan are in
+  `docs/site/mysore_palace.md`; every number there is tagged PUB, LIT, DER or GAP. Built so far:
+  - `tools/osm_site.py`: OSM extract to `sim/data/mysore_palace_site.json`, with 7 gates where paths
+    cross the compound outline. Gate widths are ASSUMED.
+  - `sim/site.py`: 0.5 m walkability grid, one Dijkstra field per gate, string-pulled routes, a
+    flow-field fallback and a wall constraint.
+  - `sim/scenes.Palace`: seat blocks, release, two gate plans (nearest, balanced).
+  - `sim/neighbours.py`: numba cell-list separation, non-overlap body push, local density and
+    Weidmann's speed-density relation.
+  - `bench/palace.py`: exit time, flow per gate, Fruin crowding.
+  - `tests/test_site.py`: 12 tests.
+
+  The simulator's soft model fails the gate-flow check: 590 persons/m/min, 19 persons/m². Bodies
+  plus Weidmann bring the peak to 54-57 persons/m/min, against Weidmann's 58 at 1.06 m/s, so read
+  results as comparisons. Not yet in the tiered pipeline: that needs Core with more than 3 waypoints
+  and per-gate capacity.
 - **Paper round (2026-09-28): stronger baselines, statistics, and what the ledger actually does.** `bench/llm_agents.py` now runs 10 seeds with 95% t-intervals and seed-paired Wilcoxon tests against PARITY, and two new conditions (`llm/schedule.py`): `cascade`, the LLM-cascade rule (FrugalGPT and successors: escalate the least-confident surrogate decisions until the budget is spent), and `parity_nocap`, PARITY's priority with the ledger off. Log `bench/logs/llm_agents_v4.log`. Station, 7B, 30 min, cap 10, mean over 10 seeds (worst/cap; drift nats/agent-h; steady from 5 min):
 
   | N | PARITY | parity_nocap | cascade | view-LOD | round-robin |
