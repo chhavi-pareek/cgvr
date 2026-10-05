@@ -300,7 +300,7 @@ is the other reading.
   - south gate: 6,800 people;
   - the slowest walkers' median exit is 15.4 min, against 11.6 min for everyone else.
 - **48,000 seats, everyone released at once** (1 seed each; logs in `bench/logs/palace/`; figure
-  `python -m figures.palace`):
+  `python -m figures.palace`, slide copy `docs/site/palace_egress_48000.png`):
 
   | Gate plan | Half out | 95% out | All out | Crowd time at Fruin F | Slowest walkers, median |
   |---|---|---|---|---|---|
