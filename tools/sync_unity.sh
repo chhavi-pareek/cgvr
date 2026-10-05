@@ -23,6 +23,9 @@ rsync -a --delete \
       "$REPO/unity/Parity3D/Assets/Shaders/" "$PROJ/Assets/Shaders/"
 rsync -a --delete \
       "$REPO/unity/Parity3D/Assets/Editor/" "$PROJ/Assets/Editor/"
+# data the scenes read at run time (the palace site: tools/export_site_unity.py)
+rsync -a --delete --exclude '*.meta' \
+      "$REPO/unity/Parity3D/Assets/StreamingAssets/" "$PROJ/Assets/StreamingAssets/"
 
 [ "${1:-}" = "--no-compile" ] && { echo "synced; the open editor recompiles when it regains focus"; exit 0; }
 

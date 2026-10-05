@@ -1,7 +1,7 @@
 // Frame-time benchmark, headless on the GPU: the proposal's H1 in the engine.
 //
 //   Unity -batchmode -quit -projectPath <p> -executeMethod ParityFrameBench.Run
-//   ParityBench.exe -batchmode -parityBench [-out <dir>] [-tag <name>] ...   (standalone build)
+//   ParityBench.exe -batchmode -parityBench [-out <dir>] [-tag <name>] [-scene palace] ...   (standalone build)
 //
 // Every frame is timed end to end -- crowd step, allocator, draw submission, render, and a
 // 1-pixel readback that waits for the GPU -- for the MassLOD baseline with its shipped parameters
@@ -67,10 +67,17 @@ public static class ParityFrameBench
             // quality against frame time: PARITY at several target frame times, MassLOD at several
             // scalings of its per-level caps (the knob a developer turns to hit a frame time)
             // -profile low: the same sweep on the low profile (portability); -sizes a,b: crowd sizes
+            // -scene palace: any SceneSpec by name (default the plaza, which every result so far used)
+            var kind = SceneKind.Plaza;
+            if (Arg("-scene") is string sn)
+                foreach (SceneKind k in Enum.GetValues(typeof(SceneKind)))
+                    if (SceneSpec.Get(k).Name == sn) kind = k;
+            // the palace crowd walks from the start: a seated crowd would time nothing but the hold
+            if (kind == SceneKind.Palace) PalaceScene.ReleaseSeconds = 0.5f;
             if (Array.IndexOf(Environment.GetCommandLineArgs(), "-profileOnly") >= 0)
                 Sweep(SceneKind.Plaza, Desktop, sb, new[] { 8000 }, new[] { 33.3f }, new[] { 1f }, only: true);
             else
-                Sweep(SceneKind.Plaza, prof, sb, sizes,
+                Sweep(kind, prof, sb, sizes,
                       Arg("-targets") is string tg ? Array.ConvertAll(tg.Split(','), v => float.Parse(v, CultureInfo.InvariantCulture))
                                                    : new[] { 12f, 14f, 17f, 20f, 21.5f, 23f, 26f, 30f, 33.3f, 36f, 40f },
                       new[] { 0.25f, 0.5f, 1f, 2f, 4f, 8f });
@@ -565,7 +572,7 @@ public static class ParityFrameBench
 
     static void Orbit(Camera c, SceneSpec s, float t, out Vector2 xz, out float yaw)
     {
-        float r = 0.45f * Mathf.Min(s.Size.x, s.Size.y);
+        float r = s.OrbitRadius;
         float ang = t * Mathf.PI * 2f;
         xz = new Vector2(s.Focus.x + r * Mathf.Cos(ang), s.Focus.y + r * Mathf.Sin(ang));
         var look = new Vector3(s.Focus.x, 1.2f, s.Focus.y);

@@ -13,7 +13,7 @@ using UnityEngine.Rendering;
 
 namespace Parity
 {
-    public static class Stage
+    public static partial class Stage
     {
         static Shader env, sign;
         static Font font;
@@ -46,6 +46,7 @@ namespace Parity
             {
                 case SceneKind.Hub: Hub(sun); break;
                 case SceneKind.Corridor: Corridor(sun); break;
+                case SceneKind.Palace: Palace(sun); break;
                 default: Plaza(sun); break;
             }
             RenderSettings.sun = sun;

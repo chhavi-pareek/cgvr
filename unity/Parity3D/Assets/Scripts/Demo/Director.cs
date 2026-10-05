@@ -277,12 +277,13 @@ namespace Parity
             return c;
         }
 
-        /// <summary>bench/camerapaths.py "orbit": radius 0.45 * min(w, h) about the focus point.
+        /// <summary>bench/camerapaths.py "orbit": radius 0.45 * min(w, h) about the focus point
+        /// (the palace's own SceneSpec.Orbit, which is a few hundred metres smaller).
         /// Height is presentation only; the LOD camera is (x, y, yaw), exactly as in Python.</summary>
         void Place(Camera c, float t, out Vector2 camXZ, out float yaw)
         {
             var s = Spec;
-            float r = 0.45f * Mathf.Min(s.Size.x, s.Size.y);
+            float r = s.OrbitRadius;
             float ang = t * Mathf.PI * 2f;
             camXZ = new Vector2(s.Focus.x + r * Mathf.Cos(ang), s.Focus.y + r * Mathf.Sin(ang));
             var look = new Vector3(s.Focus.x, 1.2f, s.Focus.y);

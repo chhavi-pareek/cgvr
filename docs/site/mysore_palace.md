@@ -321,6 +321,30 @@ is the other reading.
     rate. The simulation shows where it fails, at an overloaded nearest gate and a throttled route.
   - These are comparisons under assumed gate widths and layout. Whether the west passages are
     really that narrow should be checked against the site before anyone acts on it.
+- **Step 7, Unity port, done (2026-10-05).**
+  - Data: `tools/export_site_unity.py` writes the grids, gates, seat-block candidates and footprints
+    to `unity/Parity3D/Assets/StreamingAssets/palace/`.
+  - Routing: `Sim/PalaceSite.cs` recomputes the gate fields and routes in C#. The smoke test checks
+    them against Python's: worst field difference 5e-7 m, and all 120 routes are identical. All five
+    fields take 0.9 s.
+  - Scene: `Sim/PalaceScene.cs` holds seat blocks, release, row ends, block-side routes, the three gate
+    plans (default: measured rates), the stall fallback, exits, and a reset loop for the demo. On
+    passing a waypoint the core is re-seated from that waypoint, so a surrogate never cuts a
+    building corner.
+  - Set: `Demo/StagePalace.cs` extrudes every OSM footprint and building part to its mapped height
+    (towers to 40 m; unmapped buildings 7 m, assumed), with domes on the tall parts, the compound
+    wall broken at each gate under an arch, lawns and paving.
+  - Demo and smoke test: there is a "palace" button in the demo HUD. The smoke test passes. With 800
+    people over 2 minutes, nobody stands off walkable ground and everyone stands up and moves toward
+    their gate. PARITY's worst drift is 0.00 (cap 3.95) against the baseline's 356.
+  - Screenshots: `docs/site/palace_unity_split.png` (baseline left, with drift rings; PARITY right)
+    and `palace_unity_aerial.png`, rendered with `ParityShots -shots palace`. At 8,000 people PARITY
+    keeps every agent's behaviour live, where the baseline turns 6,800 into surrogates; worst drift
+    27.4 against 0.00.
+  - The engine moves its crowd with ORCA plus separation, not the Python exit model. The exit-time
+    comparisons above come from `bench/palace.py`. The engine scene is the live, explorable twin
+    that runs PARITY's allocator.
+  - The cap and drift rates are provisional: the concourse's measured ones, until step 4.
 - Step 4 (calibration through the tiered pipeline) is moved after the checkpoint. It needs the
   invariant core generalised to routes with more than three waypoints and one capacity counter
   per gate, which changes code under every existing scene.

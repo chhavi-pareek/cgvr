@@ -232,11 +232,12 @@ namespace Parity
                 d.Budget = (BudgetMode)(((int)d.Budget + 1) % 3);
             y += 26;
             float bw3 = (w - 12) / 3f;
-            string[] sets = { "plaza", "concourse", "corridor" };
-            for (int k = 0; k < 3; k++)
+            string[] sets = { "plaza", "concourse", "corridor", "palace" };
+            float bw4 = (w - 18) / 4f;
+            for (int k = 0; k < sets.Length; k++)
             {
                 bool cur = (int)d.Kind == k;
-                if (GUI.Button(new Rect(x + k * (bw3 + 6), y, bw3, 22), cur ? $"[ {sets[k]} ]" : sets[k]) && !cur)
+                if (GUI.Button(new Rect(x + k * (bw4 + 6), y, bw4, 22), cur ? $"[ {sets[k]} ]" : sets[k]) && !cur)
                     d.PendingScene = k;
             }
             y += 26;

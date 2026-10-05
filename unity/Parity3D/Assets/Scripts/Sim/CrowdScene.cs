@@ -1,4 +1,5 @@
-// The three scenes of sim/scenes.py, ported so the demo can show each one. The geometry and
+// The scenes of sim/scenes.py, ported so the demo can show each one (the palace lives in
+// PalaceScene.cs and PalaceSite.cs). The geometry and
 // the goal logic follow the Python classes; the rates come from each scene's own phase 7
 // calibration (bench/logs/phase7_<scene>_calib.npz), so every scene gets its own cap and its
 // own admission rate exactly as sim/tiered.py builds them:
@@ -13,7 +14,7 @@ using UnityEngine;
 
 namespace Parity
 {
-    public enum SceneKind { Plaza, Hub, Corridor }
+    public enum SceneKind { Plaza, Hub, Corridor, Palace }
 
     public sealed class SceneSpec
     {
@@ -24,6 +25,9 @@ namespace Parity
         public double[] ERate;
         public int DefaultAgents;
         public float CamHeight;
+        /// <summary>Demo orbit radius; 0 is bench/camerapaths.py's 0.45 * min(w, h).</summary>
+        public float Orbit;
+        public float OrbitRadius => Orbit > 0f ? Orbit : 0.45f * Mathf.Min(Size.x, Size.y);
         /// <summary>Where the pixel judge stands and looks: open floor in every set, so the row
         /// of figures it measures is never behind a wall.</summary>
         public Vector2 JudgeAt, JudgeDir;
@@ -59,6 +63,20 @@ namespace Parity
                 DefaultAgents = 260, CamHeight = 11f,
                 JudgeAt = new Vector2(48f, 5f), JudgeDir = new Vector2(1f, 0f),
             },
+            new SceneSpec
+            {
+                // sim/site.py frame: compound corner at (20, 20); size checked against the site
+                // file when PalaceScene loads it. Focus is the seat blocks in front of the palace.
+                Kind = SceneKind.Palace, Name = "palace", Title = "Mysore Palace, Jamboo Savari",
+                Size = new Vector2(755.10f, 561.50f), Focus = new Vector2(320f, 290f),
+                // PROVISIONAL: the concourse's measured rates (closest context mix: queueing and
+                // walking) until the palace has its own phase 7 calibration
+                // (docs/site/mysore_palace.md, build plan step 4)
+                ESur = 0.01315, EMax = 0.06179, ERate = new[] { 0.0201, 0.0106, 0.06179, 0.00399 },
+                DefaultAgents = 8000, CamHeight = 38f, Orbit = 150f,
+                // on the procession lane, which no seat block covers, looking up it to the north gate
+                JudgeAt = new Vector2(302.6f, 397.1f), JudgeDir = new Vector2(0.281f, 0.960f),
+            },
         };
 
         public static SceneSpec Get(SceneKind k) => All[(int)k];
@@ -77,6 +95,7 @@ namespace Parity
             {
                 case SceneKind.Hub: return new HubScene(s);
                 case SceneKind.Corridor: return new CorridorScene(s);
+                case SceneKind.Palace: return new PalaceScene(s);
                 default: return new PlazaScene(s);
             }
         }

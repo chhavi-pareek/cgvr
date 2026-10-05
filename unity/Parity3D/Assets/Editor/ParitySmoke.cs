@@ -114,6 +114,11 @@ public static class ParitySmoke
             failures += Scene(SceneKind.Plaza, 2000, 360);
             failures += Scene(SceneKind.Hub, 800, 3600);
             failures += Scene(SceneKind.Corridor, 260, 3600);
+            failures += PalaceOracle();
+            // one block of 800 released after 1 s; two minutes of walking toward the gates
+            PalaceScene.ReleaseSeconds = 1f;
+            failures += Scene(SceneKind.Palace, 800, 7200);
+            PalaceScene.ReleaseSeconds = 8f;
             failures += Coverage();
             failures += ViewSide();
             failures += Pipelined(1500, 600);
@@ -150,7 +155,8 @@ public static class ParitySmoke
         int wall = 0, outside = 0, nan = 0, maskViol = 0, overBudget = 0;
         float worstAlloc = 0f;
         var exits = new int[2];
-        float r = 0.45f * Mathf.Min(spec.Size.x, spec.Size.y);
+        float r = spec.OrbitRadius;
+        double[] gateDist0 = kind == SceneKind.Palace ? new[] { PalaceGateDistance(worlds[0]), PalaceGateDistance(worlds[1]) } : null;
         for (int f = 0; f < frames; f++)
         {
             float ang = (f / 2400f) * Mathf.PI * 2f;
@@ -169,6 +175,7 @@ public static class ParitySmoke
                     if (w.PrevPos[i].x - p.x > 20f) exits[k]++;
                 }
                 if (kind == SceneKind.Corridor) wall += CorridorScene.WallViolations(w);
+                if (kind == SceneKind.Palace) wall += ((PalaceScene)w.Scene).WallViolations(w);
                 if (w.Mode == Policy.Parity)
                 {
                     if (!w.Last.Infeasible && w.Last.Cost > w.BudgetMs * 1.0001f) overBudget++;
@@ -193,7 +200,19 @@ public static class ParitySmoke
         failures += Check($"{spec.Name} error-mask violations", maskViol, 0);
         failures += Check($"{spec.Name} cap breaches (invariant 3)", par.CapBreaches, 0);
         if (par.MaxDivergence() > par.Cap + 1e-3f) { Err($"{spec.Name} PARITY exceeded its cap"); failures++; }
-        if (kind != SceneKind.Plaza && (exits[0] == 0 || exits[1] == 0))
+        if (kind == SceneKind.Palace)
+        {
+            for (int k = 0; k < 2; k++)
+            {
+                var ps = (PalaceScene)worlds[k].Scene;
+                double d1 = PalaceGateDistance(worlds[k]);
+                Log($"  {(k == 0 ? "baseline" : "PARITY  ")}  still seated {ps.SeatedCount()}, out {ps.Out}, " +
+                    $"mean route distance to the gate {gateDist0[k]:F1} -> {d1:F1} m");
+                failures += Check($"palace {(k == 0 ? "baseline" : "PARITY")} agents still seated after release", ps.SeatedCount(), 0);
+                if (d1 > 0.6 * gateDist0[k]) { Err($"palace: the crowd closed less than 40% of the distance to its gates"); failures++; }
+            }
+        }
+        else if (kind != SceneKind.Plaza && (exits[0] == 0 || exits[1] == 0))
         {
             Err($"{spec.Name}: nobody left the scene, the crowd is stuck");
             failures++;
@@ -201,6 +220,34 @@ public static class ParitySmoke
         if (kind == SceneKind.Hub && queued == 0) { Err("hub: the ticket queue emptied and never refilled"); failures++; }
         foreach (var w in worlds) w.Dispose();
         return failures;
+    }
+
+    /// <summary>Mean field distance from each palace agent still inside to its gate.</summary>
+    static double PalaceGateDistance(CrowdWorld w)
+    {
+        var ps = (PalaceScene)w.Scene;
+        double sum = 0;
+        int n = 0;
+        for (int i = 0; i < w.N; i++)
+        {
+            double d = ps.Site.Distance(w.Pos[i], ps.GateOf(i));
+            if (ps.IsOut(i) || double.IsInfinity(d)) continue;
+            sum += d; n++;
+        }
+        return n > 0 ? sum / n : 0;
+    }
+
+    /// <summary>The engine's palace fields and routes against sim/site.py's (oracle.txt).</summary>
+    static int PalaceOracle()
+    {
+        var site = PalaceSite.Load();
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        foreach (int g in site.Open) site.Field(g);
+        double fieldMs = t0.Elapsed.TotalMilliseconds;
+        int bad = site.CheckOracle(out double wf, out double wr, out int routes);
+        Log($"palace site: {site.Nx} x {site.Ny} cells, {site.Open.Length} open gates, fields in {fieldMs:F0} ms; " +
+            $"oracle: worst field difference {wf:E1} m, worst route length difference {wr:F3} m over {routes} routes");
+        return Check("palace fields and routes disagreeing with sim/site.py", bad, 0);
     }
 
     /// <summary>The software occlusion pass: a lone figure at the view-salience distance reads

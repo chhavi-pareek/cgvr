@@ -1,7 +1,7 @@
 // Renders every set headlessly and writes PNGs, so the look can be checked without opening
 // the editor. Run with graphics (no -nographics):
 //
-//   Unity -batchmode -quit -projectPath <p> -executeMethod ParityShots.Run
+//   Unity -batchmode -quit -projectPath <p> -executeMethod ParityShots.Run [-shots palace,hub]
 //
 // Writes Logs/shots/<scene>_split.png (baseline | PARITY, as the demo shows them),
 // <scene>_err.png (divergence colouring) and <scene>_near_<policy>.png (the mesh tiers up close),
@@ -22,7 +22,12 @@ public static class ParityShots
         Directory.CreateDirectory(dir);
         try
         {
-            foreach (var k in new[] { SceneKind.Plaza, SceneKind.Hub, SceneKind.Corridor }) Shoot(k, dir);
+            // -shots palace,hub picks sets by name; default is every set
+            var args = Environment.GetCommandLineArgs();
+            int at = Array.IndexOf(args, "-shots");
+            var want = at >= 0 && at + 1 < args.Length ? args[at + 1].Split(',') : null;
+            foreach (var k in new[] { SceneKind.Plaza, SceneKind.Hub, SceneKind.Corridor, SceneKind.Palace })
+                if (want == null || Array.IndexOf(want, SceneSpec.Get(k).Name) >= 0) Shoot(k, dir);
         }
         catch (Exception ex)
         {
@@ -108,6 +113,17 @@ public static class ParityShots
             File.WriteAllBytes(Path.Combine(dir, $"{spec.Name}_{(look == Look.Natural ? "split" : "err")}.png"),
                                split.EncodeToPNG());
         }
+        if (kind == SceneKind.Palace)
+        {
+            // the whole forecourt from above the south-west, for the slides
+            rend.Look = Look.Natural;
+            var foc = new Vector3(spec.Focus.x, 0f, spec.Focus.y);
+            cam.transform.position = foc + new Vector3(-150f, 230f, -210f);
+            cam.transform.LookAt(foc + new Vector3(0f, 0f, 30f));
+            cam.fieldOfView = 50f;
+            Grab(cam, fx, rend, par, hdr, ldr, tex);
+            File.WriteAllBytes(Path.Combine(dir, $"{spec.Name}_aerial.png"), tex.EncodeToPNG());
+        }
         // up close: from the orbit position, looking at the ground 10 m ahead, at a longer lens
         rend.Look = Look.Natural;
         Orbit(cam, spec, tOrbit, out var eye2, out _);
@@ -170,7 +186,7 @@ public static class ParityShots
 
     static void Orbit(Camera c, SceneSpec s, float t, out Vector2 xz, out float yaw)
     {
-        float r = 0.45f * Mathf.Min(s.Size.x, s.Size.y);
+        float r = s.OrbitRadius;
         float ang = t * Mathf.PI * 2f;
         xz = new Vector2(s.Focus.x + r * Mathf.Cos(ang), s.Focus.y + r * Mathf.Sin(ang));
         var look = new Vector3(s.Focus.x, 1.2f, s.Focus.y);
