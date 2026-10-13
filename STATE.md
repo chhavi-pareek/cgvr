@@ -203,7 +203,25 @@
   - **Protocol.**
     - Qwen museum_mem is the development pair (`bench/logs/aci/dev_share_qwen_N*.log`). There the fixed calibration share had lower drift than the self-sized one in 8/8 settings, so the main configuration is `--fixed-share` (a311c59) with X 0.5. The self-sized share is now an ablation.
     - The other five model-scenario pairs run once with this configuration. Do NOT tune on them.
-  - Final runs: `bench/logs/ieee/<scenario>_<model>_final_N<n>.{csv,log}`, 30 seeds, `--cache --fill --fixed-share`, base `parity/risk 0.2 reh wait 30`. Qwen museum_mem is running. The earlier `museum_mem_qwen_N*` (no fill) and `_fill_N*` (self-sized) runs are superseded.
+  - **Per-decision coverage (2026-10-14, 86372aa).**
+    - Spent estimated charges miss 15-18% against a ~10% level, and first looks miss about the same, so admission selection is not the main cause.
+    - Qwen museum_mem by phase, 5 seeds: start-up 16%, calm 9.5% (nominal), post-alarm 27%, post-smoke 31%. The shift breaks exchangeability; the 2026-10-13 caveat correction was right for the old Llama runs only.
+    - Tried and dropped:
+      - freezing a decision's charge at its first look: no effect;
+      - calibrating on audits of actual decisions: no gain, because tokens pile up in calm periods.
+    - Kept:
+      - first-look statistics plus per-look time series (bench `series` `...|looks`);
+      - `aci_mode="spent"` (`--aci-mode spent`): ACI scored on spent charges once their contexts are answered, which takes the miss rate from 17.7% to about 12-13% at N 1000.
+    - Stretch overflow stays at 0.1-0.4% against A = 20%.
+  - Final runs:
+    - Output: `bench/logs/ieee/<scenario>_<model>_final_N<n>.{csv,log}` plus `_series.npz`, 30 seeds.
+    - Flags: `--cache --fill --fixed-share --aci-mode spent`, base `parity/risk 0.2 reh wait 30`.
+    - All six pairs go through `bench/logs/aci/scripts/final_runner.sh` (nohup, log in `bench/logs/ieee/runner.log`), which starts each pair once its tables exist.
+    - Superseded:
+      - `museum_mem_qwen_final_v1_*` (before the first-look stats; identical otherwise);
+      - `museum_mem_qwen_N*` (no fill);
+      - `_fill_N*` (self-sized share).
+  - Paper tables: `EL/IEEE_Access_paper/make_tables.py` reads the final CSVs.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
