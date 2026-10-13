@@ -266,7 +266,9 @@ class DriftBound:
                 d = float(kl(q, p)[0])
             if self.aci is not None:
                 qa = float(self._quantile(self.a_t)[0])
-                if np.isfinite(qa) or self.a_t <= 0:     # too few residuals for the level: no score
+                # no score only while even the target level has too few residuals; past that an
+                # infinite quantile covers (err 0), else a level below 1 / (m + 1) would never move
+                if np.isfinite(qa) or self.a_t <= 0 or np.isfinite(self._quantile(self.alpha / 2)[0]):
                     err = float(d - pred > qa)
                     self.aci_err.append(err)
                     self.a_t += self.aci * (self.alpha / 2 - err)

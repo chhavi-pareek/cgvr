@@ -21,6 +21,9 @@ the model's exact answer for that situation (tabulated once, never shown to the 
     python -m bench.llm_agents --rehearse 0.2      # adds PARITY buying replies ahead (llm/schedule.py)
     python -m bench.llm_agents --model qwen2.5:14b # another reference model
     python -m bench.llm_agents --order-free        # the reference asked with the options shuffled
+    python -m bench.llm_agents --scenario museum_mem --cache --risk 0.2 0.5 --rehearse 0.2 --aci 0.02 --ablate
+                                                   # memory in the prompt (5184 contexts), every policy
+                                                   # with the reply cache, PARITY with and without its parts
 
 With more than two seeds each column is the mean with a 95% t-interval over seeds, and every
 policy is also compared with PARITY seed by seed (same station, same arrivals: paired).
@@ -41,12 +44,12 @@ import csv
 import numpy as np
 from scipy import stats
 
-from llm import museum, museum_mem, station
+from llm import museum, museum_mem, station, station_mem
 from llm.policy import build_rotations, build_table
 from llm.schedule import Run
 
 # crowd outcomes printed per scenario (Station.outcomes / Museum.outcomes)
-OUTCOMES = {"station": ("boarded", "missed"), "museum": ("t50", "inside", "w1"), "museum_mem": ("t50", "inside", "w1")}
+OUTCOMES = {"station": ("boarded", "missed"), "station_mem": ("boarded", "missed"), "museum": ("t50", "inside", "w1"), "museum_mem": ("t50", "inside", "w1")}
 
 
 def evac_w1(run, ref):
@@ -82,20 +85,27 @@ def main():
     ap.add_argument("--cap", type=float, default=10.0)
     ap.add_argument("--novel", action="store_true")
     ap.add_argument("--menu", action="store_true", help="add the small model (qwen2.5:1.5b) as a middle option")
-    ap.add_argument("--scenario", choices=("station", "museum", "museum_mem"), default="station")
+    ap.add_argument("--scenario", choices=("station", "station_mem", "museum", "museum_mem"), default="station")
     ap.add_argument("--model", default="qwen2.5:7b")
     ap.add_argument("--rehearse", type=float, default=0.0, help="also run PARITY with this rehearsal share")
     ap.add_argument("--max-wait", nargs="+", type=float, default=[],
                     help="also run PARITY with each of these bounded waits (seconds; with --rehearse, rehearsing too)")
     ap.add_argument("--risk", nargs=2, type=float, default=None, metavar=("ALPHA", "SHARE"),
                     help="also run PARITY with risk charges: per-stretch risk budget ALPHA, calibration SHARE of the budget")
+    ap.add_argument("--aci", type=float, default=None, metavar="GAMMA",
+                    help="with --risk, also run PARITY with the risk level adapted online (ACI, step GAMMA)")
+    ap.add_argument("--ablate", action="store_true",
+                    help="with --risk, also run PARITY without each of its parts: the conformal margin, the "
+                         "value-aware queue, the self-sized calibration share, the cap")
+    ap.add_argument("--cache", action="store_true",
+                    help="every policy decides at an already answered context by the cached reply")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
     ap.add_argument("--csv", default=None, help="also write one row per run (policy, N, seed, every summary field)")
     ap.add_argument("--order-free", action="store_true",
                     help="reference = the model with the options in a random order (mean over six rotations)")
     a = ap.parse_args()
-    scn = {"museum": museum, "museum_mem": museum_mem}.get(a.scenario, station)
+    scn = {"museum": museum, "museum_mem": museum_mem, "station_mem": station_mem}.get(a.scenario, station)
     conds = [(p, {}) for p in POLICIES]
     if a.rehearse > 0:
         conds.insert(1, (f"parity/reh {a.rehearse:g}", dict(rehearse=a.rehearse)))
@@ -112,6 +122,16 @@ def main():
             conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse)))
             for w in a.max_wait:
                 conds.insert(3, (f"parity/risk {a.risk[0]:g} reh wait {w:g}", dict(risk, rehearse=a.rehearse, max_wait=w)))
+        full = dict(risk, rehearse=a.rehearse) if a.rehearse > 0 else risk
+        at = 3 if a.rehearse > 0 else 2
+        if a.aci is not None:
+            conds.insert(at, (f"parity/risk aci {a.aci:g}", dict(full, aci=a.aci)))
+        if a.ablate:
+            for j, (lab, kw) in enumerate((("no margin", dict(full, bound="plugin", novel=True)),
+                                           ("no queue", dict(full, prune=False)),
+                                           ("no self-cal", dict(full, cal_adapt=False)))):
+                conds.insert(at + 1 + j, (f"parity/risk {lab}", kw))
+            conds.insert(at + 4, ("parity_nocap/risk", full))
     if a.policies:
         conds = [c for c in conds if c[0] in a.policies]
     if a.novel:
@@ -132,7 +152,7 @@ def main():
         R = build_rotations(a.model, scn=None if scn is station else scn)[0]
         P, extra = R.mean(0), dict(rotations=R)
     for i, (name, kw) in enumerate(conds):
-        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, **extra))
+        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, **extra))
     outk = OUTCOMES[a.scenario]
     rows_out, series = [], {}
     if a.menu:
@@ -159,7 +179,7 @@ def main():
               f"({100 * min(1.0, 0.9 / lat.mean() / dec_rate):.0f}% servable);  reference "
               + ", ".join(f"{k} {v:.0f}" for k, v in ro.items()))
         many = len(a.seeds) > 2
-        print("  policy           worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  forced  "
+        print("  policy                    worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  forced  "
               + "  ".join(f"{k:>7s}" for k in outk) + "  coverage  overflow")
         runs = {}
         for name, kw in conds:
@@ -182,7 +202,7 @@ def main():
                              for sd, r in zip(a.seeds, rs)]
             runs[name] = rs
             m = lambda k: float(np.mean([r[k] for r in rs]))  # noqa: E731
-            print(f"  {name:15s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
+            print(f"  {name:24s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
                   f"{m('kl_per_agent_h'):13.2f} {m('kl_steady_per_agent_h'):7.2f} {m('kl_view_per_agent_h'):9.2f} {m('llm_frac'):12.2f} {m('calls_per_s'):8.2f} "
                   f"{m('stall_per_agent_h'):13.1f}  {m('forced_per_agent_h'):6.1f}  " + "  ".join(f"{np.nanmean([r[k] for r in rs]):7.0f}" for k in outk)
                   + f"  {100 * m('coverage'):6.1f}%  {100 * m('overflow_frac'):6.2f}%")
@@ -194,18 +214,19 @@ def main():
             cols = [ci([r["dmax"] / a.cap for r in rs]), ci([r["kl_per_agent_h"] for r in rs]),
                     ci([r["kl_steady_per_agent_h"] for r in rs]), ci([r["kl_view_per_agent_h"] for r in rs]),
                     ci([100 * r["overflow_frac"] for r in rs])] + [ci([r[k] for r in rs]) for k in outk]
-            print(f"  {name:15s} " + " | ".join(f"{mu:6.2f} +- {h:4.2f}" for mu, h in cols))
+            print(f"  {name:24s} " + " | ".join(f"{mu:6.2f} +- {h:4.2f}" for mu, h in cols))
         base = runs[conds[0][0]]
         print(f"  {conds[0][0]} minus each, paired (mean +- 95% CI, Wilcoxon p, seeds {conds[0][0]} lower):")
         for name, rs in list(runs.items())[1:]:
             parts = []
-            keys = (("kl_per_agent_h", "drift"), ("kl_steady_per_agent_h", "steady"), ("kl_view_per_agent_h", "in view"), ("dmax", "worst"))
+            keys = (("kl_per_agent_h", "drift"), ("kl_steady_per_agent_h", "steady"), ("kl_view_per_agent_h", "in view"), ("dmax", "worst"),
+                    ("over_cap_frac", "over-cap"), ("overflow_frac", "overflow"))
             if "w1" in rs[0]:
                 keys += (("w1", "evac W1"),)
             for key, lab in keys:
                 mu, h, p, w = paired(base, rs, key)
                 parts.append(f"{lab} {mu:+.2f} +- {h:.2f} (p {p:.3f}, {w}/{len(rs)})")
-            print(f"    vs {name:13s} " + "; ".join(parts))
+            print(f"    vs {name:22s} " + "; ".join(parts))
     if a.csv and rows_out:
         keys = sorted({k for r in rows_out for k in r})
         with open(a.csv, "w", newline="") as f:

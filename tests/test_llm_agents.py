@@ -343,3 +343,94 @@ def test_a_rehearsal_is_asked_under_the_option_order_it_names():
     s.submit(-1, 7, 0)
     (agent, c, p, model, rot), = s.poll(0)
     assert rot == 4 and np.allclose(p, R[4, 7])
+
+
+@pytest.mark.parametrize("name, base", [("station_mem", 576), ("museum_mem", 648)])
+def test_memory_contexts_round_trip_and_the_prompt_names_the_memory(name, base):
+    import importlib
+    M = importlib.import_module(f"llm.{name}")
+    c = np.arange(M.N_CTX)
+    assert M.N_CTX == base * len(M.MEMORY) and (M.ctx_index(*M.ctx_parts(c)) == c).all()
+    assert all(text in M.prompt(m) for m, text in enumerate(M.MEMORY))     # memory is the last factor
+
+
+def test_station_memory_is_settled_by_its_errand_and_set_by_a_missed_train():
+    from llm import station_mem as S
+    from llm.station import A_FOOD, A_INFO
+    w = S.World(8, np.random.default_rng(0))
+    w.busy_until[:] = 10 ** 9
+    w.mem[:5] = [S.M_HUNGRY, S.M_FRIEND, S.M_PLATFORM, S.M_SUITCASE, S.M_HUNGRY]
+    w.apply(np.arange(5), [A_FOOD, A_INFO, A_INFO, A_FOOD, A_INFO], 0)
+    assert w.mem[:5].tolist() == [S.M_NONE, S.M_NONE, S.M_NONE, S.M_SUITCASE, S.M_HUNGRY]
+    w.mem[5], w.activity[5] = S.M_HUNGRY, A_FOOD                  # mid-errand: settled when it next decides
+    assert w.next_state([5])[2][0] == S.M_NONE and w.context(0, [5], mem=[S.M_NONE])[0] % S.N_M == S.M_NONE
+    w.mem[6], w.train_at[6], gen = S.M_NONE, 0, w.gen[6]
+    w.tick(100)
+    assert w.mem[6] == S.M_MISSED and w.gen[6] == gen
+
+
+def test_museum_memory_bag_is_collected_with_the_coat():
+    from llm import museum_mem as M
+    w = M.World(4, np.random.default_rng(0))
+    w.mem[:2] = M.M_BAG
+    w.apply([0, 1], [M.A_COAT, M.A_BROWSE], 0)
+    assert w.mem[0] == M.M_NONE and w.mem[1] == M.M_BAG
+
+
+@pytest.mark.parametrize("policy", ["parity", "round_robin", "cascade"])
+def test_the_reply_cache_serves_answered_contexts_and_never_asks_for_them_again(policy):
+    kw = dict(bound="risk", alpha=0.2, explore=0.5, prune=True, cal_adapt=True) if policy == "parity" else {}
+    r = Run(1000, policy, P, LAT, seed=0, cache=True, **kw)
+    again = []
+    submit = r.server.submit
+
+    def spy(agent, ctx, step, *a, **kw):
+        if agent >= 0 and ctx in r.drift.p:
+            again.append(ctx)
+        submit(agent, ctx, step, *a, **kw)
+    r.server.submit = spy
+    r.run(900)
+    s = r.summary()
+    assert s["cached_frac"] > 0.3 and not again
+
+
+def test_the_cache_is_off_where_one_reply_is_not_the_reference():
+    R, PM = rotated_policy()
+    assert Run(100, "parity", P, LAT, seed=0, cache=True).cache
+    assert not Run(100, "parity", PM, LAT, seed=0, cache=True, rotations=R).cache
+
+
+def _residuals():
+    q, p = np.full(N_ACT, 1 / N_ACT), np.array([0.5, 0.1, 0.1, 0.1, 0.1, 0.1])
+    return q, p, float(kl(q, p)[0])     # residual(c, q, p, pred=d0 - r) appends exactly r
+
+
+def test_aci_holds_the_long_run_miss_rate_at_its_level_when_the_residuals_drift():
+    """Gibbs and Candes (2021): whatever the residuals do, the adapted level's average miss rate is
+    within (1 - a_1 + gamma) / (gamma T) of the target; a fixed window falls behind a drift."""
+    q, p, d0 = _residuals()
+    rng = np.random.default_rng(0)
+    g = 0.05
+    fixed, adapt = DriftBound(bound="risk", alpha=0.2), DriftBound(bound="risk", alpha=0.2, aci=g)
+    miss = []
+    for t in range(4000):
+        r = t / 100 + rng.normal()
+        qf = float(fixed._quantile(0.1)[0])
+        if np.isfinite(qf):
+            miss.append(r > qf)
+        fixed.residual(0, q, p, pred=d0 - r)
+        adapt.residual(0, q, p, pred=d0 - r)
+    T = len(adapt.aci_err)
+    assert np.mean(miss) > 0.15
+    assert T > 3900 and abs(np.mean(adapt.aci_err) - 0.1) <= (0.9 + g) / (g * T)
+
+
+def test_the_aci_level_keeps_adapting_where_its_quantile_is_infinite():
+    q, p, d0 = _residuals()
+    b = DriftBound(bound="risk", alpha=0.2, aci=0.05, window=50)
+    for _ in range(50):
+        b.residual(0, q, p, pred=d0)
+    b.a_t = 0.01                       # below 1 / (m + 1): an infinite quantile, which covers
+    n = len(b.aci_err)
+    b.residual(0, q, p, pred=d0)
+    assert len(b.aci_err) == n + 1 and b.aci_err[-1] == 0.0 and b.a_t > 0.01
