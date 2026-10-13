@@ -358,7 +358,7 @@ class Run:
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
-                 cal_at_request=True, aci=None, cache=False):
+                 cal_at_request=True, aci=None, cache=False, fill=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -432,7 +432,7 @@ class Run:
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, est=0, est_miss=0,
-                          small=0, probes=0, rehearsals=0, forced=0, cached=0)
+                          small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
         self.far = far_salience
@@ -441,6 +441,8 @@ class Run:
         # request is made for it; every policy gets it. Plain reference only (one reply is the
         # whole answer there)
         self.cache = cache and rotations is None and not small
+        # fill: tokens a policy leaves unspent buy replies next to the crowd's contexts
+        self.fill = fill
         # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
         # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
         self.steady_from, self.kl_at, self.agent_s_at = 300, None, None
@@ -601,6 +603,8 @@ class Run:
                 st.apply(np.array(go), np.array(acts), t)
                 self._respawned()
         self._schedule(t)
+        if self.fill and self.policy not in ("reference", "surrogate_only"):
+            self._fill(t)
         if t == self.steady_from:
             self.kl_at, self.agent_s_at = self.stats["kl"], self.stats["agent_s"]
         self.stats["agent_s"] += st.present()
@@ -879,6 +883,16 @@ class Run:
                 self.stats["rehearsals"] += 1
             if self.rtokens < 1:
                 return
+        for c in self._neighbours(occ, cnt)[:int(self.rtokens)]:
+            self.server.submit(-1, c, t)
+            self.rehearsing.add(c)
+            self.rtokens -= 1
+            self.stats["rehearsals"] += 1
+
+    def _neighbours(self, occ, cnt):
+        """Unseen contexts one factor from the occupied ones occ (cnt people each), or occupied
+        themselves, with no reply on the way: most people one factor away first."""
+        scn = self.scn
         parts = np.stack(scn.ctx_parts(occ), 1)
         score = {}
         for f, size in enumerate(scn.SIZES):
@@ -888,11 +902,24 @@ class Run:
                 for c, w in zip(scn.ctx_index(*nb.T).tolist(), cnt.tolist()):
                     if c not in self.drift.p and c not in self.rehearsing:
                         score[c] = score.get(c, 0) + w
-        for c in sorted(score, key=lambda c: (-score[c], c))[:int(self.rtokens)]:
+        return sorted(score, key=lambda c: (-score[c], c))
+
+    def _fill(self, t):
+        """Spend the main budget's whole tokens left after scheduling (one kept for the next second)
+        on replies next to the crowd's contexts, as rehearsal does: no policy leaves the model idle."""
+        k = int(self.tokens) - 1
+        if k < 1:
+            return
+        st = self.st
+        here = np.flatnonzero(st.inside) if hasattr(st, "inside") else np.arange(self.n)
+        if here.size == 0:
+            return
+        occ, cnt = np.unique(st.context(t, here), return_counts=True)
+        for c in self._neighbours(occ, cnt)[:k]:
             self.server.submit(-1, c, t)
             self.rehearsing.add(c)
-            self.rtokens -= 1
-            self.stats["rehearsals"] += 1
+            self.tokens -= 1
+            self.stats["fills"] += 1
 
     def _probe(self, t):
         """Probes from the budget left after this step's decisions, while they might pay."""

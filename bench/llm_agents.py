@@ -99,6 +99,8 @@ def main():
                          "value-aware queue, the self-sized calibration share, the cap")
     ap.add_argument("--cache", action="store_true",
                     help="every policy decides at an already answered context by the cached reply")
+    ap.add_argument("--fill", action="store_true",
+                    help="every policy spends the budget it leaves unspent on replies next to the crowd's contexts")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
@@ -161,7 +163,7 @@ def main():
         R = build_rotations(a.model, scn=None if scn is station else scn)[0]
         P, extra = R.mean(0), dict(rotations=R)
     for i, (name, kw) in enumerate(conds):
-        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, **extra))
+        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, fill=a.fill, **extra))
     outk = OUTCOMES[a.scenario]
     rows_out, series = [], {}
     if a.menu:
@@ -188,7 +190,7 @@ def main():
               f"({100 * min(1.0, 0.9 / lat.mean() / dec_rate):.0f}% servable);  reference "
               + ", ".join(f"{k} {v:.0f}" for k, v in ro.items()))
         many = len(a.seeds) > 2
-        print("  policy                    worst/cap  over-cap   drift/agent-h  steady  in view   model share  calls/s  waits/agent-h  forced  "
+        print("  policy                    worst/cap  over-cap   drift/agent-h  steady  in view   model share  busy     waits/agent-h  forced  "
               + "  ".join(f"{k:>7s}" for k in outk) + "  coverage  overflow")
         runs = {}
         for name, kw in conds:
@@ -212,7 +214,7 @@ def main():
             runs[name] = rs
             m = lambda k: float(np.mean([r[k] for r in rs]))  # noqa: E731
             print(f"  {name:24s} {max(r['dmax'] for r in rs) / a.cap:8.2f}x {100 * m('over_cap_frac'):8.2f}% "
-                  f"{m('kl_per_agent_h'):13.2f} {m('kl_steady_per_agent_h'):7.2f} {m('kl_view_per_agent_h'):9.2f} {m('llm_frac'):12.2f} {m('calls_per_s'):8.2f} "
+                  f"{m('kl_per_agent_h'):13.2f} {m('kl_steady_per_agent_h'):7.2f} {m('kl_view_per_agent_h'):9.2f} {m('llm_frac'):12.2f} {m('model_util'):8.2f} "
                   f"{m('stall_per_agent_h'):13.1f}  {m('forced_per_agent_h'):6.1f}  " + "  ".join(f"{np.nanmean([r[k] for r in rs]):7.0f}" for k in outk)
                   + f"  {100 * m('coverage'):6.1f}%  {100 * m('overflow_frac'):6.2f}%")
         if not many:

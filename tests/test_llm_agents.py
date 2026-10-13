@@ -434,3 +434,21 @@ def test_the_aci_level_keeps_adapting_where_its_quantile_is_infinite():
     n = len(b.aci_err)
     b.residual(0, q, p, pred=d0)
     assert len(b.aci_err) == n + 1 and b.aci_err[-1] == 0.0 and b.a_t > 0.01
+
+
+def test_fill_spends_the_idle_budget_on_unseen_contexts_and_stays_within_it():
+    r = Run(1000, "round_robin", P, LAT, seed=0, cache=True, fill=True)
+    asked = []
+    submit = r.server.submit
+
+    def spy(agent, ctx, step, *a, **kw):
+        if agent < 0:
+            asked.append((ctx, ctx in r.drift.p))
+        submit(agent, ctx, step, *a, **kw)
+    r.server.submit = spy
+    r.run(600)
+    s = r.summary()
+    idle = Run(1000, "round_robin", P, LAT, seed=0, cache=True).run(600).summary()
+    assert r.stats["fills"] == len(asked) > 0 and not any(seen for _, seen in asked)
+    assert len({c for c, _ in asked}) == len(asked)
+    assert idle["model_util"] < s["model_util"] <= 0.9 + 0.05            # the default budget: 90% busy
