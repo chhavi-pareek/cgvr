@@ -99,6 +99,9 @@ def main():
                          "value-aware queue, the self-sized calibration share, the cap")
     ap.add_argument("--cache", action="store_true",
                     help="every policy decides at an already answered context by the cached reply")
+    ap.add_argument("--fixed-share", action="store_true",
+                    help="with --risk, a fixed calibration share SHARE instead of one sized by its value "
+                         "(--ablate then adds the self-sized share as the variant)")
     ap.add_argument("--fill", action="store_true",
                     help="every policy spends the budget it leaves unspent on replies next to the crowd's contexts")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
@@ -119,7 +122,7 @@ def main():
     if a.risk:
         # risk charges with the value-aware model queue (pruned, stuck agents first) and a
         # calibration share sized by its value, at most SHARE
-        risk = dict(bound="risk", alpha=a.risk[0], explore=a.risk[1], prune=True, cal_adapt=True)
+        risk = dict(bound="risk", alpha=a.risk[0], explore=a.risk[1], prune=True, cal_adapt=not a.fixed_share)
         conds.insert(1, (f"parity/risk {a.risk[0]:g}", risk))
         if a.rehearse > 0:
             conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse)))
@@ -139,7 +142,7 @@ def main():
             at += 1
         if a.ablate:
             for lab, kw in (("no margin", dict(full, bound="plugin", novel=True)), ("no queue", dict(full, prune=False)),
-                            ("no self-cal", dict(full, cal_adapt=False))):
+                            ("self-sized cal", dict(full, cal_adapt=True)) if a.fixed_share else ("no self-cal", dict(full, cal_adapt=False))):
                 conds.insert(at, (f"parity/risk {lab}{tag}", kw))
                 at += 1
             conds.insert(at, (f"parity_nocap/risk{tag}", full))
