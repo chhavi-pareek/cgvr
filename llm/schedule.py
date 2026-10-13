@@ -166,8 +166,15 @@ class DriftBound:
     # bound a stretch's true drift passes the cap with probability at most the budget; stretches
     # with no estimated charge keep the deterministic cap. Too few residuals for a level and the
     # charge is E_MAX, the certified worst case.
+    # aci = gamma: adaptive conformal inference (Gibbs and Candes 2021) on the risk charges. Every
+    # calibration residual is first scored against the charge it would have got at the first
+    # level (alpha/2) as it stands; a miss lowers that level by gamma (1 - alpha/2), a cover
+    # raises it by gamma alpha/2, and every level is scaled with it. Whatever the residuals do
+    # over time, the long-run miss rate of those scored charges tends to alpha/2; the residual
+    # stream is not stationary (the surrogate is still learning and the crowd still spreading in
+    # the first minutes), which is where the plain window under-charged.
     def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station,
-                 rotations=False, window=200):
+                 rotations=False, window=200, aci=None):
         self.n_ctx = scn.N_CTX
         # order-free reference (rotations): a reply shows the answer under ONE order, the reference
         # is the mean over all six; the charge is a bound that is exact once all six are seen
@@ -181,6 +188,7 @@ class DriftBound:
         self.charge = np.full(self.n_ctx, E_MAX)
         self.q_hat = np.inf
         self.res = deque(maxlen=window)          # risk: residuals at contexts unseen when paid
+        self.aci, self.a_t, self.aci_err = aci, alpha / 2, []
         self.pred = np.full(self.n_ctx, E_MAX)
         if novel or bound == "risk":
             parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1)
@@ -243,27 +251,42 @@ class DriftBound:
         self.pred = np.where(w > 0, self.K[:, s] @ np.fromiter(self.exact.values(), float) / np.maximum(w, 1e-300),
                              E_MAX)
 
-    def residual(self, c, q, p):
+    def residual(self, c, q, p, pred=None):
         """A calibration reply at a context nobody had paid for: its drift minus the prediction.
-        Order-free: one reply shows one option order, so the drift is replaced by its certified
+        q and pred are the surrogate's answer and the prediction when the request was made (else
+        now). Order-free: one reply shows one option order, so the drift is replaced by its certified
         bound from that order alone -- an upper bound, which keeps the margin valid (conservative)."""
-        if self.pred[int(c)] < E_MAX:
+        pred = float(self.pred[int(c)]) if pred is None else pred
+        if pred < E_MAX:
             if self.rotations:
                 m = np.asarray(p) / N_ACT + (N_ACT - 1) / N_ACT * PMIN
                 q = np.atleast_2d(q)[0]
                 d = float((q * (np.log(q) - np.log(m))).sum())
             else:
                 d = float(kl(q, p)[0])
-            self.res.append(d - float(self.pred[int(c)]))
+            if self.aci is not None:
+                qa = float(self._quantile(self.a_t)[0])
+                if np.isfinite(qa) or self.a_t <= 0:     # too few residuals for the level: no score
+                    err = float(d - pred > qa)
+                    self.aci_err.append(err)
+                    self.a_t += self.aci * (self.alpha / 2 - err)
+            self.res.append(d - pred)
+
+    def _quantile(self, alpha):
+        """The conformal (1 - alpha) quantile of the residuals; inf when there are too few for it."""
+        alpha = np.atleast_1d(np.asarray(alpha, float))
+        r = np.sort(np.fromiter(self.res, float)) if self.res else np.zeros(0)
+        m = r.size
+        k = np.ceil((m + 1) * (1 - alpha)).astype(np.int64)
+        return np.where((k <= m) & (alpha > 0), r[np.clip(k - 1, 0, max(m - 1, 0))] if m else np.inf, np.inf)
 
     def charge_at(self, c, alpha):
         """Risk mode: exact where seen; else prediction + the conformal (1 - alpha) quantile of the
         residuals, or E_MAX when there are too few residuals for that level."""
         c, alpha = np.atleast_1d(c), np.broadcast_to(alpha, np.shape(np.atleast_1d(c)))
-        r = np.sort(np.fromiter(self.res, float)) if self.res else np.zeros(0)
-        m = r.size
-        k = np.ceil((m + 1) * (1 - alpha)).astype(np.int64)
-        q = np.where(k <= m, r[np.clip(k - 1, 0, max(m - 1, 0))] if m else np.inf, np.inf)
+        if self.aci is not None:
+            alpha = alpha * (self.a_t / (self.alpha / 2))
+        q = self._quantile(alpha)
         est = np.clip(self.pred[c] + q, 0.0, E_MAX)
         return np.array([self.exact.get(int(x), e) for x, e in zip(c, est)])
 
@@ -332,7 +355,8 @@ class Run:
     def __init__(self, n, policy, P, latency, seed=0, cap=10.0, surrogate="distilled", util=0.9,
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
-                 far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False):
+                 far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
+                 cal_at_request=True, aci=None, cache=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -362,7 +386,8 @@ class Run:
         self.rehearse_orders = rehearse_orders and rotations is not None
         self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
-        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None)
+        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None,
+                                aci=aci)
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
         # cannot under-charge) still runs to the cap -- else before calibration nothing fits
@@ -373,6 +398,12 @@ class Run:
         self.alpha_tot = alpha
         self.R = np.full(n, alpha)                            # risk: budget left in this stretch
         self.calib_req = set()
+        # risk: a calibration residual is taken against the surrogate and prediction as they were
+        # when the request was made, at a context unseen THEN -- the same draw a charged decision
+        # is. Requiring the context to be unseen when the reply lands instead drops the busy
+        # contexts (another request answers them first), exactly where most charges fall, and the
+        # Llama museum under-charged 18% of estimated decisions at a 10% level (cal_at_request=False)
+        self.cal_at_request, self.cal_snap = cal_at_request, {}
         self.refit_every, self.seen = refit_every, 0
         self.L = np.zeros(n)                                  # charged ledger
         self.D = np.zeros(n)                                  # true drift since last LLM decision
@@ -399,10 +430,15 @@ class Run:
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, est=0, est_miss=0,
-                          small=0, probes=0, rehearsals=0, forced=0)
+                          small=0, probes=0, rehearsals=0, forced=0, cached=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
         self.far = far_salience
+        # cache: a decision at a context the model has answered is drawn from that answer (the
+        # reference itself, so it drifts 0 and ends the stretch like a model decision), and no
+        # request is made for it; every policy gets it. Plain reference only (one reply is the
+        # whole answer there)
+        self.cache = cache and rotations is None and not small
         # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
         # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
         self.steady_from, self.kl_at, self.agent_s_at = 300, None, None
@@ -536,7 +572,11 @@ class Run:
                 self.probe_q.append(c)
             fresh = c not in self.drift.p
             calib = agent in self.calib_req
-            if self.risk and calib and fresh:
+            snap = self.cal_snap.pop(agent, None) if calib else None
+            if self.risk and calib and self.cal_at_request:
+                if snap is not None and snap[0] == c:
+                    self.drift.residual(c, snap[1], p, pred=snap[2])
+            elif self.risk and calib and fresh:
                 self.drift.residual(c, self.sur(c)[0], p)
             self.calib_req.discard(agent)
             self._learn(c, p, calib, rot)
@@ -606,6 +646,12 @@ class Run:
             # the reply answers a situation the agent is no longer in (the queue changed while it
             # was on its way); acting on it would be drift nobody charged, so it is discarded
             self.stats["stale"] += 1
+        if self.cache and int(c) in self.drift.p:
+            self.stats["cached"] += 1
+            self._close(i)
+            self.stalled.discard(i)
+            self.ndec[i] += 1
+            return int(rng.choice(N_ACT, p=self.drift.p[int(c)]))
         e = float(self._charge(np.array([i]), np.array([c]))[0])
         held = self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e)
         if held and self.wait_from[i] < 0:
@@ -677,6 +723,11 @@ class Run:
             return
         in_time = when >= earliest
         xhat = st.context(t, cand, *st.next_state(cand), at_step=when)
+        if self.cache:
+            keep = ~np.isin(xhat, list(self.drift.p))
+            cand, when, in_time, xhat = cand[keep], when[keep], in_time[keep], xhat[keep]
+            if cand.size == 0:
+                return
         if self.small:
             in15 = when >= t + self.server.backlog(t) + float(self.server.lat[1].max())
             if self.policy == "parity":
@@ -721,6 +772,7 @@ class Run:
                 self.inflight[cand[j]] = True
                 self.calib_req.add(int(cand[j]))
                 if self.risk:
+                    self.cal_snap[int(cand[j])] = (int(xhat[j]), self.sur(xhat[j])[0], float(self.drift.pred[xhat[j]]))
                     self.ctokens -= 1
                 else:
                     self.tokens -= 1
@@ -922,9 +974,10 @@ class Run:
         overflowed = s["overflowed"] + int(self.over[open_].sum())
         dec = s["llm"] + s["sur"]
         dec += s["small"]
+        dec += s["cached"]
         steady = ((s["kl"] - self.kl_at) / max((s["agent_s"] - self.agent_s_at) / 3600.0, 1e-9)
                   if self.kl_at is not None else float("nan"))
-        return dict(policy=self.policy, n=self.n, llm_frac=s["llm"] / max(dec, 1), small_frac=s["small"] / max(dec, 1),
+        return dict(policy=self.policy, n=self.n, llm_frac=s["llm"] / max(dec, 1), small_frac=s["small"] / max(dec, 1), cached_frac=s["cached"] / max(dec, 1),
                     model_util=self.server.busy_s / max(len(self.dmax_t), 1), probes=s["probes"],
                     calls_per_s=self.server.calls / max(len(self.dmax_t), 1), kl_per_agent_h=s["kl"] / max(hours, 1e-9),
                     kl_steady_per_agent_h=steady,
