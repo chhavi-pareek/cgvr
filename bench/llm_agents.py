@@ -100,6 +100,7 @@ def main():
     ap.add_argument("--cache", action="store_true",
                     help="every policy decides at an already answered context by the cached reply")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
+    ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
     ap.add_argument("--csv", default=None, help="also write one row per run (policy, N, seed, every summary field)")
     ap.add_argument("--order-free", action="store_true",
@@ -120,18 +121,26 @@ def main():
         conds.insert(1, (f"parity/risk {a.risk[0]:g}", risk))
         if a.rehearse > 0:
             conds.insert(2, (f"parity/risk {a.risk[0]:g} reh", dict(risk, rehearse=a.rehearse)))
-            for w in a.max_wait:
-                conds.insert(3, (f"parity/risk {a.risk[0]:g} reh wait {w:g}", dict(risk, rehearse=a.rehearse, max_wait=w)))
-        full = dict(risk, rehearse=a.rehearse) if a.rehearse > 0 else risk
-        at = 3 if a.rehearse > 0 else 2
+        # the full method: risk charges, rehearsal and the first bounded hold if given; ACI and
+        # the ablations are variants of it
+        full, tag, at = dict(risk), "", 2
+        if a.rehearse > 0:
+            full["rehearse"], tag, at = a.rehearse, " reh", 3
+        for w in a.max_wait:
+            conds.insert(at, (f"parity/risk {a.risk[0]:g}{tag} wait {w:g}", dict(full, max_wait=w)))
+            at += 1
+        if a.max_wait:
+            full["max_wait"] = a.max_wait[0]
+            tag += f" wait {a.max_wait[0]:g}"
         if a.aci is not None:
-            conds.insert(at, (f"parity/risk aci {a.aci:g}", dict(full, aci=a.aci)))
+            conds.insert(at, (f"parity/risk aci {a.aci:g}{tag}", dict(full, aci=a.aci)))
+            at += 1
         if a.ablate:
-            for j, (lab, kw) in enumerate((("no margin", dict(full, bound="plugin", novel=True)),
-                                           ("no queue", dict(full, prune=False)),
-                                           ("no self-cal", dict(full, cal_adapt=False)))):
-                conds.insert(at + 1 + j, (f"parity/risk {lab}", kw))
-            conds.insert(at + 4, ("parity_nocap/risk", full))
+            for lab, kw in (("no margin", dict(full, bound="plugin", novel=True)), ("no queue", dict(full, prune=False)),
+                            ("no self-cal", dict(full, cal_adapt=False))):
+                conds.insert(at, (f"parity/risk {lab}{tag}", kw))
+                at += 1
+            conds.insert(at, (f"parity_nocap/risk{tag}", full))
     if a.policies:
         conds = [c for c in conds if c[0] in a.policies]
     if a.novel:
@@ -215,9 +224,12 @@ def main():
                     ci([r["kl_steady_per_agent_h"] for r in rs]), ci([r["kl_view_per_agent_h"] for r in rs]),
                     ci([100 * r["overflow_frac"] for r in rs])] + [ci([r[k] for r in rs]) for k in outk]
             print(f"  {name:24s} " + " | ".join(f"{mu:6.2f} +- {h:4.2f}" for mu, h in cols))
-        base = runs[conds[0][0]]
-        print(f"  {conds[0][0]} minus each, paired (mean +- 95% CI, Wilcoxon p, seeds {conds[0][0]} lower):")
-        for name, rs in list(runs.items())[1:]:
+        bname = a.base or conds[0][0]
+        base = runs[bname]
+        print(f"  {bname} minus each, paired (mean +- 95% CI, Wilcoxon p, seeds {bname} lower):")
+        for name, rs in runs.items():
+            if name == bname:
+                continue
             parts = []
             keys = (("kl_per_agent_h", "drift"), ("kl_steady_per_agent_h", "steady"), ("kl_view_per_agent_h", "in view"), ("dmax", "worst"),
                     ("over_cap_frac", "over-cap"), ("overflow_frac", "overflow"))
