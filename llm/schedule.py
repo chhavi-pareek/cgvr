@@ -174,7 +174,7 @@ class DriftBound:
     # stream is not stationary (the surrogate is still learning and the crowd still spreading in
     # the first minutes), which is where the plain window under-charged.
     def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station,
-                 rotations=False, window=200, aci=None):
+                 rotations=False, window=200, aci=None, aci_mode="cal"):
         self.n_ctx = scn.N_CTX
         # order-free reference (rotations): a reply shows the answer under ONE order, the reference
         # is the mean over all six; the charge is a bound that is exact once all six are seen
@@ -188,7 +188,9 @@ class DriftBound:
         self.charge = np.full(self.n_ctx, E_MAX)
         self.q_hat = np.inf
         self.res = deque(maxlen=window)          # risk: residuals at contexts unseen when paid
-        self.aci, self.a_t, self.aci_err = aci, alpha / 2, []
+        # aci_mode "cal": the level adapts to calibration residuals; "spent": to the charges actually
+        # spent, each scored once its context has been answered (delayed feedback)
+        self.aci, self.a_t, self.aci_err, self.aci_mode = aci, alpha / 2, [], aci_mode
         self.pred = np.full(self.n_ctx, E_MAX)
         if novel or bound == "risk":
             parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1)
@@ -264,7 +266,7 @@ class DriftBound:
                 d = float((q * (np.log(q) - np.log(m))).sum())
             else:
                 d = float(kl(q, p)[0])
-            if self.aci is not None:
+            if self.aci is not None and self.aci_mode == "cal":
                 qa = float(self._quantile(self.a_t)[0])
                 # no score only while even the target level has too few residuals; past that an
                 # infinite quantile covers (err 0), else a level below 1 / (m + 1) would never move
@@ -273,6 +275,12 @@ class DriftBound:
                     self.aci_err.append(err)
                     self.a_t += self.aci * (self.alpha / 2 - err)
             self.res.append(d - pred)
+
+    def spent(self, err, level):
+        """Delayed feedback for one spent estimated charge, made at nominal level `level`: did the
+        true drift exceed it? The scale moves so that spent charges miss as often as their levels."""
+        self.aci_err.append(float(err))
+        self.a_t += self.aci * (level - float(err))
 
     def _quantile(self, alpha):
         """The conformal (1 - alpha) quantile of the residuals; inf when there are too few for it."""
@@ -358,7 +366,7 @@ class Run:
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
-                 cal_at_request=True, aci=None, cache=False, fill=False):
+                 cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal"):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -389,7 +397,8 @@ class Run:
         self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
         self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None,
-                                aci=aci)
+                                aci=aci, aci_mode=aci_mode)
+        self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
         # cannot under-charge) still runs to the cap -- else before calibration nothing fits
@@ -432,7 +441,7 @@ class Run:
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, est=0, est_miss=0,
-                          small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0)
+                          small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0, est_level=0.0, look=0, look_level=0.0, look_miss=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
         self.far = far_salience
@@ -443,6 +452,8 @@ class Run:
         self.cache = cache and rotations is None and not small
         # fill: tokens a policy leaves unspent buy replies next to the crowd's contexts
         self.fill = fill
+        self.looked = {}                    # agent -> the decision it was last looked at for (first-look stats)
+        self.looks = []                     # (second, missed, level) of each first look, for coverage over time
         # nearly all drift comes in the first minute (every agent deciding at once, the surrogate
         # trained on a 60-reply warm-up), so drift is also reported from here on, in steady state
         self.steady_from, self.kl_at, self.agent_s_at = 300, None, None
@@ -575,6 +586,8 @@ class Run:
                 self.probed.add(c)
                 self.probe_q.append(c)
             fresh = c not in self.drift.p
+            for q0, e0, lev in self.spent_at.pop(int(c), ()):
+                self.drift.spent(float(kl(q0, p)[0]) > e0 + 1e-12, lev)
             calib = agent in self.calib_req
             snap = self.cal_snap.pop(agent, None) if calib else None
             if self.risk and calib and self.cal_at_request:
@@ -659,6 +672,19 @@ class Run:
             self.ndec[i] += 1
             return int(rng.choice(N_ACT, p=self.drift.p[int(c)]))
         e = float(self._charge(np.array([i]), np.array([c]))[0])
+        if self.risk and int(c) not in self.drift.exact:
+            # measured only: the first look at each decision at an unseen context, admitted or not --
+            # where split conformal promises its level (admission then selects among these)
+            key = (int(self.st.gen[i]), int(self.ndec[i]))
+            if self.looked.get(i) != key:
+                self.looked[i] = key
+                lev = self.R[i] / 2 * (self.drift.a_t / (self.drift.alpha / 2) if self.drift.aci is not None else 1.0)
+                self.stats["look"] += 1
+                self.stats["look_level"] += lev
+                miss = float(kl(self.sur(c), P[c])[0]) > e + 1e-12
+                self.stats["look_miss"] += int(miss)
+                if e < E_MAX:
+                    self.looks.append((t, miss, lev))
         held = self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e)
         if held and self.wait_from[i] < 0:
             self.wait_from[i] = t
@@ -687,9 +713,19 @@ class Run:
         if e < E_MAX:
             self.Ls[i] += e
         if self.risk and e < E_MAX and int(c) not in self.drift.exact:
+            self.stats["est_level"] += self.R[i] / 2 * (self.drift.a_t / (self.drift.alpha / 2) if self.drift.aci is not None else 1.0)
+            if self.drift.aci is not None and self.drift.aci_mode == "spent":
+                self.spent_at.setdefault(int(c), []).append((q, e, self.R[i] / 2))
             self.R[i] /= 2                     # this estimated charge spent half the budget left
             self.stats["est"] += 1
             self.stats["est_miss"] += int(d > e + 1e-12)
+        elif (self.risk and self.drift.aci is not None and self.drift.aci_mode == "spent" and int(c) not in self.drift.exact
+              and np.isfinite(self.drift._quantile(self.drift.alpha / 2)[0])
+              and not np.isfinite(self.drift._quantile(self.R[i] / 2 * self.drift.a_t / (self.drift.alpha / 2))[0])):
+            # the level is below what the residuals can resolve: the charge is E_MAX, which covers --
+            # scored so (as adaptive conformal inference scores an infinite set), or the level could
+            # never climb back
+            self.drift.spent(0.0, self.R[i] / 2)
         self.D[i] += d
         self.nsur[i] += 1
         self.over[i] |= self.D[i] > self.cap + 1e-9
@@ -1013,7 +1049,8 @@ class Run:
                     kl_view_per_agent_h=s["kl_view"] / max(s["view_s"] / 3600.0, 1e-9),
                     dmax=s["dmax"], over_cap_frac=s["over_cap"] / max(s["agent_s"], 1),
                     stall_per_agent_h=s["stall"] / max(hours, 1e-9), stale=s["stale"], late=self.late,
-                    est=s["est"], est_miss_frac=s["est_miss"] / max(s["est"], 1),
+                    est=s["est"], est_miss_frac=s["est_miss"] / max(s["est"], 1), est_level=s["est_level"] / max(s["est"], 1),
+                    look=s["look"], look_level=s["look_level"] / max(s["look"], 1), look_miss_frac=s["look_miss"] / max(s["look"], 1),
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),

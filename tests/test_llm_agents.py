@@ -452,3 +452,21 @@ def test_fill_spends_the_idle_budget_on_unseen_contexts_and_stays_within_it():
     assert r.stats["fills"] == len(asked) > 0 and not any(seen for _, seen in asked)
     assert len({c for c, _ in asked}) == len(asked)
     assert idle["model_util"] < s["model_util"] <= 0.9 + 0.05            # the default budget: 90% busy
+
+
+
+def test_aci_on_spent_charges_brings_their_miss_rate_to_the_level_under_selection():
+    """Spent charges see residuals shifted from the calibration ones (admission selects): scored on
+    the charges themselves once their contexts are answered, the level makes them miss at its rate."""
+    q, p, d0 = _residuals()
+    rng = np.random.default_rng(1)
+    b = DriftBound(bound="risk", alpha=0.2, aci=0.05, aci_mode="spent")
+    for _ in range(200):
+        b.residual(0, q, p, pred=d0 - rng.normal())             # calibration residuals ~ N(0, 1)
+    assert b.a_t == 0.1                                         # "spent" ignores calibration scores
+    errs = []
+    for _ in range(4000):
+        err = rng.normal(1.0, 1.0) > float(b._quantile(b.a_t)[0])   # spent ones ~ N(1, 1)
+        b.spent(err, 0.1)
+        errs.append(err)
+    assert abs(np.mean(errs) - 0.1) < 0.02                      # unadapted, they would miss ~39%

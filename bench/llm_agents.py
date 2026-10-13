@@ -94,6 +94,8 @@ def main():
                     help="also run PARITY with risk charges: per-stretch risk budget ALPHA, calibration SHARE of the budget")
     ap.add_argument("--aci", type=float, default=None, metavar="GAMMA",
                     help="with --risk, also run PARITY with the risk level adapted online (ACI, step GAMMA)")
+    ap.add_argument("--aci-mode", choices=("cal", "spent"), default="cal",
+                    help="what ACI scores: calibration residuals, or spent charges once their contexts are answered")
     ap.add_argument("--ablate", action="store_true",
                     help="with --risk, also run PARITY without each of its parts: the conformal margin, the "
                          "value-aware queue, the self-sized calibration share, the cap")
@@ -138,7 +140,7 @@ def main():
             full["max_wait"] = a.max_wait[0]
             tag += f" wait {a.max_wait[0]:g}"
         if a.aci is not None:
-            conds.insert(at, (f"parity/risk aci {a.aci:g}{tag}", dict(full, aci=a.aci)))
+            conds.insert(at, (f"parity/risk aci {a.aci:g}{tag}", dict(full, aci=a.aci, aci_mode=a.aci_mode)))
             at += 1
         if a.ablate:
             for lab, kw in (("no margin", dict(full, bound="plugin", novel=True)), ("no queue", dict(full, prune=False)),
@@ -204,6 +206,8 @@ def main():
                 for sd, r in zip(a.seeds, rr):
                     series[f"{name}|{n}|{sd}|kl"] = np.array(r.kl_t)
                     series[f"{name}|{n}|{sd}|agent_s"] = np.array(r.agent_s_t)
+                    if r.looks:
+                        series[f"{name}|{n}|{sd}|looks"] = np.array(r.looks, float)   # second, missed, level
                     if hasattr(r.st, "out_t"):
                         series[f"{name}|{n}|{sd}|out_t"] = np.array(r.st.out_t, float)
                         series[f"{name}|{n}|{sd}|at_alarm"] = np.array([r.st.at_alarm or 0])
