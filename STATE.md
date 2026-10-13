@@ -192,7 +192,18 @@
       - Against round-robin PARITY is lower on 10/10 seeds with significant CIs. Against cascade it is lower on 7-10/10 seeds, but the t-CIs include 0.
     - **Headline for the paper: the per-agent cap is enforced at equal budget and equal cache, with no cost to mean drift or to the evacuation. It is not "more accurate".**
   - Bench: `--cache --aci G --ablate --base NAME`. The ACI and ablation variants inherit rehearsal and the first `--max-wait`. Paired output adds over-cap and overflow. 35 LLM tests pass.
-  - Final runs: `bench/logs/ieee/<scenario>_<model>_N<n>.{csv,log}`, 30 seeds, base `parity/risk 0.2 reh wait 30`. Qwen museum_mem N 1000 / 2000 are running.
+  - **Fairness fix (2026-10-14, f6948a6).**
+    - With the cache on, the baselines left the model idle: 39-53% busy against PARITY's 62-70%, with 90% allowed.
+    - The bench's "calls/s" counted submitted requests, not served ones. It now prints `busy` (`model_util`).
+    - `Run(fill=True)` / `--fill`: any policy spends its unspent tokens on unseen one-factor neighbours of the occupied contexts. The filled baselines still run out of such contexts for 56-58% of their spare tokens.
+    - Check: baselines that also buy two-factor neighbours (`bench/logs/aci/fill2_mem_qwen_N1000.log`) are busier than PARITY (0.82-0.89 vs 0.78). PARITY still has 4x less over-cap, and the baselines lower mean drift.
+    - **The claim is a tail-vs-mean trade-off.** Qwen museum_mem with fill, 30 seeds, self-sized share:
+      - N 1000: over-cap 0.07% vs 0.25-1.00%; drift 24.2 vs 20.2-23.7.
+      - N 2000: 0.09% vs 0.55-1.67%; drift 22.2 vs 21.8-26.8.
+  - **Protocol.**
+    - Qwen museum_mem is the development pair (`bench/logs/aci/dev_share_qwen_N*.log`). There the fixed calibration share had lower drift than the self-sized one in 8/8 settings, so the main configuration is `--fixed-share` (a311c59) with X 0.5. The self-sized share is now an ablation.
+    - The other five model-scenario pairs run once with this configuration. Do NOT tune on them.
+  - Final runs: `bench/logs/ieee/<scenario>_<model>_final_N<n>.{csv,log}`, 30 seeds, `--cache --fill --fixed-share`, base `parity/risk 0.2 reh wait 30`. Qwen museum_mem is running. The earlier `museum_mem_qwen_N*` (no fill) and `_fill_N*` (self-sized) runs are superseded.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
