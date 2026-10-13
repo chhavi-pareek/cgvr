@@ -91,12 +91,21 @@ def build_table(model=MODEL, force=False, log=print, scn=None, rot=0):
     P = np.empty((n_ctx, N_ACT))
     lat = np.empty(n_ctx)
     on = np.empty(n_ctx)
-    for c in range(n_ctx):
+    os.makedirs(TABLES, exist_ok=True)
+    part, start = path[:-4] + "_part.npz", 0       # long tables resume where they stopped
+    if os.path.exists(part) and not force:
+        t = np.load(part)
+        start = int(t["done"])
+        P[:start], lat[:start], on[:start] = t["P"][:start], t["latency"][:start], t["letter_mass"][:start]
+    for c in range(start, n_ctx):
         P[c], lat[c], on[c] = ask(c, model, scn=scn, rot=rot, mass=True)
         if log and c % 96 == 95:
             log(f"  {c + 1}/{n_ctx} contexts, median call {np.median(lat[:c + 1]) * 1e3:.0f} ms")
-    os.makedirs(TABLES, exist_ok=True)
+        if c % 480 == 479:
+            np.savez(part, P=P, latency=lat, letter_mass=on, done=c + 1)
     np.savez(path, P=P, latency=lat, model=model, letter_mass=on)
+    if os.path.exists(part):
+        os.remove(part)
     return P, lat
 
 
