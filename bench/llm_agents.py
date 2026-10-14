@@ -84,6 +84,8 @@ def main():
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1])
     ap.add_argument("--cap", type=float, default=10.0)
     ap.add_argument("--tau", type=float, default=0.5, help="kernel width of the charge prediction (sensitivity only)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="serve every call this many times faster (budget x speed; e.g. batched serving); sensitivity only")
     ap.add_argument("--novel", action="store_true")
     ap.add_argument("--menu", action="store_true", help="add the small model (qwen2.5:1.5b) as a middle option")
     ap.add_argument("--scenario", choices=("station", "station_mem", "museum", "museum_mem"), default="station")
@@ -113,6 +115,9 @@ def main():
     ap.add_argument("--debit", action="store_true",
                     help="with --risk, also run the full method with a held agent's request paid from the call "
                          "budget (post hoc; the frozen method does not charge it); with --spill, also both")
+    ap.add_argument("--wcp", nargs=2, type=float, default=None, metavar=("WTAU", "WDECAY"),
+                    help="with --risk, also run matched PARITY (spill and debit) with a weighted margin: residuals "
+                         "weighted by context distance (exp(-h / WTAU); 0 = off) and age (WDECAY ** age; 1 = off)")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
@@ -159,6 +164,9 @@ def main():
             conds.insert(at, (f"parity/risk spill{tag}", dict(full, spill=True)))
         if a.debit:
             conds.insert(at, (f"parity/risk debit{tag}", dict(full, debit=True)))
+        if a.wcp:
+            wk = dict(spill=True, debit=True, wtau=a.wcp[0] or None, wdecay=a.wcp[1] if a.wcp[1] < 1 else None)
+            conds.insert(at, (f"parity/risk wcp {a.wcp[0]:g} {a.wcp[1]:g}{tag}", dict(full, **wk)))
         if a.spill and a.debit:
             conds.insert(at, (f"parity/risk spill debit{tag}", dict(full, spill=True, debit=True)))
     if a.policies:
@@ -175,7 +183,7 @@ def main():
     # the call latencies are the station table's for the same model (same length of prompt), so
     # every scenario is served at one measured speed
     P = build_table(a.model, scn=None if scn is station else scn)[0]
-    lat = build_table(a.model)[1]
+    lat = build_table(a.model)[1] / a.speed
     extra = {}
     if a.order_free:
         R = build_rotations(a.model, scn=None if scn is station else scn)[0]

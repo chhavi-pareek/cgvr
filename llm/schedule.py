@@ -174,7 +174,7 @@ class DriftBound:
     # stream is not stationary (the surrogate is still learning and the crowd still spreading in
     # the first minutes), which is where the plain window under-charged.
     def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station,
-                 rotations=False, window=200, aci=None, aci_mode="cal"):
+                 rotations=False, window=200, aci=None, aci_mode="cal", wtau=None, wdecay=None):
         self.n_ctx = scn.N_CTX
         # order-free reference (rotations): a reply shows the answer under ONE order, the reference
         # is the mean over all six; the charge is a bound that is exact once all six are seen
@@ -188,6 +188,11 @@ class DriftBound:
         self.charge = np.full(self.n_ctx, E_MAX)
         self.q_hat = np.inf
         self.res = deque(maxlen=window)          # risk: residuals at contexts unseen when paid
+        # weighted margin (off unless set): residual i weighs exp(-h(c, c_i) / wtau), its context's
+        # distance from the charged one, times wdecay ** its age in residuals
+        self.wtau, self.wdecay = wtau, wdecay
+        self.res_c, self.res_i, self.res_n = deque(maxlen=window), deque(maxlen=window), 0
+        self.parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1) if wtau else None
         # aci_mode "cal": the level adapts to calibration residuals; "spent": to the charges actually
         # spent, each scored once its context has been answered (delayed feedback)
         self.aci, self.a_t, self.aci_err, self.aci_mode = aci, alpha / 2, [], aci_mode
@@ -275,6 +280,9 @@ class DriftBound:
                     self.aci_err.append(err)
                     self.a_t += self.aci * (self.alpha / 2 - err)
             self.res.append(d - pred)
+            self.res_c.append(int(c))
+            self.res_i.append(self.res_n)
+            self.res_n += 1
 
     def spent(self, err, level):
         """Delayed feedback for one spent estimated charge, made at nominal level `level`: did the
@@ -290,13 +298,32 @@ class DriftBound:
         k = np.ceil((m + 1) * (1 - alpha)).astype(np.int64)
         return np.where((k <= m) & (alpha > 0), r[np.clip(k - 1, 0, max(m - 1, 0))] if m else np.inf, np.inf)
 
+    def _wquantile(self, c, alpha):
+        """Weighted conformal (1 - alpha) quantile at each context in c: the residuals weighted as above,
+        the test point weighing 1 with its mass at +inf (covariate-shift and non-exchangeable split
+        conformal); equal weights give _quantile."""
+        c, alpha = np.atleast_1d(c), np.atleast_1d(np.asarray(alpha, float))
+        if not self.res:
+            return np.full(c.size, np.inf)
+        r = np.fromiter(self.res, float)
+        o = np.argsort(r, kind="stable")
+        w = np.ones((c.size, r.size))
+        if self.wtau:
+            h = (self.parts[c][:, None, :] != self.parts[np.fromiter(self.res_c, np.int64)][None, :, :]).sum(2)
+            w = w * np.exp(-h / self.wtau)
+        if self.wdecay:
+            w = w * self.wdecay ** (self.res_n - 1 - np.fromiter(self.res_i, np.int64))[None, :]
+        w = w[:, o]
+        ok = np.cumsum(w, 1) / (w.sum(1, keepdims=True) + 1.0) >= (1 - alpha)[:, None] - 1e-12
+        return np.where(ok.any(1) & (alpha > 0), r[o][ok.argmax(1)], np.inf)
+
     def charge_at(self, c, alpha):
         """Risk mode: exact where seen; else prediction + the conformal (1 - alpha) quantile of the
         residuals, or E_MAX when there are too few residuals for that level."""
         c, alpha = np.atleast_1d(c), np.broadcast_to(alpha, np.shape(np.atleast_1d(c)))
         if self.aci is not None:
             alpha = alpha * (self.a_t / (self.alpha / 2))
-        q = self._quantile(alpha)
+        q = self._wquantile(c, alpha) if (self.wtau or self.wdecay) else self._quantile(alpha)
         est = np.clip(self.pred[c] + q, 0.0, E_MAX)
         return np.array([self.exact.get(int(x), e) for x, e in zip(c, est)])
 
@@ -367,7 +394,7 @@ class Run:
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
-                 spill=False, debit=False, tau=0.5):
+                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -399,7 +426,7 @@ class Run:
         self.rehearse_orders = rehearse_orders and rotations is not None
         self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
-        self.drift = DriftBound(novel, bound, alpha, tau=tau, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None,
+        self.drift = DriftBound(novel, bound, alpha, tau=tau, delta=delta, eta=eta, scn=self.scn, wtau=wtau, wdecay=wdecay, rotations=rotations is not None,
                                 aci=aci, aci_mode=aci_mode)
         self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving

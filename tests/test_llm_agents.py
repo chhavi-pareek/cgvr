@@ -493,3 +493,22 @@ def test_debit_pays_a_held_agents_request_from_the_budget_and_is_off_by_default(
     assert scalar(frozen.summary()) == scalar(off.summary()) and r.stats["overrun"] > 0   # agents were held
     assert r.stats["fills"] < frozen.stats["fills"]           # held requests now cost what fill would have bought
     assert r.summary()["model_util"] < frozen.summary()["model_util"]
+
+
+def test_weighted_margin_reduces_to_the_split_conformal_quantile_and_follows_its_weights():
+    rng = np.random.default_rng(0)
+    b = DriftBound(bound="risk", alpha=0.2)
+    for x in rng.normal(size=150):
+        b.res.append(float(x)); b.res_c.append(int(rng.integers(N_CTX))); b.res_i.append(b.res_n); b.res_n += 1
+    lv = np.array([0.1, 0.05, 0.01, 0.003, 0.0])
+    c = np.arange(lv.size)
+    assert np.array_equal(b._wquantile(c, lv), b._quantile(lv))            # equal weights: split conformal
+    near, far = 0, N_CTX - 1                                                 # contexts differing in every factor
+    loc = DriftBound(bound="risk", alpha=0.2, wtau=0.5)
+    old = DriftBound(bound="risk", alpha=0.2, wdecay=0.98)
+    for k in range(200):
+        ctx, r = (near, 0.0) if k % 2 else (far, 5.0)
+        for d, rr in ((loc, r), (old, 5.0 if k < 100 else 0.0)):
+            d.res.append(rr); d.res_c.append(ctx); d.res_i.append(d.res_n); d.res_n += 1
+    assert loc._wquantile([near], [0.1])[0] < loc._quantile([0.1])[0]      # nearby residuals dominate
+    assert old._wquantile([near], [0.2])[0] < old._quantile([0.2])[0]      # recent residuals dominate
