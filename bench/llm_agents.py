@@ -118,6 +118,9 @@ def main():
     ap.add_argument("--wcp", nargs=2, type=float, default=None, metavar=("WTAU", "WDECAY"),
                     help="with --risk, also run matched PARITY (spill and debit) with a weighted margin: residuals "
                          "weighted by context distance (exp(-h / WTAU); 0 = off) and age (WDECAY ** age; 1 = off)")
+    ap.add_argument("--slack", action="store_true",
+                    help="with --risk, also run matched PARITY ranking optional requests by expected drift (vexp) "
+                         "and with the self-sized calibration share (selfcal); post hoc")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
@@ -167,6 +170,9 @@ def main():
         if a.wcp:
             wk = dict(spill=True, debit=True, wtau=a.wcp[0] or None, wdecay=a.wcp[1] if a.wcp[1] < 1 else None)
             conds.insert(at, (f"parity/risk wcp {a.wcp[0]:g} {a.wcp[1]:g}{tag}", dict(full, **wk)))
+        if a.slack:
+            conds.insert(at, (f"parity/risk vexp{tag}", dict(full, spill=True, debit=True, value="expected")))
+            conds.insert(at, (f"parity/risk selfcal{tag}", dict(full, spill=True, debit=True, cal_adapt=True)))
         if a.spill and a.debit:
             conds.insert(at, (f"parity/risk spill debit{tag}", dict(full, spill=True, debit=True)))
     if a.policies:

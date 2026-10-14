@@ -394,7 +394,7 @@ class Run:
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
-                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None):
+                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge"):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -421,6 +421,7 @@ class Run:
         self.tokens = 0.0
         self.ctokens = 0.0                                    # risk: calibration's own budget
         self.spill = spill                                    # risk: calibration budget it cannot hold -> main
+        self.value = value                                    # risk: rank optional requests by charge or expected drift
         self.debit = debit                                    # a held agent's request is paid from the budget
         self.cal_adapt = cal_adapt                            # risk: size the calibration share by its value
         self.rehearse_orders = rehearse_orders and rotations is not None
@@ -867,7 +868,12 @@ class Run:
             must = (self.L[cand] + e > self._limit(cand, e)) & self.ledger
             if self.risk and self.cal_adapt:
                 self._size_calibration(cand, xhat, must)
-            val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
+            if self.risk and self.value == "expected":
+                # post hoc: the predicted drift, not the charge (prediction + the agent's margin)
+                ex = np.array([self.drift.exact.get(int(x), self.drift.pred[x]) for x in xhat])
+                val = np.where(in_time, self.salience(t)[cand] * ex, -1.0)
+            else:
+                val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
             if self.max_wait is None:
                 mo = list(np.flatnonzero(must))
             else:
