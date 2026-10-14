@@ -222,6 +222,21 @@
       - `museum_mem_qwen_N*` (no fill);
       - `_fill_N*` (self-sized share).
   - Paper tables: `EL/IEEE_Access_paper/make_tables.py` reads the final CSVs.
+  - **2026-10-14 restart and dev-pair results.**
+    - The Mac slept 03:48-10:08. Afterwards both jobs hit EPERM, and the runner looped on a `ready()` it could no longer run.
+    - Relaunched both at 10:27 from a new session. The runner now skips a pair whose two `_final_N*.log` say "runs written". The queue resumed qwen station_mem from `_part.npz` at 1920/4608.
+    - Qwen museum_mem final (dev pair, 30 seeds, N 1000 / 2000):
+      - over cap 0.03 / 0.10% vs baselines 0.25-1.00 / 0.55-1.67%;
+      - first-look miss 16.5 / 14.8% at level ~9.5%; spent 18.0 / 15.9%; overflow 0.13 / 0.41% vs A = 20%.
+    - With ACI on spent charges:
+      - first looks 9.0 / 9.1%, spent 13.7 / 14.6%;
+      - **but 32 / 37% of first looks are charged E_MAX** (PARITY without ACI: 4 / 5%). The series `looks` keeps only charges < E_MAX; the CSV counts all of them.
+    - By phase (looks < E_MAX, 30 seeds): start-up 17%, calm 5-6% (under the level), after alarm 20-25%, after smoke 27-32%. After smoke there are only 0.3% of the looks.
+  - `make_tables.py` (2026-10-14):
+    - fixed the tags: files are `qwen2.5` / `llama3.1` / `gemma2`, and it had found 0 cells;
+    - added `tables/guarantee.tex` (first-look and spent miss vs level, worst-case share, overflow; PARITY vs ACI per pair), `tables/phase.tex`, and `figs/coverage_time.pdf` (palette validated);
+    - fixed table widths.
+  - `main.tex`: Algorithm 1 box (from `Run.step` / `_decide`), all tables and the figure wired into Results, and a Discussion draft. Results prose still TODO. Builds clean at 8 pages.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
@@ -626,9 +641,9 @@
 
 ## NEXT
 - **IEEE Access LLM paper.** Steps:
-  1. When each table lands (`bench/logs/aci/tables_queue.log`), run the final bench for that scenario and model. Use the command in `bench/logs/ieee/*.log` headers, at N 1000 and 2000; the station uses `--seconds 1800` and no rehearsal unless decided otherwise.
-  2. Make figures and tables from the CSVs.
-  3. Draft in `EL/IEEE_Access_paper/`, outside the repo.
+  1. `final_runner.sh` runs each held-out pair once its tables land; nothing to launch by hand. Commit each new `llm_table_*.npz`, never `_part.npz`.
+  2. As each pair ends in `bench/logs/ieee/runner.log`, rerun `make_tables.py` (`../cgvr/.venv/bin/python make_tables.py` from the paper folder).
+  3. Write the Results prose, conclusion, abstract numbers and the intro cache-threat paragraph in `EL/IEEE_Access_paper/main.tex`, from the generated tables only.
   4. Expand related work to 40-60 references.
 - Still needed from the user before submission: co-author agreement, author details, ORCIDs, bios and photos, APC funding, and permission to push and release the code.
 - **Laptop 3-seed protocol, new build (2026-10-01), and the frame-time controller.** Laptop results zips live outside the repo in `EL/laptop_results/`, named `<gpu>_<date>_<build>.zip` (`rtx2050_2026-10-01_normaliseview.zip`, `rtx3050_2026-10-01_quantile.zip`, `rtx2050_2026-10-01_quantile.zip`; the pre-NormaliseView runs of 27 Sep likewise).
