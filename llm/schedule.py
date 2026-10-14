@@ -367,7 +367,7 @@ class Run:
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
-                 spill=False, debit=False):
+                 spill=False, debit=False, tau=0.5):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -399,7 +399,7 @@ class Run:
         self.rehearse_orders = rehearse_orders and rotations is not None
         self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
-        self.drift = DriftBound(novel, bound, alpha, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None,
+        self.drift = DriftBound(novel, bound, alpha, tau=tau, delta=delta, eta=eta, scn=self.scn, rotations=rotations is not None,
                                 aci=aci, aci_mode=aci_mode)
         self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving

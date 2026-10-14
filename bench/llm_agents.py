@@ -83,6 +83,7 @@ def main():
     ap.add_argument("--seconds", type=int, default=1800)
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1])
     ap.add_argument("--cap", type=float, default=10.0)
+    ap.add_argument("--tau", type=float, default=0.5, help="kernel width of the charge prediction (sensitivity only)")
     ap.add_argument("--novel", action="store_true")
     ap.add_argument("--menu", action="store_true", help="add the small model (qwen2.5:1.5b) as a middle option")
     ap.add_argument("--scenario", choices=("station", "station_mem", "museum", "museum_mem"), default="station")
@@ -180,7 +181,7 @@ def main():
         R = build_rotations(a.model, scn=None if scn is station else scn)[0]
         P, extra = R.mean(0), dict(rotations=R)
     for i, (name, kw) in enumerate(conds):
-        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, fill=a.fill, **extra))
+        conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, fill=a.fill, tau=a.tau, **extra))
     outk = OUTCOMES[a.scenario]
     rows_out, series = [], {}
     if a.menu:
