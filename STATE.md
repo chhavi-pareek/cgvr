@@ -244,6 +244,14 @@
   - **Cache table** (`bench/logs/aci/scripts/cache_runs.sh`, no-memory scenarios, cache, N1000, 10 seeds, 5 policies; `bench/logs/ieee/cache_*.csv` -> `tables/cache.tex`):
     - without memory, 97-99% of decisions are cached and the station's policies tie (drift 0.2-1.3); in the museum the baselines reach 0.0 and PARITY 0.2-0.8;
     - with memory, the museum is 47-60% cached but the station (Qwen) is still 94%: a weak testbed for the cache threat.
+  - **All six pairs DONE (2026-10-14 16:58); all tables committed.** Final picture (`EL/IEEE_Access_paper/tables/`):
+    - Over cap: where the cap binds (museum, Qwen and Gemma), PARITY is 3-33x lower than every baseline (p<0.001). Elsewhere every policy is at <=0.11%.
+    - Drift: PARITY lowest or tied in 11/12 settings. The exception is Qwen museum N1000, +1.1-1.6, n.s.
+    - Crowd outcomes (`tables/outcome.tex`, new): PARITY is not significantly further from the reference than any baseline in 10/12 settings; the exceptions are Gemma N2000 museum (cascade) and station (RR, view-LOD). Every policy misses fewer trains than the reference; the cascades depart most.
+    - Guarantees: overflow 0.00-2.47% vs A=20%. Per-decision coverage: station 0.4-1.6% (conservative); museum 10.6-18.0% vs 6.1-9.8%, worst after the alarm for Qwen and Gemma, in calm for Llama.
+    - ACI: museum first looks ~9% via 30-38% E_MAX; worse on Gemma; in the station its level climbs to 26-50% late in the run.
+    - Unbounded hold: 84 / 138 people still inside vs 35 / 82 for the reference and 20-47 bounded.
+  - **Paper drafted end to end:** Results prose, intro cache paragraph, abstract, conclusion, and the discussion paragraph on the unused calibration budget, every number from generated tables. Only author items remain TODO. 10 pages, clean build.
   - **Busy gap** (`bench/logs/aci/scripts/busy_diag.py`, qwen station_mem, 3 seeds):
     - PARITY: busy 0.53, 1445 distinct contexts answered. Baselines: 0.72, ~1990 contexts, 0% redundant.
     - Cause: the calibration bucket (`ctokens`, X=0.5) discards its tokens at the cap when nothing needs calibrating, and `_fill` spends only `tokens`.
