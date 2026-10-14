@@ -237,6 +237,17 @@
     - added `tables/guarantee.tex` (first-look and spent miss vs level, worst-case share, overflow; PARITY vs ACI per pair), `tables/phase.tex`, and `figs/coverage_time.pdf` (palette validated);
     - fixed table widths.
   - `main.tex`: Algorithm 1 box (from `Run.step` / `_decide`), all tables and the figure wired into Results, and a Discussion draft. Results prose still TODO. Builds clean at 8 pages.
+  - **Held-out so far (2026-10-14):**
+    - llama museum_mem: over cap 0.00% for every policy, drift ~3.5 with PARITY lowest; phase pattern reversed (calm 17-18%, after alarm 4-7%).
+    - qwen station_mem: over cap 0.00-0.01% for all policies, PARITY drift lowest (2.03 / 2.14), PARITY first looks 0.4-0.7% vs level ~9.6%.
+    - The over-cap gap is large only on the dev pair; the headline must be scoped (TODO in the abstract).
+  - **Cache table** (`bench/logs/aci/scripts/cache_runs.sh`, no-memory scenarios, cache, N1000, 10 seeds, 5 policies; `bench/logs/ieee/cache_*.csv` -> `tables/cache.tex`):
+    - without memory, 97-99% of decisions are cached and the station's policies tie (drift 0.2-1.3); in the museum the baselines reach 0.0 and PARITY 0.2-0.8;
+    - with memory, the museum is 47-60% cached but the station (Qwen) is still 94%: a weak testbed for the cache threat.
+  - **Busy gap** (`bench/logs/aci/scripts/busy_diag.py`, qwen station_mem, 3 seeds):
+    - PARITY: busy 0.53, 1445 distinct contexts answered. Baselines: 0.72, ~1990 contexts, 0% redundant.
+    - Cause: the calibration bucket (`ctokens`, X=0.5) discards its tokens at the cap when nothing needs calibrating, and `_fill` spends only `tokens`.
+    - Decision: no method change or reruns (frozen protocol; the flaw handicaps PARITY). main.tex Policies text corrected, Discussion paragraph added, and the main table shows busy for PARITY and the baselines' mean.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
