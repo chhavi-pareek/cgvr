@@ -273,6 +273,13 @@
     - **Outcome test (station):** now on |missed - reference with the same seed| (`bench/logs/aci/scripts/reference_runs.py` -> `bench/logs/ieee/reference/`, which matches the log headers).
     - **Corrected numbers:** headline 3-31x (not 33x); no-memory cache 92-99% (the Gemma museum no-memory table was built: 92%, PARITY drift highest, 4.1 vs 2.3-2.7); drift is never significantly above a baseline (Holm), below at least one in 11/12, below all four in 2/12; crowd closer than at least one baseline in 8/12 and further in 1/12.
     - **Paper revised:** abstract (249 words), intro, method, setup, protocol, metrics, results, discussion and conclusion; 12 verified citations plus Holm; data-availability statement (URL TODO); American spelling. 14 pages, clean build.
+  - **Reviewer-proofing (2026-10-14 night), all post hoc and budget-matched, N 1000, 30 seeds** (`bench/logs/aci/scripts/sens_jobs.sh` -> `bench/logs/ieee/sens/`, tables `cap`/`param`):
+    - **kappa = 5** (below E_MAX): the cap binds in 4 pairs (3 held out). PARITY is significantly lower than the best baseline in museum Qwen (2.75 vs 4.97%), museum Gemma (7.97 vs 13.79%) and station Qwen (2.01 vs 3.32%), with lower drift in all three. Station Gemma is n.s. (4.26 vs 3.06%). Overflow 5.39-19.89% < A everywhere (tests Theorem 2). Held 1.13-5.70%.
+    - **kappa = 20:** almost nothing binds.
+    - **A = 0.1 beats the frozen A = 0.2** on both binding pairs (Gemma: over cap 0.69 vs 1.33, drift 28.6 vs 31.2, first look 6.7% at level 4.6%). Reported as fixed, not retuned. X and tau are robust.
+    - **Scheduler cost** (`timing.py` -> `bench/logs/ieee/timing.csv`): PARITY 1.2-5.7 ms CPU per simulated s (N 1000-5000), 2-4x the baselines, 54-275 us per decision; it grows ~3x for 5x the agents.
+    - **Theorem 1** is restated as KL between trajectory laws with the world's response kernel fixed (proof via the chain rule with a stopping time). The Discussion now covers what 10 nats means (Bretagnolle-Huber is vacuous) and why holding is the mechanism (the no-cap and no-margin ablations hold no one).
+    - `--tau` flag committed (ad3b8ea). Paper: 16 pp, abstract 249 words, ICIIPC overlap 0.1% (affiliation only).
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
