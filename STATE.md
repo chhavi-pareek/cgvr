@@ -256,6 +256,23 @@
     - PARITY: busy 0.53, 1445 distinct contexts answered. Baselines: 0.72, ~1990 contexts, 0% redundant.
     - Cause: the calibration bucket (`ctokens`, X=0.5) discards its tokens at the cap when nothing needs calibrating, and `_fill` spends only `tokens`.
     - Decision: no method change or reruns (frozen protocol; the flaw handicaps PARITY). main.tex Policies text corrected, Discussion paragraph added, and the main table shows busy for PARITY and the baselines' mean.
+  - **Review and post-hoc budget accounting (2026-10-14 evening).** Two agents reviewed the draft (`EL/IEEE_Access_paper/review/`: reviewer_report.md, numbers_audit.md, method_code_repro.md). Verified and fixed:
+    - **"Same budget" was false.** A held agent's request was paid from no bucket (`_decide` held branch), and a forced release or a queue skip refunded tokens never paid. So in the Gemma museum PARITY was busy 0.87-0.89 vs 0.72, and in Llama museum N2000 it was busy 0.99 vs a nominal 0.90.
+    - **Post-hoc switches** (c4601e2, both off by default; flag off reproduces a final CSV row exactly): `--spill` passes calibration overflow to the main bucket, and `--debit` pays held requests. Runs: `bench/logs/aci/scripts/{spill,debit}_runs.sh` -> `bench/logs/ieee/spill/*_{spill,debit}_N*.csv`, all 6 pairs, 30 seeds. "matched" means both switches on: busy 0.70-0.90, within 0.04 of the baselines' mean.
+    - **Matched results:** over cap is still significantly lower than the best baseline where the cap binds: dev Qwen 0.04/0.07 vs 0.25/0.55 (5.8-23x), held-out Gemma 1.33/2.34 vs 3.71/4.06. But Gemma N2000 drops from 12.7-20.2x to 1.7-2.8x, Gemma drift is no longer significantly lower, and first looks miss 17.5-17.9%. Spill alone raises Gemma N1000 over cap (1.15 -> 1.71). Station: no change.
+    - **Other code facts the paper had wrong (now fixed):**
+      - with the cache, exact charges never reach the ledger;
+      - the queue skip rule is OR, not AND;
+      - the no-margin ablation also drops the calibration share;
+      - the phi floor applies to every letter;
+      - 60 warm-up replies;
+      - latencies come from the station table;
+      - the dev pair's reported runs reuse the dev seeds, so it is not held out;
+      - Llama was used in design on the no-memory scenarios.
+    - **make_tables:** Holm correction in the main and outcome tables; new `diff` table (paired 95% CI vs best baseline); new `posthoc` table; held time as % of agent-time; forced decisions; est/stretch; two-block hold and ablation tables (all pairs, and binding pairs); per-model coverage figure.
+    - **Outcome test (station):** now on |missed - reference with the same seed| (`bench/logs/aci/scripts/reference_runs.py` -> `bench/logs/ieee/reference/`, which matches the log headers).
+    - **Corrected numbers:** headline 3-31x (not 33x); no-memory cache 92-99% (the Gemma museum no-memory table was built: 92%, PARITY drift highest, 4.1 vs 2.3-2.7); drift is never significantly above a baseline (Holm), below at least one in 11/12, below all four in 2/12; crowd closer than at least one baseline in 8/12 and further in 1/12.
+    - **Paper revised:** abstract (249 words), intro, method, setup, protocol, metrics, results, discussion and conclusion; 12 verified citations plus Holm; data-availability statement (URL TODO); American spelling. 14 pages, clean build.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
