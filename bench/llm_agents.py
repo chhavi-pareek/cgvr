@@ -106,6 +106,12 @@ def main():
                          "(--ablate then adds the self-sized share as the variant)")
     ap.add_argument("--fill", action="store_true",
                     help="every policy spends the budget it leaves unspent on replies next to the crowd's contexts")
+    ap.add_argument("--spill", action="store_true",
+                    help="with --risk, also run the full method with the calibration budget it cannot hold "
+                         "spilled into the main budget (post hoc; the frozen method leaves it unspent)")
+    ap.add_argument("--debit", action="store_true",
+                    help="with --risk, also run the full method with a held agent's request paid from the call "
+                         "budget (post hoc; the frozen method does not charge it); with --spill, also both")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
@@ -148,6 +154,12 @@ def main():
                 conds.insert(at, (f"parity/risk {lab}{tag}", kw))
                 at += 1
             conds.insert(at, (f"parity_nocap/risk{tag}", full))
+        if a.spill:
+            conds.insert(at, (f"parity/risk spill{tag}", dict(full, spill=True)))
+        if a.debit:
+            conds.insert(at, (f"parity/risk debit{tag}", dict(full, debit=True)))
+        if a.spill and a.debit:
+            conds.insert(at, (f"parity/risk spill debit{tag}", dict(full, spill=True, debit=True)))
     if a.policies:
         conds = [c for c in conds if c[0] in a.policies]
     if a.novel:

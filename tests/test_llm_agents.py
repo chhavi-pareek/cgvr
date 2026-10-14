@@ -455,6 +455,17 @@ def test_fill_spends_the_idle_budget_on_unseen_contexts_and_stays_within_it():
 
 
 
+def test_spill_passes_the_calibration_budget_it_cannot_hold_to_fill_and_is_off_by_default():
+    kw = dict(bound="risk", alpha=0.2, explore=0.5, prune=True, cache=True, fill=True, rehearse=0.2, max_wait=30)
+    frozen = Run(1000, "parity", P, LAT, seed=0, **kw).run(600).summary()
+    off = Run(1000, "parity", P, LAT, seed=0, spill=False, **kw).run(600).summary()
+    r = Run(1000, "parity", P, LAT, seed=0, spill=True, **kw).run(600)
+    on = r.summary()
+    assert frozen == off                                                  # the frozen method, unchanged
+    assert r.ctokens <= 3 * r.explore * r.rate + 1
+    assert frozen["model_util"] < on["model_util"] <= 0.9 + 0.05 and r.stats["fills"] > 0
+
+
 def test_aci_on_spent_charges_brings_their_miss_rate_to_the_level_under_selection():
     """Spent charges see residuals shifted from the calibration ones (admission selects): scored on
     the charges themselves once their contexts are answered, the level makes them miss at its rate."""
@@ -470,3 +481,15 @@ def test_aci_on_spent_charges_brings_their_miss_rate_to_the_level_under_selectio
         b.spent(err, 0.1)
         errs.append(err)
     assert abs(np.mean(errs) - 0.1) < 0.02                      # unadapted, they would miss ~39%
+
+
+def test_debit_pays_a_held_agents_request_from_the_budget_and_is_off_by_default():
+    M, PM = museum_policy()
+    kw = dict(scenario=M, bound="risk", alpha=0.2, explore=0.3, prune=True, max_wait=30, fill=True, cap=1.0)  # many holds
+    frozen = Run(1000, "parity", PM, LAT, seed=0, **kw).run(900)
+    off = Run(1000, "parity", PM, LAT, seed=0, debit=False, **kw).run(900)
+    r = Run(1000, "parity", PM, LAT, seed=0, debit=True, **kw).run(900)
+    scalar = lambda d: {k: repr(v) for k, v in d.items() if np.isscalar(v)}       # nan == nan
+    assert scalar(frozen.summary()) == scalar(off.summary()) and r.stats["overrun"] > 0   # agents were held
+    assert r.stats["fills"] < frozen.stats["fills"]           # held requests now cost what fill would have bought
+    assert r.summary()["model_util"] < frozen.summary()["model_util"]

@@ -366,7 +366,8 @@ class Run:
                  calib_calls=60, refit_every=40, novel=False, bound="worst", alpha=0.1, explore=0.1,
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
-                 cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal"):
+                 cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
+                 spill=False, debit=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -392,6 +393,8 @@ class Run:
         self.rate = util / float(np.mean(latency))            # calls per second the model sustains
         self.tokens = 0.0
         self.ctokens = 0.0                                    # risk: calibration's own budget
+        self.spill = spill                                    # risk: calibration budget it cannot hold -> main
+        self.debit = debit                                    # a held agent's request is paid from the budget
         self.cal_adapt = cal_adapt                            # risk: size the calibration share by its value
         self.rehearse_orders = rehearse_orders and rotations is not None
         self.explore_eff = explore if cal_adapt else None
@@ -706,6 +709,10 @@ class Run:
                 self.req_dec[i] = int(self.ndec[i])
                 self.inflight[i] = True
                 self.stats["overrun"] += 1
+                if self.debit:
+                    # post hoc: as frozen, this request was free (and a forced release refunded it),
+                    # so held agents bought model time beyond the budget every other policy has
+                    self.tokens -= 1
             return None
         q = self.sur(c)[0]
         d = float(kl(q, P[c])[0])
@@ -748,7 +755,12 @@ class Run:
         if self.risk:
             # calibration gets its own slice, which mandatory requests cannot overdraw: else a
             # shift floods the budget with E_MAX-charged requests and the margin never forms
-            self.ctokens = min(self.ctokens + xs * self.rate, 3 * self.explore * self.rate + 1)
+            c = self.ctokens + xs * self.rate
+            self.ctokens = min(c, 3 * self.explore * self.rate + 1)
+            if self.spill:
+                # post hoc: with nothing to calibrate (a cached crowd), the slice fills up and the
+                # rest of it was lost; spilled, it goes to the main budget (and so to fill)
+                self.tokens = min(self.tokens + c - self.ctokens, 3 * self.rate + 1)
         if self.rehearse > 0:
             self._rehearse(t)
         # people in the ticket queue included: their decision time is estimated from their place
