@@ -468,6 +468,7 @@ class Run:
         self.req_gen = {}                                     # generation each request was made for
         self.ndec = np.zeros(n, np.int64)                     # decisions made per slot
         self.req_dec = {}                                     # which decision each request is for
+        self.req_ctx = {}                                     # the context each request asks about
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
@@ -717,6 +718,12 @@ class Run:
                 if e < E_MAX:
                     self.looks.append((t, miss, lev))
         held = self.policy == "parity" and self.ledger and self.L[i] + e > self._limit(i, e)
+        if (self.policy == "cascade" and self.max_wait is not None and self.inflight[i]
+                and self.req_ctx.get(int(i)) == int(c) and self.req_dec.get(int(i), -1) == int(self.ndec[i])
+                and self.req_gen.get(int(i), -1) == int(self.st.gen[i])):
+            # post hoc baseline (cascade with a hold): the agent waits for the reply cascade already
+            # asked for at this very decision, at most max_wait seconds, instead of using the surrogate
+            held = True
         if held and self.wait_from[i] < 0:
             self.wait_from[i] = t
         if held and self.max_wait is not None and t - self.wait_from[i] >= self.max_wait:
@@ -916,8 +923,8 @@ class Run:
             for j in np.argsort(conf, kind="stable"):
                 if self.tokens < 1:
                     break
-                if not in_time[j]:
-                    continue
+                if not in_time[j] and self.max_wait is None:
+                    continue                   # with a hold (post hoc baseline), a late reply is waited for
                 self._request(cand[j], xhat[j], t, 0)
                 self.tokens -= 1
         elif self.policy == "round_robin":
@@ -1022,6 +1029,7 @@ class Run:
         self.server.submit(i, x, t, model)
         self.req_gen[int(i)] = int(self.st.gen[i])
         self.req_dec[int(i)] = int(self.ndec[i])
+        self.req_ctx[int(i)] = int(x)
         self.inflight[i] = True
 
     def _schedule3(self, t, cand, xhat, in_time, in15):
