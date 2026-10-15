@@ -121,6 +121,9 @@ def main():
     ap.add_argument("--slack", action="store_true",
                     help="with --risk, also run matched PARITY ranking optional requests by expected drift (vexp) "
                          "and with the self-sized calibration share (selfcal); post hoc")
+    ap.add_argument("--strict", action="store_true",
+                    help="with --risk, also run matched PARITY whose held and mandatory requests may not run the budget "
+                         "into debt (post hoc)")
     ap.add_argument("--cascade-hold", action="store_true",
                     help="post hoc baseline: also run cascade holding an agent whose reply for this very decision is in "
                          "flight, at most the first --max-wait seconds")
@@ -178,6 +181,8 @@ def main():
             conds.insert(at, (f"parity/risk selfcal{tag}", dict(full, spill=True, debit=True, cal_adapt=True)))
         if a.spill and a.debit:
             conds.insert(at, (f"parity/risk spill debit{tag}", dict(full, spill=True, debit=True)))
+        if a.strict:
+            conds.insert(at, (f"parity/risk strict{tag}", dict(full, spill=True, debit=True, strict=True)))
     if a.cascade_hold and a.max_wait:
         conds.append((f"cascade/wait {a.max_wait[0]:g}", dict(max_wait=a.max_wait[0])))
     if a.policies:

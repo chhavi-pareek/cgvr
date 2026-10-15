@@ -394,7 +394,7 @@ class Run:
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
-                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge"):
+                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -464,6 +464,9 @@ class Run:
         # then decides by the surrogate anyway and the overflow is counted (forced), not hidden --
         # waiting is itself a departure from the reference, which the drift accounting cannot see
         self.max_wait = max_wait
+        # post hoc (strict): no request may run the budget into debt -- a held agent's request and a
+        # mandatory one wait for a whole token like any other, so total model time stays within B
+        self.strict = strict
         self.wait_from = np.full(n, -1, np.int64)
         self.req_gen = {}                                     # generation each request was made for
         self.ndec = np.zeros(n, np.int64)                     # decisions made per slot
@@ -738,7 +741,7 @@ class Run:
             self.st.busy_until[i] = t + 1
             self.stats["stall"] += 1
             self.stalled.add(i)
-            if not self.inflight[i]:
+            if not self.inflight[i] and not (self.strict and self.tokens < 1):
                 self.server.submit(i, c, t)
                 self.req_gen[i] = int(self.st.gen[i])
                 self.req_dec[i] = int(self.ndec[i])
@@ -894,6 +897,8 @@ class Run:
                 if not must[j] and self.tokens < 1:
                     break
                 if must[j] and self.max_wait is not None and self.tokens < 1 - self.rate * (self.max_wait + 1):
+                    continue
+                if must[j] and self.strict and self.tokens < 1:
                     continue
                 if must[j] and self.tokens < 1:
                     self.stats["overrun"] += 1
