@@ -441,6 +441,11 @@
         - The 4-bit museum table's mean latency (1.53 s) was measured under load and is not used; budgets come from the station tables, as for every model.
       - Paper: phased paragraph and Table phased in Sec. All Settings; Quantization paragraph in Sensitivity, Table q8 in the appendix, Scope sentence updated, two rows in the analyses table. 25 pp, audit 2 unmatched (both Emax = 9.21), overlap with ICIIPC 0.1% / 0.2%.
       - **Experiments stop here** (agreed with the user): only author items remain.
+    - **Length (2026-10-17 ~23:40).** IEEE Access strongly recommends < 20 pages, and longer submissions get an editorial length check; appendices and supplementary material do not count. The paper was 25 pp (23 without the appendix). The user asked for it shorter and readable.
+      - `IEEE_Access_paper/main.tex` is now **15 pp including references**. Intro, Related Work, Results, Discussion and Conclusion were condensed, with no new numbers.
+      - `supplementary.tex` (13 pp, Tables S1-S20, Fig. S1) holds the full original Results subsections and every secondary table. Cross-references use `xr`, with prefixes S-/M- and a fallback for shared captions.
+      - Build order: supplementary, main (+bibtex), supplementary (+bibtex), main.
+      - Audit (`review/numbers_audit_v3.py main.tex supplementary.tex`): 3 unmatched, all Emax = 9.21. ICIIPC overlap 0.3-0.4%. The pre-trim version is `review/main.tex.before_trim`.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
