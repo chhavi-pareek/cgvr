@@ -349,6 +349,20 @@
           - frozen PARITY in the 4 x1 museum cells: lower over cap than the lowest baseline;
           - x2 museum Qwen, Llama, Gemma: strict PARITY's drift above the lowest baseline's in Llama and Gemma, as on seeds 0-29.
       - (d) **Reproduction at the final commit:** Gemma museum N1000, seeds 0-29 (frozen, cascade, cascade+reh, debt-allowed) and strict kappa 5 Gemma museum, compared field by field with the recorded runs.
+      - **Result (2026-10-17 13:37, 40/40 clean; paper updated, 22 pp, abstract 249 words, ICIIPC overlap 0.1-0.3%):**
+        - **Replication on seeds 30-59: 17 of 17 primary cells significant in the predicted direction** (Holm, 17 tests). Frozen PARITY: 4 of 4. Drift cost at x2: 3 of 3, now significant for Qwen too (9.7 vs 8.9).
+        - **Reproduction:** 450 recorded runs rerun at be7ad0c, 0 differing fields.
+        - **Conditional overflow** (among stretches with no forced decision) is 0.00-14.15% everywhere, below A. Forced stretches make up 6-55% of all stretches. Gemma museum: kappa 5 7.81% (total 23.51%, 43.94% forced); x0.5 0.46% (total 25.84%). Qwen museum kappa 5 is 14.15%; its max over single seeds is 25%.
+        - **Event strata (W+E vs W, strict, museum, 4 models x N1000/2000):**
+          - First look 2.7-10.7% (W 9.1-14.4) at levels 7.1-9.6%: at or below level in 5 of 8, within 1.3 points in the other 3 (Qwen N1000, Llama x2). All 8 drops are significant.
+          - Spent 3.7-12.8% (W 10.4-15.8). After the alarm 0.1-6.1% (W 2.3-20.7). The calm phase is unchanged (Llama 16.2-16.4%).
+          - Over cap n.s.; drift lower for Llama. Held up to +1.04 (Llama), +0.27 (Mistral).
+        - **All settings at once** (new tab:slack, make_tables `slack_table`): 52 settings, of which 23 bind (best baseline >= 0.05%).
+          - Over cap: 15 lower, 0 higher (Holm, 23 tests).
+          - Drift (Holm, 208 tests): slack, some baseline lower in 6 of 29, PARITY lower than >= 1 baseline in 25; binds, a baseline lower in 1 of 23 (Mistral museum N1000).
+          - By the paper's own threshold, the Mistral museum cap BINDS (0.05-0.17%), and kappa 20 binds in the Gemma museum. The text was corrected and the threshold is defined in Metrics.
+        - **Salience hypothesis for the slack-cap drift cost: rejected.** PARITY's in-view drift is also higher than view-LOD's.
+        - Paper: 8 secondary tables moved to Appendix A (diff, noreh, surr, chold, phase, param, wcp, strata). New sections "All Settings at Once" and "Replication on Fresh Seeds", plus the alarm-state paragraph. Abstract, intro, Discussion, Scope, Conclusion and Data Availability are rewritten. Backup: `review/main.tex.before_round5`.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
