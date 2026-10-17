@@ -44,12 +44,12 @@ import csv
 import numpy as np
 from scipy import stats
 
-from llm import museum, museum_mem, station, station_mem
+from llm import airport_mem, museum, museum_mem, station, station_mem
 from llm.policy import build_rotations, build_table
 from llm.schedule import Run
 
 # crowd outcomes printed per scenario (Station.outcomes / Museum.outcomes)
-OUTCOMES = {"station": ("boarded", "missed"), "station_mem": ("boarded", "missed"), "museum": ("t50", "inside", "w1"), "museum_mem": ("t50", "inside", "w1")}
+OUTCOMES = {"station": ("boarded", "missed"), "station_mem": ("boarded", "missed"), "airport_mem": ("boarded", "missed"), "museum": ("t50", "inside", "w1"), "museum_mem": ("t50", "inside", "w1")}
 
 
 def evac_w1(run, ref):
@@ -88,7 +88,7 @@ def main():
                     help="serve every call this many times faster (budget x speed; e.g. batched serving); sensitivity only")
     ap.add_argument("--novel", action="store_true")
     ap.add_argument("--menu", action="store_true", help="add the small model (qwen2.5:1.5b) as a middle option")
-    ap.add_argument("--scenario", choices=("station", "station_mem", "museum", "museum_mem"), default="station")
+    ap.add_argument("--scenario", choices=("station", "station_mem", "museum", "museum_mem", "airport_mem"), default="station")
     ap.add_argument("--model", default="qwen2.5:7b")
     ap.add_argument("--rehearse", type=float, default=0.0, help="also run PARITY with this rehearsal share")
     ap.add_argument("--max-wait", nargs="+", type=float, default=[],
@@ -137,7 +137,7 @@ def main():
     ap.add_argument("--order-free", action="store_true",
                     help="reference = the model with the options in a random order (mean over six rotations)")
     a = ap.parse_args()
-    scn = {"museum": museum, "museum_mem": museum_mem, "station_mem": station_mem}.get(a.scenario, station)
+    scn = {"museum": museum, "museum_mem": museum_mem, "station_mem": station_mem, "airport_mem": airport_mem}.get(a.scenario, station)
     conds = [(p, {}) for p in POLICIES]
     if a.rehearse > 0:
         conds.insert(1, (f"parity/reh {a.rehearse:g}", dict(rehearse=a.rehearse)))

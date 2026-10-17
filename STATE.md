@@ -363,6 +363,25 @@
           - By the paper's own threshold, the Mistral museum cap BINDS (0.05-0.17%), and kappa 20 binds in the Gemma museum. The text was corrected and the threshold is defined in Metrics.
         - **Salience hypothesis for the slack-cap drift cost: rejected.** PARITY's in-view drift is also higher than view-LOD's.
         - Paper: 8 secondary tables moved to Appendix A (diff, noreh, surr, chold, phase, param, wcp, strata). New sections "All Settings at Once" and "Replication on Fresh Seeds", plus the alarm-state paragraph. Abstract, intro, Discussion, Scope, Conclusion and Data Availability are rewritten. Backup: `review/main.tex.before_round5`.
+    - **Round 6a (2026-10-17 ~14:10): a third scenario, held out. Written and committed before any answer table or run in it.**
+      - **Scenario** (`llm/airport_mem.py`, an airport terminal):
+        - Flights depart every 150 s. Each has its own boarding call (30 min before departure). 25% of flights get a gate change (25-40 min before); 15% get a one-hour delay (announced 35-50 min before).
+        - Passengers carry one of eight memories. 3456 contexts.
+        - The event factor is flight status (EVENT_PART 1). The outcome is missed flights. Runs last 900 s.
+        - The events are local and recurring, unlike the station (steady) and the museum (one global alarm).
+      - **Design checks before this commit**, with a random answer table only (no model answers, no PARITY-vs-baseline comparison):
+        - Cache share under cascade with 1800 s runs was 0.88-0.91: the model could answer two thirds of the contexts, as in the station. So the run was set to 900 s, as in the museum (0.73-0.80).
+        - Arrivals enter through the far corridor (from security).
+        - Six prompts were sent to Qwen to check the format (letter mass 1.00); their answers were not looked at.
+      - **Tables:** one per model (Qwen, Llama, Gemma, Mistral), built as for the other scenarios. Call latencies come from each model's station calls, as before.
+      - **Runs** (frozen configuration, nothing changed): N 1000/2000, seeds 0-29.
+        - Conditions: frozen PARITY; matched (strict); strict W (recency 0.99); strict W+E (strata by flight status); cascade+reh, cascade, round-robin, view-LOD; surrogate only.
+        - Secondary: x0.5 speed, N 2000, strict + 4 baselines.
+      - **Predictions** (Holm within the airport table):
+        - **P1:** in each model and N where the cap binds (best baseline over it >= 0.05% of agent-time), frozen PARITY's time over the cap is significantly below the best baseline's (p < 0.01), and so is matched PARITY's. If the cap binds nowhere, P1 is void and reported as void.
+        - **P2:** the same at half speed.
+        - **P3:** in each model and N, W+E's museum-style fix also works here: its first-look under-charge is below W's (p < 0.01).
+        - Drift, outcomes and coverage levels are reported whatever they show.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
