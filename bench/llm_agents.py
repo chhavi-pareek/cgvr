@@ -133,6 +133,12 @@ def main():
     ap.add_argument("--cascade-hold", action="store_true",
                     help="post hoc baseline: also run cascade holding an agent whose reply for this very decision is in "
                          "flight, at most the first --max-wait seconds")
+    ap.add_argument("--serve", choices=("fwd", "sharp"), default="fwd",
+                    help="post hoc (round 8): every policy's surrogate served as fitted (fwd) or sharpened for the charged KL")
+    ap.add_argument("--local", action="store_true",
+                    help="post hoc (round 8): also PARITY (strict) sharpening only where its kernel says it pays (with --serve sharp)")
+    ap.add_argument("--prefetch", nargs="+", type=float, default=None, metavar="SECONDS",
+                    help="post hoc (round 8): rehearsal and fill first ask the contexts people will be in at these horizons")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
@@ -193,6 +199,8 @@ def main():
                 conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g}{tag}", dict(full, **wk, strict=True)))
                 if a.strata:
                     conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g} strata{tag}", dict(full, **wk, strict=True, strata=True)))
+    if a.local and a.risk and a.strict:
+        conds.insert(at, (f"parity/risk strict local{tag}", dict(full, spill=True, debit=True, strict=True, serve_local=True)))
     if a.oracle and a.risk:
         conds.append((f"parity/oracle strict{tag}", dict(full, spill=True, debit=True, strict=True, oracle=True, explore=0.0)))
     if a.oracle:
@@ -220,6 +228,8 @@ def main():
         P, extra = R.mean(0), dict(rotations=R)
     for i, (name, kw) in enumerate(conds):
         conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, fill=a.fill, tau=a.tau, **extra))
+        if a.serve != "fwd" or a.prefetch:
+            conds[i][1].update(serve=a.serve, prefetch=a.prefetch)
     outk = OUTCOMES[a.scenario]
     rows_out, series = [], {}
     if a.menu:

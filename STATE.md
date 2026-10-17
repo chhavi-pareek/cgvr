@@ -446,6 +446,28 @@
       - `supplementary.tex` (13 pp, Tables S1-S20, Fig. S1) holds the full original Results subsections and every secondary table. Cross-references use `xr`, with prefixes S-/M- and a fallback for shared captions.
       - Build order: supplementary, main (+bibtex), supplementary (+bibtex), main.
       - Audit (`review/numbers_audit_v3.py main.tex supplementary.tex`): 3 unmatched, all Emax = 9.21. ICIIPC overlap 0.3-0.4%. The pre-trim version is `review/main.tex.before_trim`.
+- **Round 8 (2026-10-18 ~00:30, written and committed before any run except one smoke test; the user said "go go go"): a bigger gain, by serving and prefetch.**
+  - **Why:** the paper's gains are confined to the museum. Exploratory offline probes on the existing answer tables, not the airport's (`bench/logs/aci/scripts/{proxy,rkl,small}_probe.py`), found:
+    - **Mismatch:** the surrogate is fitted by KL(p||q) but charged KL(q||p). The models are near-deterministic (top prob > 0.9 at 88% of museum contexts).
+    - **Sharpening:** sharpening the fitted surrogate cut mean KL(q||p) at unseen contexts by 40-55% wherever they resemble the seen ones (museum Qwen 1.24 -> 0.77, Gemma 0.87 -> 0.51; station Qwen 0.98 -> 0.57, Gemma 0.68 -> 0.30; Llama unchanged).
+    - **After the alarm:** nothing cheap predicts the model. The calm-trained surrogate, Qwen2.5-1.5B and other families all sit at 4-5 nats per decision (1.5B: 4.16 vs 4.36, top-1 43%).
+    - **So:** only the model's answers help there, which means asking for them before the shift.
+  - **Code** (switches off by default; with them off, 196/196 fields of recorded runs reproduce):
+    - `--serve sharp` (all policies): the served surrogate is q^(1/T). At every refit T is the value on (1, .7, .5, .35, .25, .18, .12) with the lowest mean KL(q_T||p) over the last 400 replies at contexts unseen when they landed, each scored against the surrogate's answer of that moment (out of sample).
+    - `--local` (adds strict PARITY "parity/risk strict local ..."): sharpen only where the kernel average (PARITY's K) of that out-of-sample gain is negative (it lowers drift).
+    - `--prefetch 30 60 120` (all policies, via rehearsal and fill): first ask the unseen contexts the people present will be in at t+30/60/120 s if they stay put, as the world forecasts them (`context(at_step)`, the mechanism already used for next-decision prediction), most people first; then the neighbours as before.
+    - Scope of prefetch: it forecasts clock-driven factors. These are the museum's scripted alarm and smoke, the station's train time, and the airport's boarding and time buckets. It does not forecast the airport's unannounced gate changes and delays.
+  - **Stage 1, selection on the development pair only** (Qwen museum, N 1000/2000, seeds 0-29; seed 0 of N1000 was seen once as a smoke test). Configs: standard; S; S+F. Each has strict PARITY (and local where S), frozen PARITY, the 4 baselines. Rules:
+    - R1: adopt S if strict PARITY's mean drift with S is below standard at both N, and its time over the cap is not higher by > 0.05 points at either N.
+    - R2: adopt F (on top of whatever R1 decided) by the same test against the config without F.
+    - R3: adopt L if strict local's mean drift is below strict non-local's at both N in the adopted config, with time over cap not higher by > 0.05 points.
+    - "New" = the adopted components. S and F apply to every policy; L to PARITY only.
+  - **Stage 2, validation on seeds 30-59** (unused for this). Settings: museum, station and airport, each with Qwen, Llama, Gemma and Mistral, at N 1000/2000 and the measured speed: 24 settings. Each runs the standard config (strict PARITY + 4 baselines) and the new config (new strict PARITY + 4 baselines with the same serving and prefetch). Paired Wilcoxon, Holm, p < 0.01.
+    - **V1** (system vs standard practice): new strict PARITY's mean drift is significantly below the best standard baseline's (lowest mean of the 4) in >= 18 of 24 settings (Holm over 24).
+    - **V2** (same serving, cap binds under new, best new baseline >= 0.05%): new PARITY's time over cap is significantly below the best new baseline's in >= half of those settings and significantly above in none (Holm over them; void if none binds).
+    - **V3** (same serving, slack under new): some new baseline has significantly lower mean drift than new PARITY in <= 1/4 of those settings (Holm over all PARITY-vs-baseline tests there).
+    - Reported without prediction: each baseline standard vs new (what serving and prefetch do for everyone); new vs standard strict PARITY on time over the cap; T chosen; share sharpened.
+  - Outputs: `bench/logs/ieee/r8/`. The paper's existing results stay as they are; round 8 is reported as a post hoc extension, labelled as such.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in

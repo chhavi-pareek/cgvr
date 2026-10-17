@@ -387,6 +387,61 @@ class DriftBound:
         return np.array([int(x) in self.exact for x in np.atleast_1d(c)])
 
 
+def sharpen(q, T):
+    """q ** (1 / T), renormalised and floored like every served answer."""
+    z = np.log(np.atleast_2d(q)) / T
+    q = np.exp(z - z.max(1, keepdims=True))
+    q = np.maximum(q / q.sum(1, keepdims=True), FLOOR)
+    return q / q.sum(1, keepdims=True)
+
+
+class Tempered:
+    """Post hoc (round 8): the surrogate as served, its answer sharpened to q ** (1 / T). The surrogate is fitted
+    to the replies by KL(p || q), which spreads its mass over every action the model might take, but each
+    decision is charged KL(q || p), which the chain rule ties to the trajectory and which punishes mass where the
+    model has almost none. At every refit T is the value on GRID with the lowest mean KL(q_T || p) over the
+    replies that arrived at contexts nobody had asked about yet, each scored against the surrogate's answer of
+    that moment, so out of sample. local (PARITY's risk charges only): sharpen only at contexts where the kernel
+    average of that out-of-sample gain, over the replied contexts near them, says it lowers the drift."""
+    GRID = (1.0, 0.7, 0.5, 0.35, 0.25, 0.18, 0.12)
+
+    def __init__(self, base, K=None, window=400, first=20):
+        self.base, self.K, self.window, self.first = base, K, window, first
+        self.T, self.sel = 1.0, None
+        self.oc, self.oq, self.op = deque(maxlen=window), deque(maxlen=window), deque(maxlen=window)
+
+    def observe(self, c, p):
+        self.base.observe(c, p)
+
+    def record(self, c, p):
+        self.oc.append(int(c))
+        self.oq.append(self.base(np.array([c]))[0])
+        self.op.append(np.asarray(p))
+
+    def fit(self):
+        if hasattr(self.base, "fit"):
+            self.base.fit()
+        if len(self.oc) < self.first:
+            return
+        Q, Pm = np.array(self.oq), np.array(self.op)
+        loss = [kl(sharpen(Q, T), Pm).mean() for T in self.GRID]
+        self.T = self.GRID[int(np.argmin(loss))]
+        if self.K is not None and self.T < 1.0:
+            gain = kl(sharpen(Q, self.T), Pm) - kl(Q, Pm)
+            w = self.K[:, np.fromiter(self.oc, np.int64)]
+            den = w.sum(1)
+            self.sel = np.where(den > 0, (w @ gain) / np.maximum(den, 1e-300) < 0, True)
+
+    def __call__(self, c):
+        q = self.base(c)
+        if self.T == 1.0:
+            return q
+        qs = sharpen(q, self.T)
+        if self.sel is None:
+            return qs
+        return np.where(self.sel[np.atleast_1d(c)][:, None], qs, q)
+
+
 class Run:
     """policy: parity | parity_nocap | cascade | view_lod | round_robin | surrogate_only | reference
 
@@ -401,7 +456,7 @@ class Run:
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
                  spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False, strata=False,
-                 oracle=False):
+                 oracle=False, serve="fwd", serve_local=False, prefetch=None):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -436,6 +491,14 @@ class Run:
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
         self.drift = DriftBound(novel, bound, alpha, tau=tau, delta=delta, eta=eta, scn=self.scn, wtau=wtau, wdecay=wdecay, strata=strata, rotations=rotations is not None,
                                 aci=aci, aci_mode=aci_mode)
+        # post hoc (round 8): the surrogate served sharpened (every policy alike), or sharpened where PARITY's
+        # kernel says it pays (serve_local, risk charges only)
+        if serve == "sharp":
+            assert not serve_local or self.risk, "local sharpening uses the risk charges' kernel"
+            self.sur = Tempered(self.sur, K=self.drift.K if serve_local else None)
+        # post hoc (round 8): rehearsal and fill first ask where the people here will be after the clock-driven
+        # changes the world forecasts (an alarm, a boarding call, a train time), at these horizons in seconds
+        self.prefetch = tuple(prefetch) if prefetch else ()
         self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
@@ -662,6 +725,8 @@ class Run:
             elif self.risk and calib and fresh:
                 self.drift.residual(c, self.sur(c)[0], p)
             self.calib_req.discard(agent)
+            if fresh and isinstance(self.sur, Tempered):
+                self.sur.record(c, p)
             self._learn(c, p, calib, rot)
             if self.seen % self.refit_every == 0:
                 self._refit()
@@ -1012,7 +1077,7 @@ class Run:
                 self.stats["rehearsals"] += 1
             if self.rtokens < 1:
                 return
-        for c in self._neighbours(occ, cnt)[:int(self.rtokens)]:
+        for c in self._ahead(t, here, occ, cnt)[:int(self.rtokens)]:
             self.server.submit(-1, c, t)
             self.rehearsing.add(c)
             self.rtokens -= 1
@@ -1033,6 +1098,20 @@ class Run:
                         score[c] = score.get(c, 0) + w
         return sorted(score, key=lambda c: (-score[c], c))
 
+    def _ahead(self, t, here, occ, cnt):
+        """The contexts to ask about ahead: with prefetch, first the unseen contexts the people here will be in
+        at each horizon if they stay put (most people first), then the neighbours of the occupied ones."""
+        if not self.prefetch:
+            return self._neighbours(occ, cnt)
+        score = {}
+        for h in self.prefetch:
+            f, k = np.unique(self.st.context(t, here, at_step=np.full(here.size, t + h)), return_counts=True)
+            for c, w in zip(f.tolist(), k.tolist()):
+                if c not in self.drift.p and c not in self.rehearsing:
+                    score[c] = score.get(c, 0) + w
+        first = sorted(score, key=lambda c: (-score[c], c))
+        return first + [c for c in self._neighbours(occ, cnt) if c not in score]
+
     def _fill(self, t):
         """Spend the main budget's whole tokens left after scheduling (one kept for the next second)
         on replies next to the crowd's contexts, as rehearsal does: no policy leaves the model idle."""
@@ -1044,7 +1123,7 @@ class Run:
         if here.size == 0:
             return
         occ, cnt = np.unique(st.context(t, here), return_counts=True)
-        for c in self._neighbours(occ, cnt)[:k]:
+        for c in self._ahead(t, here, occ, cnt)[:k]:
             self.server.submit(-1, c, t)
             self.rehearsing.add(c)
             self.tokens -= 1
@@ -1167,4 +1246,6 @@ class Run:
                     overflow_if_unforced=unforced / max(stretches - with_forced, 1),
                     **self._person_tail(),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),
+                    **({} if not isinstance(self.sur, Tempered) else
+                       dict(serve_T=self.sur.T, serve_sel=float(np.mean(self.sur.sel)) if self.sur.sel is not None else 1.0)),
                     **st.outcomes())
