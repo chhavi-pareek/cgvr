@@ -174,7 +174,7 @@ class DriftBound:
     # stream is not stationary (the surrogate is still learning and the crowd still spreading in
     # the first minutes), which is where the plain window under-charged.
     def __init__(self, novel=False, bound="worst", alpha=0.1, tau=0.5, delta=0.05, eta=0.25, scn=station,
-                 rotations=False, window=200, aci=None, aci_mode="cal", wtau=None, wdecay=None):
+                 rotations=False, window=200, aci=None, aci_mode="cal", wtau=None, wdecay=None, strata=False):
         self.n_ctx = scn.N_CTX
         # order-free reference (rotations): a reply shows the answer under ONE order, the reference
         # is the mean over all six; the charge is a bound that is exact once all six are seen
@@ -191,6 +191,10 @@ class DriftBound:
         # weighted margin (off unless set): residual i weighs exp(-h(c, c_i) / wtau), its context's
         # distance from the charged one, times wdecay ** its age in residuals
         self.wtau, self.wdecay = wtau, wdecay
+        # event strata (off unless set): a residual counts only for contexts in the same state of the scenario's
+        # known event (the museum's alarm), Mondrian conformal by that factor; a scenario without one is unchanged
+        ev = getattr(scn, "EVENT_PART", None) if strata else None
+        self.ev = np.asarray(scn.ctx_parts(np.arange(self.n_ctx))[ev]) if ev is not None else None
         self.res_c, self.res_i, self.res_n = deque(maxlen=window), deque(maxlen=window), 0
         self.parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1) if wtau else None
         # aci_mode "cal": the level adapts to calibration residuals; "spent": to the charges actually
@@ -313,6 +317,8 @@ class DriftBound:
             w = w * np.exp(-h / self.wtau)
         if self.wdecay:
             w = w * self.wdecay ** (self.res_n - 1 - np.fromiter(self.res_i, np.int64))[None, :]
+        if self.ev is not None:
+            w = w * (self.ev[c][:, None] == self.ev[np.fromiter(self.res_c, np.int64)][None, :])
         w = w[:, o]
         ok = np.cumsum(w, 1) / (w.sum(1, keepdims=True) + 1.0) >= (1 - alpha)[:, None] - 1e-12
         return np.where(ok.any(1) & (alpha > 0), r[o][ok.argmax(1)], np.inf)
@@ -323,7 +329,7 @@ class DriftBound:
         c, alpha = np.atleast_1d(c), np.broadcast_to(alpha, np.shape(np.atleast_1d(c)))
         if self.aci is not None:
             alpha = alpha * (self.a_t / (self.alpha / 2))
-        q = self._wquantile(c, alpha) if (self.wtau or self.wdecay) else self._quantile(alpha)
+        q = self._wquantile(c, alpha) if (self.wtau or self.wdecay or self.ev is not None) else self._quantile(alpha)
         est = np.clip(self.pred[c] + q, 0.0, E_MAX)
         return np.array([self.exact.get(int(x), e) for x, e in zip(c, est)])
 
@@ -394,7 +400,7 @@ class Run:
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
-                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False):
+                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False, strata=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -427,7 +433,7 @@ class Run:
         self.rehearse_orders = rehearse_orders and rotations is not None
         self.explore_eff = explore if cal_adapt else None
         self.sur = Distilled(scn=self.scn) if surrogate == "distilled" else Marginal(self.scn)
-        self.drift = DriftBound(novel, bound, alpha, tau=tau, delta=delta, eta=eta, scn=self.scn, wtau=wtau, wdecay=wdecay, rotations=rotations is not None,
+        self.drift = DriftBound(novel, bound, alpha, tau=tau, delta=delta, eta=eta, scn=self.scn, wtau=wtau, wdecay=wdecay, strata=strata, rotations=rotations is not None,
                                 aci=aci, aci_mode=aci_mode)
         self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
@@ -476,7 +482,7 @@ class Run:
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
-                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, overflowed_unforced=0, est=0, est_miss=0,
+                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, overflowed_unforced=0, stretches_forced=0, est=0, est_miss=0,
                           small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0, est_level=0.0, look=0, look_level=0.0, look_miss=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
@@ -524,6 +530,7 @@ class Run:
         self.stats["stretches"] += int(had.size)
         self.stats["overflowed"] += int(self.over[had].sum())
         self.stats["overflowed_unforced"] += int((self.over[had] & ~self.forced_in[had]).sum())
+        self.stats["stretches_forced"] += int(self.forced_in[had].sum())
         self.L[idx] = 0.0; self.Ls[idx] = 0.0; self.D[idx] = 0.0; self.nsur[idx] = 0; self.over[idx] = False
         self.forced_in[idx] = False
         self.R[idx] = self.alpha_tot
@@ -1100,6 +1107,7 @@ class Run:
         stretches = s["stretches"] + int(open_.sum())
         overflowed = s["overflowed"] + int(self.over[open_].sum())
         unforced = s["overflowed_unforced"] + int((self.over[open_] & ~self.forced_in[open_]).sum())
+        with_forced = s["stretches_forced"] + int(self.forced_in[open_].sum())
         dec = s["llm"] + s["sur"]
         dec += s["small"]
         dec += s["cached"]
@@ -1116,6 +1124,7 @@ class Run:
                     look=s["look"], look_level=s["look_level"] / max(s["look"], 1), look_miss_frac=s["look_miss"] / max(s["look"], 1),
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
-                    overflow_unforced_frac=unforced / max(stretches, 1),
+                    overflow_unforced_frac=unforced / max(stretches, 1), forced_stretch_frac=with_forced / max(stretches, 1),
+                    overflow_if_unforced=unforced / max(stretches - with_forced, 1),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),
                     **st.outcomes())

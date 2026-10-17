@@ -29,6 +29,7 @@ SIZES = museum.SIZES + (N_M,)
 N_CTX = museum.N_CTX * N_M
 SEE_EXIT_P, FIND_EXHIBIT_P = 0.5, 0.3
 ALARM_S, SMOKE_S = museum.ALARM_S, museum.SMOKE_S
+EVENT_PART = museum.EVENT_PART                           # memory is appended last, so the alarm keeps its index
 
 
 def ctx_index(p, a, x, g, z, m):

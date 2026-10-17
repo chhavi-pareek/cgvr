@@ -321,6 +321,34 @@
           - **Museum coverage holds only as frozen** (7.3/4.7% at 8.4/8.1%); matched 9.7-11.0%, W 9.1-10.6%.
         - make_tables: `add_strict()`, a posthoc table with F/+spill/+debit/matched, tab:strict dropped, and `debt_summary()`. Overlap with ICIIPC is 0.1-0.3% (affiliation and math only).
     - **Round 4f (2026-10-17, written before running; diagnostic, nothing decided by it):** overflow over A in the Gemma museum (kappa 5: 23.5%, x0.5: 25.8%) mixes stretches with a forced decision (outside Theorem 2) and without. New instrumentation `overflow_unforced_frac`: overflowed stretches with no forced decision / stretches. It records only and changes no decision, so every other field must match the recorded runs exactly; that is also the check that the final commit reproduces them. Runs, strict, seeds 0-29 (`bench/logs/ieee/ovsplit/`): kappa 5 in the 4 binding pairs + Mistral x 2; x0.5 in the 4 binding pairs + Mistral museum. Reproduction of the main runs: frozen PARITY, cascade, cascade/reh and the debt-allowed variant, Gemma museum N 1000, the same seeds. Reported whatever it shows.
+      - **Result (13:00):**
+        - Reruns at d0156bd match **420 recorded runs field by field** (0 differences): 300 strict runs, plus 120 frozen, cascade, cascade+reh and debt-allowed runs.
+        - **The overflow excess is forced.** Overflowed stretches with no forced decision, as a share of all stretches:
+          - Gemma museum kappa 5: 4.68% (total 23.51%);
+          - Gemma museum x0.5: 0.25% (total 25.84%);
+          - Qwen museum kappa 5: 10.75% (15.65%);
+          - Mistral museum x0.5: 0.52% (12.88%);
+          - all others <= 3.12%.
+    - **Round 5 (2026-10-17 ~13:05, written and committed before any run; jobs `bench/logs/aci/scripts/round5_jobs.txt`):**
+      - (a) **Conditional overflow.** New record-only fields: `forced_stretch_frac` and `overflow_if_unforced` (overflowed / stretches with no forced decision, the quantity Theorem 2 bounds). Rerun the 10 round-4f settings (`bench/logs/ieee/ovsplit2/`). Reported as is.
+      - (b) **Event-stratified margin** (`--strata`): Mondrian conformal by the scenario's known event factor (the museum's alarm state) on top of the recency weighting chosen earlier (0.99).
+        - It has no parameter, and it is a no-op in the station (checked on one seed: identical).
+        - Runs: museum, 4 models, N 1000/2000, strict, seeds 0-29 (`strict/{scn}_{tag}_strata_strict_N{n}.csv`), compared with W (strict).
+        - Expectation: first-look under-charge after the alarm falls for Qwen and Gemma; held time rises right after the alarm, while the post-alarm stratum is too small and charges are E_MAX. Llama's calm-phase misses are not addressed.
+        - Not adopted into any configuration; reported whatever it shows.
+      - (c) **Confirmatory replication on fresh seeds 30-59** (never run before; `bench/logs/ieee/replic/`; same flags as the original runs; strict PARITY + the 4 baselines, plus frozen PARITY in the x1 cells).
+        - **Primary family, 17 tests, Holm:** every cell where a post hoc table reports strict PARITY's time over the cap significantly below the lowest baseline:
+          - x1 N1000/2000: Qwen and Gemma museum (4);
+          - kappa 5: Qwen museum, Gemma museum, Qwen station (3);
+          - kappa 20: Gemma museum (1);
+          - N5000: Qwen museum, Gemma museum, Gemma station (3);
+          - x0.5: Qwen museum, Gemma museum, Qwen station, Mistral museum (4);
+          - marginal surrogate: Qwen and Gemma museum (2).
+        - **Prediction:** in each cell, strict PARITY's time over the cap is below that of the baseline with the lowest mean on seeds 30-59 (paired Wilcoxon, Holm-adjusted p < 0.01). We report how many of the 17 replicate.
+        - **Secondary** (Holm within each):
+          - frozen PARITY in the 4 x1 museum cells: lower over cap than the lowest baseline;
+          - x2 museum Qwen, Llama, Gemma: strict PARITY's drift above the lowest baseline's in Llama and Gemma, as on seeds 0-29.
+      - (d) **Reproduction at the final commit:** Gemma museum N1000, seeds 0-29 (frozen, cascade, cascade+reh, debt-allowed) and strict kappa 5 Gemma museum, compared field by field with the recorded runs.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in

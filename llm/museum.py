@@ -53,6 +53,7 @@ N_ACT = len(ACTIONS)
 SIZES = (N_P, N_A, N_X, N_G, N_Z)
 
 ALARM_S, SMOKE_S = 300, 480
+EVENT_PART = 1                                           # ctx_parts index of the alarm state, a known event
 WALK = np.array([[60, 40], [30, 35], [45, 8], [5, 40]])  # zone -> seconds to (main, emergency) exit
 DWELL = {A_SEARCH: 30, A_WAIT: 30, A_COAT: 70, A_BROWSE: 90}
 MAIN_PER_1000, EMERG_PER_1000 = 2.0, 1.0                  # people per second through each exit

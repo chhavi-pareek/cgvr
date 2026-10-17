@@ -124,6 +124,9 @@ def main():
     ap.add_argument("--strict", action="store_true",
                     help="with --risk, also run matched PARITY whose held and mandatory requests may not run the budget "
                          "into debt (post hoc)")
+    ap.add_argument("--strata", action="store_true",
+                    help="with --strict and --wcp, also run the weighted margin with residuals counted only within the "
+                         "same state of the scenario's known event (the museum's alarm; post hoc)")
     ap.add_argument("--cascade-hold", action="store_true",
                     help="post hoc baseline: also run cascade holding an agent whose reply for this very decision is in "
                          "flight, at most the first --max-wait seconds")
@@ -185,6 +188,8 @@ def main():
             conds.insert(at, (f"parity/risk strict{tag}", dict(full, spill=True, debit=True, strict=True)))
             if a.wcp:
                 conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g}{tag}", dict(full, **wk, strict=True)))
+                if a.strata:
+                    conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g} strata{tag}", dict(full, **wk, strict=True, strata=True)))
     if a.cascade_hold and a.max_wait:
         conds.append((f"cascade/wait {a.max_wait[0]:g}", dict(max_wait=a.max_wait[0])))
     if a.policies:
