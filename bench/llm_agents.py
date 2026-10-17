@@ -127,6 +127,9 @@ def main():
     ap.add_argument("--strata", action="store_true",
                     help="with --strict and --wcp, also run the weighted margin with residuals counted only within the "
                          "same state of the scenario's known event (the museum's alarm; post hoc)")
+    ap.add_argument("--oracle", action="store_true",
+                    help="post hoc upper bounds: matched (strict) PARITY charged the true drift with no calibration share, "
+                         "and cascade escalating the decisions with the largest true drift (both read the answer table)")
     ap.add_argument("--cascade-hold", action="store_true",
                     help="post hoc baseline: also run cascade holding an agent whose reply for this very decision is in "
                          "flight, at most the first --max-wait seconds")
@@ -190,6 +193,10 @@ def main():
                 conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g}{tag}", dict(full, **wk, strict=True)))
                 if a.strata:
                     conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g} strata{tag}", dict(full, **wk, strict=True, strata=True)))
+    if a.oracle and a.risk:
+        conds.append((f"parity/oracle strict{tag}", dict(full, spill=True, debit=True, strict=True, oracle=True, explore=0.0)))
+    if a.oracle:
+        conds.append(("cascade/oracle", dict(oracle=True)))
     if a.cascade_hold and a.max_wait:
         conds.append((f"cascade/wait {a.max_wait[0]:g}", dict(max_wait=a.max_wait[0])))
     if a.policies:
@@ -228,6 +235,7 @@ def main():
         rsum = [r.summary() for r in ref]
         if a.csv:
             for sd, r in zip(a.seeds, ref):
+                series[f"reference|{n}|{sd}|ctx"] = r.ctx_count.astype(np.int32)
                 if hasattr(r.st, "out_t"):
                     series[f"reference|{n}|{sd}|out_t"] = np.array(r.st.out_t, float)
                     series[f"reference|{n}|{sd}|at_alarm"] = np.array([r.st.at_alarm or 0])
@@ -250,6 +258,7 @@ def main():
                 for sd, r in zip(a.seeds, rr):
                     series[f"{name}|{n}|{sd}|kl"] = np.array(r.kl_t)
                     series[f"{name}|{n}|{sd}|agent_s"] = np.array(r.agent_s_t)
+                    series[f"{name}|{n}|{sd}|ctx"] = r.ctx_count.astype(np.int32)
                     if r.looks:
                         series[f"{name}|{n}|{sd}|looks"] = np.array(r.looks, float)   # second, missed, level
                     if hasattr(r.st, "out_t"):

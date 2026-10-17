@@ -382,6 +382,16 @@
         - **P2:** the same at half speed.
         - **P3:** in each model and N, W+E's museum-style fix also works here: its first-look under-charge is below W's (p < 0.01).
         - Drift, outcomes and coverage levels are reported whatever they show.
+    - **Round 6b (2026-10-17 ~14:30, written and committed before the runs; jobs `bench/logs/aci/scripts/round6b_jobs.txt`):**
+      - **(a) Regime test** (`bench/logs/ieee/regime/`): twice the speed with 5000 agents, museum, Qwen, Llama and Gemma; strict PARITY + the 4 baselines; seeds 0-29.
+        - **Prediction R1:** the cap binds again in the Qwen and Gemma museums (best baseline >= 0.05%). There, strict PARITY's time over the cap is significantly below the best baseline's (paired Wilcoxon, Holm over the regime table's over-cap tests, p < 0.01).
+        - Llama: no prediction (its museum cap has never bound).
+        - Rationale: what matters is the load per model call. x2 with N 5000 is about the load of x1 with N 2500.
+      - **(b) Upper bounds and neutral measures** (`bench/logs/ieee/tail/`): every main pair (6 + Mistral x 2), N 1000/2000, seeds 0-29.
+        - Conditions: frozen PARITY, strict PARITY, the 4 baselines, plus two oracles. `--oracle` adds `parity/oracle strict reh wait 30` (strict PARITY charged the true drift, no calibration share) and `cascade/oracle` (cascade escalating the largest true drift).
+        - New record-only fields: per-person drift rate p50/p90/p99 and the top-1% mean (persons present >= 60 s); stretch-drift p90/p99/p99.9; per-run context counts in the series, for the total-variation distance to the reference crowd of the same seed (how far the crowd's situations move, the interaction Theorem 1 ignores).
+        - Every other field must match the recorded runs (reproduction again).
+        - Descriptive, no prediction. Disclosed: a 2-seed smoke test on the Gemma museum (N 1000) was seen before this commit. It showed no per-person-tail advantage for PARITY over cascade, and oracle PARITY at 1.07-2.38% over the cap against strict PARITY's 1.97-3.04%.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in

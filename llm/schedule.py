@@ -400,7 +400,8 @@ class Run:
                  delta=0.05, eta=0.25, small=None, scenario=None, rehearse=0.0, max_wait=None, rotations=None,
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
-                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False, strata=False):
+                 spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False, strata=False,
+                 oracle=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -486,6 +487,14 @@ class Run:
                           small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0, est_level=0.0, look=0, look_level=0.0, look_miss=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
+        # record only: each person's drift and seconds present (their drift rate, a tail measure not tied to the
+        # cap), and how often each context is met (the crowd's situations, against the reference crowd's)
+        self.pd, self.pt, self.person_rates = np.zeros(n), np.zeros(n), []
+        self.stretch_D = []                                  # record only: true drift of every closed stretch
+        self.ctx_count = np.zeros(self.scn.N_CTX)
+        # upper bound (post hoc): charges are the true drift of the surrogate in use, read from the table; for
+        # cascade, the decisions with the largest true drift are escalated first
+        self.oracle = oracle
         self.far = far_salience
         # cache: a decision at a context the model has answered is drawn from that answer (the
         # reference itself, so it drifts 0 and ends the stretch like a model decision), and no
@@ -530,15 +539,24 @@ class Run:
         self.stats["stretches"] += int(had.size)
         self.stats["overflowed"] += int(self.over[had].sum())
         self.stats["overflowed_unforced"] += int((self.over[had] & ~self.forced_in[had]).sum())
+        self.stretch_D.extend(self.D[had].tolist())
         self.stats["stretches_forced"] += int(self.forced_in[had].sum())
         self.L[idx] = 0.0; self.Ls[idx] = 0.0; self.D[idx] = 0.0; self.nsur[idx] = 0; self.over[idx] = False
         self.forced_in[idx] = False
         self.R[idx] = self.alpha_tot
         self.wait_from[idx] = -1
 
+    def _person_done(self, idx):
+        idx = np.atleast_1d(idx)
+        ok = idx[self.pt[idx] >= 60]
+        self.person_rates.extend((self.pd[ok] / (self.pt[ok] / 3600.0)).tolist())
+        self.pd[idx] = 0.0
+        self.pt[idx] = 0.0
+
     def _respawned(self):
         new = np.flatnonzero(self.st.gen != self.gen_seen)
         if new.size:
+            self._person_done(new)
             self._close(new)
             self.gen_seen[new] = self.st.gen[new]
 
@@ -584,6 +602,9 @@ class Run:
     def _charge(self, i, c):
         """What agent(s) i are charged for a surrogate decision at c: in risk mode the level is half
         of the risk budget the agent has left in this stretch."""
+        if self.oracle:
+            c = np.atleast_1d(c)
+            return kl(self.sur(c), self.P[c])
         if self.risk:
             return self.drift.charge_at(c, self.R[np.atleast_1d(i)] / 2)
         return self.drift(c)
@@ -652,6 +673,7 @@ class Run:
         dec = np.flatnonzero(st.busy_until <= t)
         if dec.size:
             x = st.context(t, dec)
+            np.add.at(self.ctx_count, x, 1)
             acts, go = [], []
             for i, c in zip(dec, x):
                 a = self._decide(int(i), int(c), t)
@@ -666,6 +688,7 @@ class Run:
         if t == self.steady_from:
             self.kl_at, self.agent_s_at = self.stats["kl"], self.stats["agent_s"]
         self.stats["agent_s"] += st.present()
+        self.pt += st.inside if hasattr(st, "inside") else 1
         self.stats["view_s"] += int((self.salience(t) == 1.0).sum())
         self.stats["dmax"] = max(self.stats["dmax"], float(self.D.max()))
         self.stats["over_cap"] += int((self.D > self.cap + 1e-9).sum())
@@ -700,6 +723,7 @@ class Run:
                 self.stats["small"] += 1
                 self.wait_from[i] = -1
                 self.stats["kl"] += d
+                self.pd[i] += d
                 if self.salience(t)[i] == 1.0:
                     self.stats["kl_view"] += d
                 self.stalled.discard(i)
@@ -789,6 +813,7 @@ class Run:
         self.stats["covered"] += int(d <= e + 1e-12)
         self.stats["sur"] += 1
         self.stats["kl"] += d
+        self.pd[i] += d
         if self.salience(t)[i] == 1.0:
             self.stats["kl_view"] += d
         self.ndec[i] += 1
@@ -935,7 +960,7 @@ class Run:
                 self.inflight[cand[j]] = True
                 self.tokens -= 1
         elif self.policy == "cascade":
-            conf = self.sur(xhat).max(1)
+            conf = -kl(self.sur(xhat), self.P[xhat]) if self.oracle else self.sur(xhat).max(1)
             for j in np.argsort(conf, kind="stable"):
                 if self.tokens < 1:
                     break
@@ -1100,6 +1125,20 @@ class Run:
             self.step(t)
         return self
 
+    def _person_tail(self):
+        """Percentiles of the drift rate (nats per person-hour) over every person present for at least a minute,
+        and the mean of the top 1%: a tail measure that does not depend on the cap."""
+        cur = self.pt >= 60
+        r = np.asarray(self.person_rates + (self.pd[cur] / (self.pt[cur] / 3600.0)).tolist())
+        if r.size == 0:
+            return dict(person_p50=float("nan"), person_p90=float("nan"), person_p99=float("nan"), person_top1=float("nan"), persons=0)
+        top = np.sort(r)[-max(1, int(np.ceil(0.01 * r.size))):]
+        sd = np.asarray(self.stretch_D + self.D[self.nsur > 0].tolist())
+        sq = (lambda f: float(np.percentile(sd, f))) if sd.size else (lambda f: float("nan"))
+        return dict(person_p50=float(np.percentile(r, 50)), person_p90=float(np.percentile(r, 90)),
+                    person_p99=float(np.percentile(r, 99)), person_top1=float(top.mean()), persons=int(r.size),
+                    stretch_p90=sq(90), stretch_p99=sq(99), stretch_p999=sq(99.9))
+
     def summary(self):
         s, st = self.stats, self.st
         hours = s["agent_s"] / 3600.0
@@ -1126,5 +1165,6 @@ class Run:
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
                     overflow_unforced_frac=unforced / max(stretches, 1), forced_stretch_frac=with_forced / max(stretches, 1),
                     overflow_if_unforced=unforced / max(stretches - with_forced, 1),
+                    **self._person_tail(),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),
                     **st.outcomes())
