@@ -392,6 +392,29 @@
         - New record-only fields: per-person drift rate p50/p90/p99 and the top-1% mean (persons present >= 60 s); stretch-drift p90/p99/p99.9; per-run context counts in the series, for the total-variation distance to the reference crowd of the same seed (how far the crowd's situations move, the interaction Theorem 1 ignores).
         - Every other field must match the recorded runs (reproduction again).
         - Descriptive, no prediction. Disclosed: a 2-seed smoke test on the Gemma museum (N 1000) was seen before this commit. It showed no per-person-tail advantage for PARITY over cascade, and oracle PARITY at 1.07-2.38% over the cap against strict PARITY's 1.97-3.04%.
+    - **Round 6 results (2026-10-17 20:39; the laptop hibernated 17:54-18:00 at 1% and everything resumed):**
+      - **Airport (6a): the predictions about the cap FAIL.**
+        - P1 is void: at x1 the cap never binds (best baseline <= 0.03%; cache 63-86%).
+        - P2 fails: at x0.5 the cap binds barely for Qwen, Gemma and Mistral (0.15-0.26%), and PARITY leads in none (0.17-0.32%, n.s.).
+        - PARITY's drift is significantly higher for Qwen, Gemma and Mistral everywhere (e.g. Gemma N2000 4.5 vs 3.8). Llama ties at x1 and is lower at x0.5.
+        - Mistral N2000: over cap 0.05 vs 0.01, significantly worse.
+        - **P3 holds:** W+E first look is 1.7-2.7%, against W 3.2-4.5% and M 3.6-4.5% at levels 5.2-9.1%; significant in 8/8.
+      - **Regime test (6b): R1 FAILS.** At x2 with N5000 the cap does not bind (best baseline 0.03/0.00/0.04%). Cache share follows the number of calls, not N: 61-77% at x2 with either N, against 41-58% at x1.
+      - **Oracles:** oracle PARITY roughly halves time over the cap in the Gemma museum (1.22/1.62 vs 2.45/2.83), and its drift is lower in all but one setting. The oracle cascade has similar drift but is worse over the cap (2.58/3.37).
+      - **Neutral measures:**
+        - Stretch p99: lower for PARITY in the Qwen museum (both N) and the Gemma museum N2000; higher in the Mistral station.
+        - Person drift-rate p99: never lower for PARITY. It ties in the museums and is higher in 7 (stations Qwen, Gemma and Mistral at both N, plus Mistral museum N1000).
+        - TV of crowd contexts vs reference: PARITY is further in 14/16 (0.08-0.57 vs 0.05-0.28).
+      - **Pooled, 67 settings (tab:slack, fig:regime):**
+        - Binding 26: over cap 15 lower / 0 higher, all 15 in the museum or station. Drift: a baseline is lower in 4.
+        - Slack 41: some baseline lower in 13 (incl. all Qwen/Gemma/Mistral airport settings).
+        - Cache share alone does not separate the regimes: museum leads at < 60% cache, but airport x0.5 at 49-71% gives no lead.
+      - **Paper:**
+        - 25 pp, abstract 250 words, ICIIPC overlap 0.1-0.3%.
+        - New sections: airport, upper bounds/neutral measures. Regime-test sentences; fig:regime.
+        - Appendix: regime and oracle tables.
+        - Rewritten: abstract, intro, contributions, Discussion, Scope, Conclusion.
+        - Graphical abstract draft: `IEEE_Access_paper/figs/graphical_abstract.pdf`, including the airport caveat.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
