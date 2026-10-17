@@ -446,7 +446,7 @@
       - `supplementary.tex` (13 pp, Tables S1-S20, Fig. S1) holds the full original Results subsections and every secondary table. Cross-references use `xr`, with prefixes S-/M- and a fallback for shared captions.
       - Build order: supplementary, main (+bibtex), supplementary (+bibtex), main.
       - Audit (`review/numbers_audit_v3.py main.tex supplementary.tex`): 3 unmatched, all Emax = 9.21. ICIIPC overlap 0.3-0.4%. The pre-trim version is `review/main.tex.before_trim`.
-- **Round 8 (2026-10-18 ~00:30, written and committed before any run except one smoke test; the user said "go go go"): a bigger gain, by serving and prefetch.**
+- **Round 8 (2026-10-17 ~23:30, written and committed (d889065) before any run except one smoke test; the user said "go go go"): a bigger gain, by serving and prefetch.**
   - **Why:** the paper's gains are confined to the museum. Exploratory offline probes on the existing answer tables, not the airport's (`bench/logs/aci/scripts/{proxy,rkl,small}_probe.py`), found:
     - **Mismatch:** the surrogate is fitted by KL(p||q) but charged KL(q||p). The models are near-deterministic (top prob > 0.9 at 88% of museum contexts).
     - **Sharpening:** sharpening the fitted surrogate cut mean KL(q||p) at unseen contexts by 40-55% wherever they resemble the seen ones (museum Qwen 1.24 -> 0.77, Gemma 0.87 -> 0.51; station Qwen 0.98 -> 0.57, Gemma 0.68 -> 0.30; Llama unchanged).
@@ -468,6 +468,18 @@
     - **V3** (same serving, slack under new): some new baseline has significantly lower mean drift than new PARITY in <= 1/4 of those settings (Holm over all PARITY-vs-baseline tests there).
     - Reported without prediction: each baseline standard vs new (what serving and prefetch do for everyone); new vs standard strict PARITY on time over the cap; T chosen; share sharpened.
   - Outputs: `bench/logs/ieee/r8/`. The paper's existing results stay as they are; round 8 is reported as a post hoc extension, labelled as such.
+  - **Stage 1 result (23:47, rules applied by `bench/logs/aci/scripts/r8_rules.py`):** NEW = S + F, no L.
+    - Strict PARITY drift, N1000 / N2000:
+
+      | Config | Drift | Over cap |
+      |---|---|---|
+      | standard | 20.80 / 22.84 | 0.054 / 0.142% |
+      | S | 18.23 / 20.38 | 0.030 / 0.116% |
+      | S+F | 15.17 / 14.94 | 0.036 / 0.059% |
+
+    - R1 adopts S; R2 adopts F. R3 rejects L (15.53 / 15.27 against 15.17 / 14.94).
+    - Already visible: the baselines gain more. Under S+F, cascade's drift is 12.51 / 14.39 and cascade+reh's 13.59 / 13.42, both below strict PARITY. The best baseline's time over the cap falls to 0.056 / 0.119%.
+    - Stage 2 launched at 23:47 with `--serve sharp --prefetch 30 60 120` (48 jobs, `r8_stage2.sh`).
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
