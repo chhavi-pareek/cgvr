@@ -428,6 +428,19 @@
         - Measurement: per-context KL between the 8-bit and 4-bit answers, in the museum and the station, against the drift scale.
         - Runs: the museum with memory, with the 8-bit model as the reference at its own measured latency; N 1000/2000, seeds 0-29; frozen, strict, the 4 baselines (`bench/logs/ieee/q8/`).
         - **Prediction:** the cap binds (best baseline >= 0.05%), and strict PARITY's time over the cap is significantly below the best baseline's at both N (Holm over the Q8 table, p < 0.01), as with the 4-bit model.
+    - **Round 7 results (2026-10-17 ~22:45; tables from `IEEE_Access_paper/make_tables.py`, `tables/phased.tex`, `tables/q8.tex`, summary in `review/make_tables_summary.txt`):**
+      - **(a) Phased alarm.** Relative reduction 1 - P/base (strict PARITY vs best baseline), global -> phased:
+        - Qwen N1000 0.78 -> 0.38, Qwen N2000 0.74 -> 0.49, Gemma N1000 0.34 -> 0.36, Gemma N2000 0.30 -> 0.25.
+        - Mean 0.54 -> 0.37: smaller by 0.17, so H is NOT rejected by the recorded rule (not within 0.1, not larger).
+        - But smaller in only 3 of 4 settings (Gemma N1000 is not), so the stricter per-setting prediction FAILS.
+        - The cap binds far less: best baseline 0.09-1.07% of agent-time (global 0.25-4.06%). Strict PARITY 0.05-0.80%; significantly lower (Holm) in 3 of 4 (not Qwen N1000, where the cap only just binds).
+        - Paper wording: the abruptness of a shift explains much of where the cap binds and part, not all, of PARITY's gain.
+      - **(b) 8-bit Qwen.** KL(8-bit || 4-bit) per context: station mean 0.10, museum 0.17 nats; median 0.0000; p99 2.55 / 3.20; top answer differs at 5.0% / 7.2% of contexts. Budget 1.54 calls/s (4-bit 1.36), 31% / 16% servable.
+        - Museum, N1000 / 2000: best baseline (round robin) 0.37% / 0.65% over the cap; strict PARITY 0.03% / 0.10%, frozen 0.04% / 0.09%, all p < 0.001 Holm. **Prediction HOLDS** at both N.
+        - Drift: strict 19.5 vs 19.4, 21.9 vs 22.3 (n.s.); frozen 23.0 vs 19.4 at N1000 (significantly higher), 23.1 vs 22.3 at N2000 (n.s.).
+        - The 4-bit museum table's mean latency (1.53 s) was measured under load and is not used; budgets come from the station tables, as for every model.
+      - Paper: phased paragraph and Table phased in Sec. All Settings; Quantization paragraph in Sensitivity, Table q8 in the appendix, Scope sentence updated, two rows in the analyses table. 25 pp, audit 2 unmatched (both Emax = 9.21), overlap with ICIIPC 0.1% / 0.2%.
+      - **Experiments stop here** (agreed with the user): only author items remain.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
