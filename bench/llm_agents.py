@@ -183,6 +183,8 @@ def main():
             conds.insert(at, (f"parity/risk spill debit{tag}", dict(full, spill=True, debit=True)))
         if a.strict:
             conds.insert(at, (f"parity/risk strict{tag}", dict(full, spill=True, debit=True, strict=True)))
+            if a.wcp:
+                conds.insert(at, (f"parity/risk strict wcp {a.wcp[0]:g} {a.wcp[1]:g}{tag}", dict(full, **wk, strict=True)))
     if a.cascade_hold and a.max_wait:
         conds.append((f"cascade/wait {a.max_wait[0]:g}", dict(max_wait=a.max_wait[0])))
     if a.policies:
