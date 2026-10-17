@@ -480,6 +480,17 @@
     - R1 adopts S; R2 adopts F. R3 rejects L (15.53 / 15.27 against 15.17 / 14.94).
     - Already visible: the baselines gain more. Under S+F, cascade's drift is 12.51 / 14.39 and cascade+reh's 13.59 / 13.42, both below strict PARITY. The best baseline's time over the cap falls to 0.056 / 0.119%.
     - Stage 2 launched at 23:47 with `--serve sharp --prefetch 30 60 120` (48 jobs, `r8_stage2.sh`).
+  - **Stage 2 results (2026-10-18 01:14; 48/48 complete; `make_tables.py` r8_summary, `tables/r8.tex`):**
+    - **V1 FAILS:** new strict PARITY's drift is significantly below the best standard baseline's in 13/24 (predicted >= 18), and above in 1.
+    - **V2 FAILS:** the cap binds under new in 5 settings. PARITY is nominally lower in all 4 museum ones but significant only Gemma N2000 (0.24 vs 0.49%; others Holm p 0.011-0.036). It is significantly higher in the Gemma airport N2000.
+    - **V3 FAILS:** some new baseline is significantly below new PARITY's drift in 9/19 slack settings (predicted <= 1/4).
+    - **System, reported without prediction:**
+      - Mean drift falls in 92/120 policy-setting pairs (71/96 baselines, 21/24 PARITY) and rises in 2; the largest fall is 85%.
+      - Where the standard cap bound (museum: Qwen, Gemma, Mistral x 2 N), new PARITY vs the best standard baseline on time over the cap: 5.6-17.4x less, all Holm p <= 4e-6. Gemma N2000: 0.24 vs 4.14%.
+      - T chosen: Qwen 0.25-0.34, Gemma 0.33-0.51, Mistral 0.29-0.50, Llama 1.00 (its answers are not sharp: top > 0.9 at 12% of museum contexts, against 71-89% for the others).
+      - Mistral museum cache 80-82% -> 95%.
+    - **Reading:** serving and prefetch are the larger, policy-agnostic contribution; the baselines gain more than PARITY.
+    - Paper: new Sec. "Serving for the Charged Drift and Asking Ahead" with Table r8; abstract, intro, discussion and conclusion rewritten around it; 2 rows in the analyses table. 16 pp, audit 3 unmatched (Emax), overlap 0.3-0.4%. Pre-round-8 versions: `review/main.tex.before_r8`, `review/supplementary.tex.before_r8`.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
