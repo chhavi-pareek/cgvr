@@ -320,6 +320,7 @@
           - The x0.5 prediction gives the same verdict with or without debt.
           - **Museum coverage holds only as frozen** (7.3/4.7% at 8.4/8.1%); matched 9.7-11.0%, W 9.1-10.6%.
         - make_tables: `add_strict()`, a posthoc table with F/+spill/+debit/matched, tab:strict dropped, and `debt_summary()`. Overlap with ICIIPC is 0.1-0.3% (affiliation and math only).
+    - **Round 4f (2026-10-17, written before running; diagnostic, nothing decided by it):** overflow over A in the Gemma museum (kappa 5: 23.5%, x0.5: 25.8%) mixes stretches with a forced decision (outside Theorem 2) and without. New instrumentation `overflow_unforced_frac`: overflowed stretches with no forced decision / stretches. It records only and changes no decision, so every other field must match the recorded runs exactly; that is also the check that the final commit reproduces them. Runs, strict, seeds 0-29 (`bench/logs/ieee/ovsplit/`): kappa 5 in the 4 binding pairs + Mistral x 2; x0.5 in the 4 binding pairs + Mistral museum. Reproduction of the main runs: frozen PARITY, cascade, cascade/reh and the debt-allowed variant, Gemma museum N 1000, the same seeds. Reported whatever it shows.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in

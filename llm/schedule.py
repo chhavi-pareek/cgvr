@@ -452,6 +452,7 @@ class Run:
         self.nsur = np.zeros(n, np.int64)                     # surrogate decisions in this stretch
         self.Ls = np.zeros(n)                                 # the estimated (non-E_MAX) part of L
         self.over = np.zeros(n, bool)                         # true drift passed the cap in it
+        self.forced_in = np.zeros(n, bool)                    # a forced decision happened in it (diagnostic only)
         self.gen_seen = self.st.gen.copy()
         self.inflight = np.zeros(n, bool)
         self.pending = {}                                     # agent -> (ctx, p, generation)
@@ -475,7 +476,7 @@ class Run:
         self.late = 0
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
-                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, est=0, est_miss=0,
+                          over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, overflowed_unforced=0, est=0, est_miss=0,
                           small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0, est_level=0.0, look=0, look_level=0.0, look_miss=0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
@@ -522,7 +523,9 @@ class Run:
         had = idx[self.nsur[idx] > 0]
         self.stats["stretches"] += int(had.size)
         self.stats["overflowed"] += int(self.over[had].sum())
+        self.stats["overflowed_unforced"] += int((self.over[had] & ~self.forced_in[had]).sum())
         self.L[idx] = 0.0; self.Ls[idx] = 0.0; self.D[idx] = 0.0; self.nsur[idx] = 0; self.over[idx] = False
+        self.forced_in[idx] = False
         self.R[idx] = self.alpha_tot
         self.wait_from[idx] = -1
 
@@ -732,6 +735,7 @@ class Run:
         if held and self.max_wait is not None and t - self.wait_from[i] >= self.max_wait:
             held = False
             self.stats["forced"] += 1
+            self.forced_in[i] = True
             gone = self.server.cancel(i)       # nobody will wait for that reply any more
             if gone:
                 self.inflight[i] = False
@@ -1095,6 +1099,7 @@ class Run:
         open_ = self.nsur > 0
         stretches = s["stretches"] + int(open_.sum())
         overflowed = s["overflowed"] + int(self.over[open_].sum())
+        unforced = s["overflowed_unforced"] + int((self.over[open_] & ~self.forced_in[open_]).sum())
         dec = s["llm"] + s["sur"]
         dec += s["small"]
         dec += s["cached"]
@@ -1111,5 +1116,6 @@ class Run:
                     look=s["look"], look_level=s["look_level"] / max(s["look"], 1), look_miss_frac=s["look_miss"] / max(s["look"], 1),
                     overrun=s["overrun"], coverage=s["covered"] / max(s["sur"], 1),
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
+                    overflow_unforced_frac=unforced / max(stretches, 1),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),
                     **st.outcomes())
