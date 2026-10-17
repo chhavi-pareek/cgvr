@@ -415,6 +415,19 @@
         - Appendix: regime and oracle tables.
         - Rewritten: abstract, intro, contributions, Discussion, Scope, Conclusion.
         - Graphical abstract draft: `IEEE_Access_paper/figs/graphical_abstract.pdf`, including the airport caveat.
+    - **Round 7 (2026-10-17 ~21:15, written and committed before any run or table; the user approved all of it):**
+      - **(a) Mechanism test, phased alarm** (`llm/museum_phased.py`, `--scenario museum_phased`).
+        - Setup: the museum with memory, with the same contexts, prompts and answer tables. The alarm and the smoke reach zone z at ALARM_S + 60 z and SMOKE_S + 60 z (far gallery, hall, side gallery, main exit), so the shift is staggered over 3 minutes.
+        - Runs: Qwen and Gemma (the pairs whose museum cap binds), N 1000/2000, seeds 0-29; frozen PARITY, strict PARITY, the 4 baselines (`bench/logs/ieee/phased/`).
+        - Hypothesis H: PARITY's museum advantage comes from a shift that makes every context new at once.
+        - **Prediction if H holds:** in each of the 4 settings, strict PARITY's relative reduction of time over the cap against the best baseline (1 - P/base) is smaller under the phased alarm than under the global alarm (same seeds); and smaller on average.
+        - If instead the average reduction is about the same (within 0.1) or larger, H is rejected.
+        - Whether the cap binds and PARITY leads (Holm) is reported as well.
+      - **(b) Quantization:** `qwen2.5:7b-instruct-q8_0` (8-bit) under Ollama 0.20.3.
+        - Tables: the station without memory (its call latencies set the budget, as for every model) and the museum with memory.
+        - Measurement: per-context KL between the 8-bit and 4-bit answers, in the museum and the station, against the drift scale.
+        - Runs: the museum with memory, with the 8-bit model as the reference at its own measured latency; N 1000/2000, seeds 0-29; frozen, strict, the 4 baselines (`bench/logs/ieee/q8/`).
+        - **Prediction:** the cap binds (best baseline >= 0.05%), and strict PARITY's time over the cap is significantly below the best baseline's at both N (Holm over the Q8 table, p < 0.01), as with the 4-bit model.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
