@@ -491,6 +491,19 @@
       - Mistral museum cache 80-82% -> 95%.
     - **Reading:** serving and prefetch are the larger, policy-agnostic contribution; the baselines gain more than PARITY.
     - Paper: new Sec. "Serving for the Charged Drift and Asking Ahead" with Table r8; abstract, intro, discussion and conclusion rewritten around it; 2 rows in the analyses table. 16 pp, audit 3 unmatched (Emax), overlap 0.3-0.4%. Pre-round-8 versions: `review/main.tex.before_r8`, `review/supplementary.tex.before_r8`.
+- **Round 9 (2026-10-18 ~02:00; the user asked for stronger gains; development pair only, seeds 0-29, screening, nothing pre-registered or validated):**
+  - **Duplicates:** model calls returning a context already answered are under 3% of calls (dead end).
+  - **Where PARITY's calls go under S+F:** ahead 53-57%, calibration 28-30%, held + mandatory + optional about 15%.
+  - **PARITY-only switches added** (off by default; standard and round-8 configs reproduce exactly):
+    - `ahead_value`: prefetch and neighbours ranked by people x predicted drift.
+    - `cal_target` beta: calibration drawn toward predicted drift, residuals importance-weighted, test weight 1/(1 - beta).
+    - `flat`: no viewer salience in PARITY's priority.
+    - `value="confidence"`: optional requests ranked as cascade ranks them.
+  - **Screen of 8 variants, strict PARITY drift at N1000 / N2000** (base 15.17 / 14.94; `make_tables` r9_screen):
+    - The best is h (confidence ranking, X 0.2, no rehearsal): 13.46 / 14.87, with over cap 0.091% at N2000 against 0.059%.
+    - The rest are within ±0.8.
+    - None reaches cascade's 12.51. **None validated.** Reported in one sentence in sec:r8 and as a row in the analyses table.
+  - **Reading:** under S+F the gap to cascade on mean drift is structural. PARITY spends about 70% of its budget on calibration and asking ahead, and holds to protect the tail. Its advantage is the tail: under S+F, the worst agent is lower than the best baseline's in all 8 museum settings, and time over the cap is lower where the cap binds.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in

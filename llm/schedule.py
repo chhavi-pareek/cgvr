@@ -196,6 +196,9 @@ class DriftBound:
         ev = getattr(scn, "EVENT_PART", None) if strata else None
         self.ev = np.asarray(scn.ctx_parts(np.arange(self.n_ctx))[ev]) if ev is not None else None
         self.res_c, self.res_i, self.res_n = deque(maxlen=window), deque(maxlen=window), 0
+        # post hoc (round 9): calibration aimed at high predicted drift; each residual carries its importance weight
+        # (uniform over the pool / the probability it was drawn with), the test point the largest possible weight
+        self.res_w, self.w_test = deque(maxlen=window), None
         self.parts = np.stack(scn.ctx_parts(np.arange(self.n_ctx)), 1) if wtau else None
         # aci_mode "cal": the level adapts to calibration residuals; "spent": to the charges actually
         # spent, each scored once its context has been answered (delayed feedback)
@@ -262,7 +265,7 @@ class DriftBound:
         self.pred = np.where(w > 0, self.K[:, s] @ np.fromiter(self.exact.values(), float) / np.maximum(w, 1e-300),
                              E_MAX)
 
-    def residual(self, c, q, p, pred=None):
+    def residual(self, c, q, p, pred=None, w=1.0):
         """A calibration reply at a context nobody had paid for: its drift minus the prediction.
         q and pred are the surrogate's answer and the prediction when the request was made (else
         now). Order-free: one reply shows one option order, so the drift is replaced by its certified
@@ -284,6 +287,7 @@ class DriftBound:
                     self.aci_err.append(err)
                     self.a_t += self.aci * (self.alpha / 2 - err)
             self.res.append(d - pred)
+            self.res_w.append(float(w))
             self.res_c.append(int(c))
             self.res_i.append(self.res_n)
             self.res_n += 1
@@ -312,6 +316,8 @@ class DriftBound:
         r = np.fromiter(self.res, float)
         o = np.argsort(r, kind="stable")
         w = np.ones((c.size, r.size))
+        if self.w_test is not None:
+            w = w * np.fromiter(self.res_w, float)[None, :]
         if self.wtau:
             h = (self.parts[c][:, None, :] != self.parts[np.fromiter(self.res_c, np.int64)][None, :, :]).sum(2)
             w = w * np.exp(-h / self.wtau)
@@ -320,7 +326,8 @@ class DriftBound:
         if self.ev is not None:
             w = w * (self.ev[c][:, None] == self.ev[np.fromiter(self.res_c, np.int64)][None, :])
         w = w[:, o]
-        ok = np.cumsum(w, 1) / (w.sum(1, keepdims=True) + 1.0) >= (1 - alpha)[:, None] - 1e-12
+        wt = 1.0 if self.w_test is None else self.w_test
+        ok = np.cumsum(w, 1) / (w.sum(1, keepdims=True) + wt) >= (1 - alpha)[:, None] - 1e-12
         return np.where(ok.any(1) & (alpha > 0), r[o][ok.argmax(1)], np.inf)
 
     def charge_at(self, c, alpha):
@@ -329,7 +336,8 @@ class DriftBound:
         c, alpha = np.atleast_1d(c), np.broadcast_to(alpha, np.shape(np.atleast_1d(c)))
         if self.aci is not None:
             alpha = alpha * (self.a_t / (self.alpha / 2))
-        q = self._wquantile(c, alpha) if (self.wtau or self.wdecay or self.ev is not None) else self._quantile(alpha)
+        q = (self._wquantile(c, alpha) if (self.wtau or self.wdecay or self.ev is not None or self.w_test is not None)
+             else self._quantile(alpha))
         est = np.clip(self.pred[c] + q, 0.0, E_MAX)
         return np.array([self.exact.get(int(x), e) for x, e in zip(c, est)])
 
@@ -456,7 +464,7 @@ class Run:
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
                  spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False, strata=False,
-                 oracle=False, serve="fwd", serve_local=False, prefetch=None):
+                 oracle=False, serve="fwd", serve_local=False, prefetch=None, ahead_value=False, cal_target=0.0, flat=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -499,6 +507,14 @@ class Run:
         # post hoc (round 8): rehearsal and fill first ask where the people here will be after the clock-driven
         # changes the world forecasts (an alarm, a boarding call, a train time), at these horizons in seconds
         self.prefetch = tuple(prefetch) if prefetch else ()
+        # post hoc (round 9), PARITY only: ahead_value ranks the contexts asked ahead by people x predicted drift (its kernel)
+        # rather than by people; cal_target = beta draws calibration requests from (1 - beta) uniform + beta in proportion to
+        # predicted drift, the margin reweighted by the known sampling ratio; flat drops the viewer's salience from the priority
+        self.ahead_value = ahead_value and self.risk
+        self.cal_target = cal_target if self.risk else 0.0
+        if self.cal_target > 0:
+            self.drift.w_test = 1.0 / (1.0 - self.cal_target)
+        self.flat = flat
         self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
@@ -721,7 +737,7 @@ class Run:
             snap = self.cal_snap.pop(agent, None) if calib else None
             if self.risk and calib and self.cal_at_request:
                 if snap is not None and snap[0] == c:
-                    self.drift.residual(c, snap[1], p, pred=snap[2])
+                    self.drift.residual(c, snap[1], p, pred=snap[2], w=snap[3])
             elif self.risk and calib and fresh:
                 self.drift.residual(c, self.sur(c)[0], p)
             self.calib_req.discard(agent)
@@ -952,7 +968,14 @@ class Run:
                 # any upcoming decision at a context nobody has paid for, in time or not: the reply
                 # is for measuring the margin (it jumps the queue), serving the decision is a bonus
                 pool = np.flatnonzero(~np.isin(xhat, list(self.drift.p))) if self.ctokens >= 1 else []
-                j = int(self.rng.choice(pool)) if len(pool) else -1
+                cw = 1.0
+                if len(pool) and self.cal_target > 0:
+                    v = np.minimum(self.drift.pred[xhat[pool]], E_MAX) + 1e-9
+                    pr = (1 - self.cal_target) / len(pool) + self.cal_target * v / v.sum()
+                    k = int(self.rng.choice(len(pool), p=pr / pr.sum()))
+                    j, cw = int(pool[k]), float((1.0 / len(pool)) / pr[k])
+                else:
+                    j = int(self.rng.choice(pool)) if len(pool) else -1
             elif (self.explore > 0 and (self.tokens >= 1 or uncal) and in_time.any()
                     and (uncal or self.rng.random() < self.explore)):
                 j = int(self.rng.choice(np.flatnonzero(in_time)))
@@ -965,7 +988,7 @@ class Run:
                 self.inflight[cand[j]] = True
                 self.calib_req.add(int(cand[j]))
                 if self.risk:
-                    self.cal_snap[int(cand[j])] = (int(xhat[j]), self.sur(xhat[j])[0], float(self.drift.pred[xhat[j]]))
+                    self.cal_snap[int(cand[j])] = (int(xhat[j]), self.sur(xhat[j])[0], float(self.drift.pred[xhat[j]]), cw)
                     self.ctokens -= 1
                 else:
                     self.tokens -= 1
@@ -979,19 +1002,24 @@ class Run:
             must = (self.L[cand] + e > self._limit(cand, e)) & self.ledger
             if self.risk and self.cal_adapt:
                 self._size_calibration(cand, xhat, must)
-            if self.risk and self.value == "expected":
+            sal_p = np.ones(len(cand)) if self.flat else self.salience(t)[cand]
+            if self.value == "confidence":
+                # post hoc (round 9): the optional requests ranked as cascade ranks them, least confident first; the
+                # ledger still decides the mandatory ones
+                val = np.where(in_time, 1.0 - self.sur(xhat).max(1), -1.0)
+            elif self.risk and self.value == "expected":
                 # post hoc: the predicted drift, not the charge (prediction + the agent's margin)
                 ex = np.array([self.drift.exact.get(int(x), self.drift.pred[x]) for x in xhat])
-                val = np.where(in_time, self.salience(t)[cand] * ex, -1.0)
+                val = np.where(in_time, sal_p * ex, -1.0)
             else:
-                val = np.where(in_time, self.salience(t)[cand] * e, -1.0)
+                val = np.where(in_time, sal_p * e, -1.0)
             if self.max_wait is None:
                 mo = list(np.flatnonzero(must))
             else:
                 # bounded wait: a mandatory reply is only worth asking for if it can come before the
                 # wait runs out, so the overdraft is held to that horizon, most valuable first --
                 # else every agent past its cap is mandatory at once and the queue floods
-                mv = self.salience(t)[cand] * e
+                mv = sal_p * e
                 mo = [j for j in np.argsort(-mv, kind="stable") if must[j]]
             order = mo + [j for j in np.argsort(-val) if not must[j] and val[j] >= 0]
             for j in order:
@@ -1083,7 +1111,7 @@ class Run:
             self.rtokens -= 1
             self.stats["rehearsals"] += 1
 
-    def _neighbours(self, occ, cnt):
+    def _neighbours(self, occ, cnt, scores=False):
         """Unseen contexts one factor from the occupied ones occ (cnt people each), or occupied
         themselves, with no reply on the way: most people one factor away first."""
         scn = self.scn
@@ -1096,21 +1124,22 @@ class Run:
                 for c, w in zip(scn.ctx_index(*nb.T).tolist(), cnt.tolist()):
                     if c not in self.drift.p and c not in self.rehearsing:
                         score[c] = score.get(c, 0) + w
-        return sorted(score, key=lambda c: (-score[c], c))
+        return score if scores else sorted(score, key=lambda c: (-score[c], c))
 
     def _ahead(self, t, here, occ, cnt):
         """The contexts to ask about ahead: with prefetch, first the unseen contexts the people here will be in
-        at each horizon if they stay put (most people first), then the neighbours of the occupied ones."""
-        if not self.prefetch:
-            return self._neighbours(occ, cnt)
+        at each horizon if they stay put (most people first), then the neighbours of the occupied ones. With
+        ahead_value (PARITY), each is ranked by people x its predicted drift instead."""
         score = {}
         for h in self.prefetch:
             f, k = np.unique(self.st.context(t, here, at_step=np.full(here.size, t + h)), return_counts=True)
             for c, w in zip(f.tolist(), k.tolist()):
                 if c not in self.drift.p and c not in self.rehearsing:
                     score[c] = score.get(c, 0) + w
-        first = sorted(score, key=lambda c: (-score[c], c))
-        return first + [c for c in self._neighbours(occ, cnt) if c not in score]
+        nbs = self._neighbours(occ, cnt, scores=True)
+        v = (lambda c: min(float(self.drift.pred[c]), E_MAX)) if self.ahead_value else (lambda c: 1.0)
+        first = sorted(score, key=lambda c: (-score[c] * v(c), c))
+        return first + sorted((c for c in nbs if c not in score), key=lambda c: (-nbs[c] * v(c), c))
 
     def _fill(self, t):
         """Spend the main budget's whole tokens left after scheduling (one kept for the next second)
