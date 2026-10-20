@@ -542,6 +542,15 @@
     - **R3 (same footing, tail):** where the cap binds under revision (best revision baseline including rev-aware >= 0.05%), PARITY's time over the cap is significantly below the best of them in >= half of those settings and significantly above in none (void if none binds).
     - Reported without prediction: PARITY vs rev-aware cascade on mean drift (expected lower for cascade where the cap is slack); changes, delay, crowd TV, evacuation W1 and inside.
     - Outputs: `bench/logs/ieee/r10/val_rev_*`.
+  - **Round 10 validation results (2026-10-20 16:42; 24/24 settings; `make_tables.py` rev_summary(10)):**
+    - **R1 HOLDS:** each of the 5 policies has lower drift with revision in 24/24 and higher in none; median falls 24-27% (range 7-60%).
+    - **R2 HOLDS:** PARITY with revision is below the best standard baseline's drift in 24/24 (median ratio 0.65). Over cap is lower in 6/6 standard-binding settings, 22-110x (Gemma museum 0.076 / 0.126% vs 3.56 / 4.14%).
+    - **R3 HOLDS:** the cap binds with revision only in the Gemma museum. PARITY 0.076 / 0.126% vs cascade/reh 0.205 / 0.298% (Holm p < 1e-5); rev-aware cascade there 0.42 / 0.82%.
+    - Without prediction:
+      - rev-aware cascade's drift is significantly below PARITY's in 15/24, PARITY's in none (median ratio 1.34);
+      - per agent-hour: revised 0.2-10.2, changed 0.06-2.48, delay 1-43 s;
+      - airport: PARITY's over cap with revision (0.03-0.09%) is above the best standard baseline's, though the cap does not bind.
+    - The 5 station jobs failed at first (lost macOS access) and were rerun 15:41-16:42 with the identical command.
     - Note: this block was written before the launch (14:24, 2026-10-20), but git lost access to `.git`, so it was committed after 19 of the 24 settings had run; nothing in it was changed after the launch.
 - **Round 11 (2026-10-20 ~16:00; the user approved restructuring the paper around two mechanisms, revision for the mean and the ledger for the tail, and dropping sharpened serving from the recommended system). Pre-registered here and committed before any run.**
   - **Why:** in round 10 the validated system included sharpened serving, under which cascade's crowd herds after the alarm (main exit 25 vs 252 in the reference), so part of the baselines' worse outcomes comes from a component we added. The recommended system is prefetch + revision with the surrogate served as fitted.
