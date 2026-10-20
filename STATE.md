@@ -543,6 +543,25 @@
     - Reported without prediction: PARITY vs rev-aware cascade on mean drift (expected lower for cascade where the cap is slack); changes, delay, crowd TV, evacuation W1 and inside.
     - Outputs: `bench/logs/ieee/r10/val_rev_*`.
     - Note: this block was written before the launch (14:24, 2026-10-20), but git lost access to `.git`, so it was committed after 19 of the 24 settings had run; nothing in it was changed after the launch.
+- **Round 11 (2026-10-20 ~16:00; the user approved restructuring the paper around two mechanisms, revision for the mean and the ledger for the tail, and dropping sharpened serving from the recommended system). Pre-registered here and committed before any run.**
+  - **Why:** in round 10 the validated system included sharpened serving, under which cascade's crowd herds after the alarm (main exit 25 vs 252 in the reference), so part of the baselines' worse outcomes comes from a component we added. The recommended system is prefetch + revision with the surrogate served as fitted.
+  - **Configs** (seeds 30-59, the 24 round-8 settings, N 1000/2000; round-8 flags without `--serve sharp`):
+    - F = `--prefetch 30 60 120`;
+    - F+R = F + `--revise 60 --rev-aware charge`.
+    - Conditions: strict PARITY (charge-priced under F+R), cascade/reh, cascade, view-LOD, round robin, + cascade/rev-aware under F+R.
+    - Standard runs: `bench/logs/ieee/r8/val_std_*`, same seeds. Wilcoxon paired by seed, Holm, p < 0.01.
+  - **P1 (revision lifts every scheduler):** for each of the 5 policies, mean drift under F+R is significantly below F in >= 18 of 24 settings, and significantly above in none.
+  - **P2 (system vs standard practice):**
+    - PARITY under F+R has significantly lower mean drift than the best standard baseline (lowest mean of the 4) in >= 18 of 24;
+    - and significantly lower time over the cap in every setting where the standard cap binds (best standard baseline >= 0.05%).
+  - **P3 (same footing, tail):** where the cap binds under F+R (best F+R baseline, rev-aware included, >= 0.05%), PARITY's time over the cap is significantly below the best of them in >= half, and significantly above in none (void if none binds).
+  - **P4 (crowd fidelity):** for each of the 5 policies, crowd TV (per-context mean decision law vs the model's) under F+R is significantly below F in >= 18 of 24.
+  - **Reported without prediction:**
+    - PARITY vs cascade/rev-aware on drift and time over the cap;
+    - evacuation W1 and people inside (museum);
+    - changes and delay per agent-hour;
+    - F+R vs round-10 S+F+R (what sharpening adds with revision).
+  - Outputs: `bench/logs/ieee/r11/val_{F,FR}_*`; rules `bench/logs/aci/scripts/r11_rules.py`.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
