@@ -504,6 +504,45 @@
     - The rest are within ±0.8.
     - None reaches cascade's 12.51. **None validated.** Reported in one sentence in sec:r8 and as a row in the analyses table.
   - **Reading:** under S+F the gap to cascade on mean drift is structural. PARITY spends about 70% of its budget on calibration and asking ahead, and holds to protect the tail. Its advantage is the tail: under S+F, the worst agent is lower than the best baseline's in all 8 museum settings, and time over the cap is lower where the cap binds.
+- **Round 10 (2026-10-20; the user asked for "any mechanism" with much stronger gains; screening on the development pair, seeds 0-29, plus a generality check on seeds 60-67; validation pre-registered below before any run on seeds 30-59).**
+  - **Where the drift is** (S+F, dev pair): 55-65% of it is in the start-up burst (60-150 s), when about 1000 people make first decisions faster than the model answers; the alarm adds a second burst. People keep acting on a decision for 30-90 s, and the model answers the same context within 30 s for 37-53% of that drift (`bench/logs/r10/revise_probe.log`).
+  - **Mechanism, `revise=W` (every policy alike, off by default):**
+    - Every surrogate decision is speculative. When the model's answer at its context lands within W s while the person is still carrying it out, the action is kept with probability min(1, p(a)/q(a)) and otherwise redrawn from (p - q)+.
+    - That is the coupling of speculative sampling, so the decision is a draw from p exactly. It becomes a model decision: drift 0, and the stretch ends.
+    - A changed action (probability TV(q, p)) restarts at the reply; the lost seconds are counted as delay.
+    - World support: `snap/revisable/unapply` in museum, station(_mem) and airport. A field goes back only if nothing has changed it since the action; queues and boarding lines are undone.
+    - Recorded runs reproduce with it off: 44/44 fields, 20 dev runs (`r10_repro.py`); 40 LLM tests pass.
+  - **`rev_aware`** (post hoc): a call is priced by every charge its answer would remove, upcoming and revisable decisions at its context, once per context.
+    - PARITY: salience x charge, or x the whole ledger with "ledger".
+    - `cascade/rev-aware` is the strong baseline: (1 - confidence) x decisions.
+    - Also record-only `crowd_tv` / `crowd_fkl`: per context, the crowd's mean decision law against the model's.
+  - **Dev pair, 30 seeds, drift N1000 / N2000** (`bench/logs/r10/screen4-6.log`):
+
+    | Policy | S+F | S+F + revision (W 60) |
+    |---|---|---|
+    | strict PARITY | 15.17 / 14.94 | 7.73 / 8.83; charge-priced 6.98 / 8.55 |
+    | cascade | 12.51 / 14.39 | 6.30 / 7.35; rev-aware 3.47 / 4.00 |
+    | cascade/reh | 13.59 / 13.42 | 5.66 / 6.67 |
+    | round robin | 14.59 / 15.39 | 7.61 / 8.86 |
+    | view-LOD | 21.05 / 26.51 | 11.84 / 14.15 |
+
+    - Time over the cap with revision: PARITY (charge-priced) 0.004 / 0.019% vs rev-aware cascade 0.006 / 0.013%, best other 0.018 / 0.022%.
+    - Cost: 1.2-2.4 changed actions and 21-43 s of delay per agent-hour.
+    - PARITY variants with cascade's pricing, no rehearsal or X 0.2 reach 5.89-8.20: none closes the gap to rev-aware cascade (calibration share and holds).
+  - **Generality** (seeds 60-67, N1000, S+F vs S+F+R W 60; `bench/logs/r10/gen/`):
+    - Revision lowers drift for every policy: station Qwen 20-50%, airport Qwen 25-40%, museum Gemma about 25%.
+    - Where the cap binds (museum Gemma), PARITY's time over the cap is 0.09% against 0.20-0.46%. Rev-aware cascade is the worst there (0.46%, overflow 1.83%): it spends on the mean.
+  - **Round 8 caveat found:** sharpened serving lowers per-decision drift and even per-context crowd TV, but after the alarm cascade's crowd collapses onto the top answer.
+    - Post-alarm choices (6 seeds): main exit 25 vs the reference's 252, wait 6 vs 242; inside at the end 133 vs 59 (30 seeds).
+    - The charged reverse KL does not see it. This belongs in the paper's sec:r8.
+  - **Validation, pre-registered here before any run (seeds 30-59, the 24 round-8 settings, N 1000/2000, config S+F+R = round-8 flags + `--revise 60 --rev-aware charge`):**
+    - Conditions: strict PARITY (charge-priced) + cascade/reh, cascade, view-LOD, round robin, all with revision, + cascade/rev-aware. Compared, paired by seed, with the recorded round-8 S+F runs (`bench/logs/ieee/r8/val_new_*`) and standard runs (`val_std_*`). Wilcoxon, Holm, p < 0.01.
+    - **R1 (system):** for each of the 5 policies run in both, mean drift with revision is significantly below S+F in >= 18 of 24 settings, and significantly above in none.
+    - **R2 (PARITY vs standard practice):** PARITY with revision has significantly lower mean drift than the best standard baseline in >= 18 of 24 (round 8 V1 had 13), and significantly lower time over the cap wherever the standard cap binds (best standard baseline >= 0.05%).
+    - **R3 (same footing, tail):** where the cap binds under revision (best revision baseline including rev-aware >= 0.05%), PARITY's time over the cap is significantly below the best of them in >= half of those settings and significantly above in none (void if none binds).
+    - Reported without prediction: PARITY vs rev-aware cascade on mean drift (expected lower for cascade where the cap is slack); changes, delay, crowd TV, evacuation W1 and inside.
+    - Outputs: `bench/logs/ieee/r10/val_rev_*`.
+    - Note: this block was written before the launch (14:24, 2026-10-20), but git lost access to `.git`, so it was committed after 19 of the 24 settings had run; nothing in it was changed after the launch.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in

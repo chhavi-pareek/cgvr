@@ -220,6 +220,24 @@ class Airport:
     def outcomes(self):
         return dict(boarded=self.boarded, missed=self.missed)
 
+    # post hoc (round 10): a decision carried out by the surrogate can be revised while the passenger is still doing it
+    REVISE = ("zone", "busy_until", "activity", "mem")
+
+    def snap(self, i):
+        return {k: getattr(self, k)[i].copy() for k in self.REVISE}
+
+    def revisable(self, i, a, step):
+        return self.activity[i] == a and self.busy_until[i] > step
+
+    def unapply(self, i, pre, post, a, step):
+        """Undo apply() of action a for passenger i (still doing it); fields changed since by the world stay."""
+        line = self.lines[self.flight[i]]
+        if i in line:
+            line.remove(i)
+        for k, v in pre.items():
+            if getattr(self, k)[i] == post[k]:
+                getattr(self, k)[i] = v
+
     def tick(self, step):
         """Announcements, boarding, gate closing and each gate's crowding."""
         moved = np.flatnonzero(self.gate_at == step)

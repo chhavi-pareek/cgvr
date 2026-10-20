@@ -168,6 +168,23 @@ class Station:
     def present(self):
         return self.n
 
+    # post hoc (round 10): a decision carried out by the surrogate can be revised while the person is still doing it
+    REVISE = ("zone", "busy_until", "activity")
+
+    def snap(self, i):
+        return {k: getattr(self, k)[i].copy() for k in self.REVISE}
+
+    def revisable(self, i, a, step):
+        return self.activity[i] == a and (i in self.queue if a == A_QUEUE else self.busy_until[i] > step)
+
+    def unapply(self, i, pre, post, a, step):
+        """Undo apply() of action a for person i (still doing it); fields changed since by the world stay."""
+        if a == A_QUEUE and i in self.queue:
+            self.queue.remove(i)
+        for k, v in pre.items():
+            if getattr(self, k)[i] == post[k]:
+                getattr(self, k)[i] = v
+
     def outcomes(self):
         return dict(boarded=self.boarded, missed=self.missed, left=self.left, turned_away=self.turned_away)
 

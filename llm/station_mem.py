@@ -88,6 +88,8 @@ class StationMem(station.Station):
         super().apply(idx, actions, step)
         self.mem[idx] = _settled(actions, self.mem[idx])
 
+    REVISE = station.Station.REVISE + ("mem",)
+
     def tick(self, step):
         before, gen = self.train_at.copy(), self.gen.copy()
         super().tick(step)

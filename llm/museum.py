@@ -179,6 +179,22 @@ class Museum:
             else:
                 self.busy_until[i] = step + DWELL[a]
 
+    # post hoc (round 10): a decision carried out by the surrogate can be revised while the visitor is still doing it
+    def snap(self, i):
+        return {k: v[i].copy() for k, v in vars(self).items() if isinstance(v, np.ndarray) and v.shape[:1] == (self.n,)}
+
+    def revisable(self, i, a, step):
+        return bool(self.inside[i]) and self.activity[i] == a and self.busy_until[i] > step
+
+    def unapply(self, i, pre, post, a, step):
+        """Undo apply() of action a at step for visitor i (still doing it): each field the action set and nothing has
+        changed since goes back to its value before (pre and post are snap() just before and after the action)."""
+        for k, v in pre.items():
+            if getattr(self, k)[i] == post[k]:
+                getattr(self, k)[i] = v
+        if a == A_COAT and step >= ALARM_S:
+            self.coats -= 1
+
     def _exit(self, i, step):
         if self.at_alarm is None:
             self.left += 1

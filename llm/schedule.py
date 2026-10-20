@@ -464,7 +464,8 @@ class Run:
                  far_salience=FAR_SALIENCE, prune=False, cal_adapt=False, rehearse_orders=False,
                  cal_at_request=True, aci=None, cache=False, fill=False, aci_mode="cal",
                  spill=False, debit=False, tau=0.5, wtau=None, wdecay=None, value="charge", strict=False, strata=False,
-                 oracle=False, serve="fwd", serve_local=False, prefetch=None, ahead_value=False, cal_target=0.0, flat=False):
+                 oracle=False, serve="fwd", serve_local=False, prefetch=None, ahead_value=False, cal_target=0.0, flat=False,
+                 revise=None, rev_aware=False):
         self.ledger = policy != "parity_nocap"
         policy = "parity" if policy == "parity_nocap" else policy
         self.n, self.policy, self.P, self.cap = n, policy, P, cap
@@ -515,6 +516,19 @@ class Run:
         if self.cal_target > 0:
             self.drift.w_test = 1.0 / (1.0 - self.cal_target)
         self.flat = flat
+        # post hoc (round 10), every policy alike: a surrogate decision is speculative. When the model's answer at its
+        # context lands within `revise` seconds and the person is still carrying it out, the action is kept with
+        # probability min(1, p(a)/q(a)) and otherwise redrawn from (p - q)+, so the decision is a draw from the model's
+        # answer (the coupling of speculative sampling); it is then a model decision (drift 0, the stretch ends), and
+        # a changed action restarts at the reply, which is counted as delay
+        self.revise = revise
+        # PARITY only: a call is priced by every charge its answer would remove from the ledgers -- the decisions
+        # coming up at its context and those already made there that it would revise ("ledger": a revision ends the
+        # stretch, so it removes the agent's whole ledger, not just that decision's charge)
+        self.rev_aware = rev_aware and bool(revise) and policy in ("parity", "cascade")
+        self.rev_ledger = rev_aware == "ledger"
+        self.rev, self.rev_by, self.rev_log, self._sur_now = {}, {}, deque(), []
+        self.rev_rng = np.random.default_rng(seed + 4)
         self.spent_at = {}                  # aci "spent": context -> (surrogate answer, charge, level) awaiting a reply
         # risk control runs a stretch that holds any estimated charge to cap / (1 + eta), leaving
         # room for the under-charge; a stretch charged only E_MAX (exact upper bounds, which
@@ -563,7 +577,8 @@ class Run:
         self.rr = 0
         self.stats = dict(llm=0, sur=0, stale=0, stall=0, overrun=0, kl=0.0, kl_view=0.0, dmax=0.0,
                           over_cap=0, agent_s=0, view_s=0, calib=0, covered=0, stretches=0, overflowed=0, overflowed_unforced=0, stretches_forced=0, est=0, est_miss=0,
-                          small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0, est_level=0.0, look=0, look_level=0.0, look_miss=0)
+                          small=0, probes=0, rehearsals=0, forced=0, cached=0, fills=0, est_level=0.0, look=0, look_level=0.0, look_miss=0,
+                          revised=0, switched=0, rev_delay=0.0, kl_revised=0.0)
         self.dmax_t = []
         self.kl_t, self.agent_s_t = [], []                   # cumulative drift and agent-seconds, per second
         # record only: each person's drift and seconds present (their drift rate, a tail measure not tied to the
@@ -571,6 +586,9 @@ class Run:
         self.pd, self.pt, self.person_rates = np.zeros(n), np.zeros(n), []
         self.stretch_D = []                                  # record only: true drift of every closed stretch
         self.ctx_count = np.zeros(self.scn.N_CTX)
+        # record only (round 10): the law each decision was drawn from, summed per context (the model's answer for a
+        # model, cached or revised decision, the served surrogate's otherwise), against the model's: crowd fidelity
+        self.law_sum = np.zeros((self.scn.N_CTX, N_ACT))
         # upper bound (post hoc): charges are the true drift of the surrogate in use, read from the table; for
         # cascade, the decisions with the largest true drift are escalated first
         self.oracle = oracle
@@ -644,7 +662,7 @@ class Run:
         model's time only if the decision it was asked for has not been made (same person, same
         decision number) and either the agent is or will be held for it, or it can land before the
         decision. A dropped request costs no model time and its token is refunded."""
-        if agent < 0 or model != 0 or agent in self.calib_req:
+        if agent < 0 or model != 0 or agent in self.calib_req or (self.revise and int(ctx) in self.rev_by):
             return True
         ok = (self.req_gen.get(agent, -1) == int(self.st.gen[agent]) and self.req_dec.get(agent, -1) == int(self.ndec[agent])
               and (agent in self.stalled or agent in self.must_req
@@ -750,7 +768,18 @@ class Run:
                 self.drift.exact[c] = self.drift.certify(c, self.sur(c))   # each new order tightens it
             elif fresh and not self.drift.novel:
                 self.drift.exact[c] = float(kl(self.sur(c), p)[0])
+            if self.revise and model == 0:
+                self._revise_at(int(c), p, t)
 
+        if self.revise:
+            while self.rev_log and self.rev_log[0][0] < t - self.revise:
+                t0, i, c = self.rev_log.popleft()
+                s = self.rev_by.get(c)
+                info = self.rev.get(i)
+                if s is not None and not (info is not None and info[1] == c and info[0] > t0):
+                    s.discard(i)
+                    if not s:
+                        del self.rev_by[c]
         dec = np.flatnonzero(st.busy_until <= t)
         if dec.size:
             x = st.context(t, dec)
@@ -761,8 +790,16 @@ class Run:
                 if a is not None:
                     acts.append(a); go.append(i)
             if go:
+                if self.revise:
+                    snaps = [(i, st.snap(i), int(st.gen[i])) for i, *_ in self._sur_now]
                 st.apply(np.array(go), np.array(acts), t)
+                if self.revise:
+                    for (i, c, q, a, d, view, e), (_, sn, g) in zip(self._sur_now, snaps):
+                        self.rev[i] = (t, c, q, a, d, view, (sn, st.snap(i)), g, int(self.ndec[i]), e)
+                        self.rev_by.setdefault(c, set()).add(i)
+                        self.rev_log.append((t, i, c))
                 self._respawned()
+            self._sur_now = []
         self._schedule(t)
         if self.fill and self.policy not in ("reference", "surrogate_only"):
             self._fill(t)
@@ -791,6 +828,7 @@ class Run:
             self._close(i)
             self.stalled.discard(i)
             self.ndec[i] += 1
+            self.law_sum[c] += rep[1]
             return int(rng.choice(N_ACT, p=rep[1]))
         if rep is not None and rep[0] == c and rep[3] == 1:
             # a small-model decision: not a reset, charged its drift from the LLM like any other
@@ -820,6 +858,7 @@ class Run:
             self._close(i)
             self.stalled.discard(i)
             self.ndec[i] += 1
+            self.law_sum[c] += self.drift.p[int(c)]
             return int(rng.choice(N_ACT, p=self.drift.p[int(c)]))
         e = float(self._charge(np.array([i]), np.array([c]))[0])
         if self.risk and int(c) not in self.drift.exact:
@@ -898,7 +937,76 @@ class Run:
         if self.salience(t)[i] == 1.0:
             self.stats["kl_view"] += d
         self.ndec[i] += 1
-        return int(rng.choice(N_ACT, p=q))
+        a = int(rng.choice(N_ACT, p=q))
+        self.law_sum[c] += q
+        if self.revise:
+            self._sur_now.append((i, c, q, a, d, bool(self.salience(t)[i] == 1.0), e))
+        return a
+
+    def _revisable_value(self, t, sal):
+        """Context -> salience x charge of the surrogate decisions there that an answer asked now could still revise."""
+        land = t + self.server.backlog(t) + float(self.server.lat[0].mean())
+        out = {}
+        for c, s in self.rev_by.items():
+            if c in self.drift.p or c in self.rehearsing:
+                continue
+            v = 0.0
+            for i in s:
+                info = self.rev.get(i)
+                if (info is None or info[1] != c or info[0] + self.revise < land or self.st.busy_until[i] <= land
+                        or self.ndec[i] != info[8] or self.st.gen[i] != info[7]):
+                    continue
+                v += sal[i] * (self.L[i] if self.rev_ledger else min(info[9], E_MAX))
+            if v > 0:
+                out[c] = v
+        return out
+
+    def _revisable_conf(self, t):
+        """Context -> cascade's score (1 - confidence) x the decisions there an answer asked now could still revise."""
+        return {c: k * (1.0 - float(self.sur(np.array([c]))[0].max())) for c, k in self._revisable_count(t).items()}
+
+    def _revisable_count(self, t):
+        """Context -> how many surrogate decisions there an answer asked now could still revise (cascade, post hoc)."""
+        land = t + self.server.backlog(t) + float(self.server.lat[0].mean())
+        out = {}
+        for c, s in self.rev_by.items():
+            if c in self.drift.p or c in self.rehearsing:
+                continue
+            k = 0
+            for i in s:
+                info = self.rev.get(i)
+                if (info is not None and info[1] == c and info[0] + self.revise >= land and self.st.busy_until[i] > land
+                        and self.ndec[i] == info[8] and self.st.gen[i] == info[7]):
+                    k += 1
+            if k:
+                out[c] = float(k)
+        return out
+
+    def _revise_at(self, c, p, t):
+        """The model's answer at c has landed: revise every surrogate decision at c still being carried out."""
+        for i in self.rev_by.pop(int(c), ()):
+            info = self.rev.get(i)
+            if info is None or info[1] != c:
+                continue
+            t0, _, q, a, d, view, snap, gen, nd, _ = info
+            del self.rev[i]
+            if t - t0 > self.revise or self.st.gen[i] != gen or self.ndec[i] != nd or not self.st.revisable(i, a, t):
+                continue
+            self.stats["revised"] += 1
+            if self.rev_rng.random() * q[a] > p[a]:
+                r = np.maximum(p - q, 0.0)
+                b = int(self.rev_rng.choice(N_ACT, p=r / r.sum()))
+                self.st.unapply(i, snap[0], snap[1], a, t0)
+                self.st.apply(np.array([i]), np.array([b]), t)
+                self.stats["switched"] += 1
+                self.stats["rev_delay"] += t - t0
+            self.law_sum[c] += p - q
+            self.stats["kl"] -= d
+            self.stats["kl_revised"] += d
+            self.pd[i] -= d
+            if view:
+                self.stats["kl_view"] -= d
+            self._close(i)
 
     def _schedule(self, t):
         if self.policy in ("reference", "surrogate_only"):
@@ -1022,7 +1130,27 @@ class Run:
                 mv = sal_p * e
                 mo = [j for j in np.argsort(-mv, kind="stable") if must[j]]
             order = mo + [j for j in np.argsort(-val) if not must[j] and val[j] >= 0]
+            if self.rev_aware:
+                # an answer also revises the decisions already made at its context: an upcoming request carries their
+                # value (once per context), and a context with only those is asked for itself (cand index -1 - k)
+                rv = (self._revisable_conf(t) if self.value == "confidence"
+                      else self._revisable_value(t, np.ones(self.n) if self.flat else self.salience(t)))
+                for j in mo:
+                    rv.pop(int(xhat[j]), None)
+                for j in order[len(mo):]:
+                    val[j] += rv.pop(int(xhat[j]), 0.0)
+                rc = sorted(rv, key=lambda c: -rv[c])
+                opt = sorted([(val[j], j) for j in order[len(mo):]] + [(rv[c], -1 - k) for k, c in enumerate(rc)],
+                             key=lambda x: -x[0])
+                order = mo + [j for _, j in opt]
             for j in order:
+                if j < 0:
+                    if self.tokens < 1:
+                        break
+                    self.server.submit(-1, rc[-1 - j], t)
+                    self.rehearsing.add(rc[-1 - j])
+                    self.tokens -= 1
+                    continue
                 if not must[j] and self.tokens < 1:
                     break
                 if must[j] and self.max_wait is not None and self.tokens < 1 - self.rate * (self.max_wait + 1):
@@ -1054,7 +1182,26 @@ class Run:
                 self.tokens -= 1
         elif self.policy == "cascade":
             conf = -kl(self.sur(xhat), self.P[xhat]) if self.oracle else self.sur(xhat).max(1)
-            for j in np.argsort(conf, kind="stable"):
+            order = np.argsort(conf, kind="stable")
+            if self.rev_aware:
+                # post hoc baseline: cascade's score (1 - confidence) per decision, summed over the decisions an answer
+                # would serve or revise at its context, as PARITY prices calls by the charges they remove
+                rv = self._revisable_conf(t)
+                val = 1.0 - conf
+                for j in order:
+                    if in_time[j] or self.max_wait is not None:
+                        val[j] += rv.pop(int(xhat[j]), 0.0)
+                rc = sorted(rv, key=lambda c: -rv[c])
+                order = [j for _, j in sorted([(val[j], j) for j in order] + [(rv[c], -1 - k) for k, c in enumerate(rc)],
+                                              key=lambda x: -x[0])]
+            for j in order:
+                if j < 0:
+                    if self.tokens < 1:
+                        break
+                    self.server.submit(-1, rc[-1 - j], t)
+                    self.rehearsing.add(rc[-1 - j])
+                    self.tokens -= 1
+                    continue
                 if self.tokens < 1:
                     break
                 if not in_time[j] and self.max_wait is None:
@@ -1152,7 +1299,15 @@ class Run:
         if here.size == 0:
             return
         occ, cnt = np.unique(st.context(t, here), return_counts=True)
-        for c in self._ahead(t, here, occ, cnt)[:k]:
+        first = []
+        if self.rev_aware:
+            if self.policy == "cascade" or self.value == "confidence":
+                rv = self._revisable_conf(t)
+            else:
+                rv = self._revisable_value(t, np.ones(self.n) if self.flat else self.salience(t))
+            first = sorted(rv, key=lambda c: -rv[c])
+        skip = set(first)
+        for c in (first + [c for c in self._ahead(t, here, occ, cnt) if c not in skip])[:k]:
             self.server.submit(-1, c, t)
             self.rehearsing.add(c)
             self.tokens -= 1
@@ -1247,6 +1402,19 @@ class Run:
                     person_p99=float(np.percentile(r, 99)), person_top1=float(top.mean()), persons=int(r.size),
                     stretch_p90=sq(90), stretch_p99=sq(99), stretch_p999=sq(99.9))
 
+    def _crowd(self):
+        """Record only: per context, the crowd's mean decision law against the model's answer, weighted by decisions:
+        total variation, and KL(model || crowd), which a crowd collapsed onto the model's top answer makes large."""
+        n = self.law_sum.sum(1)
+        k = n > 0
+        if not k.any():
+            return dict(crowd_tv=float("nan"), crowd_fkl=float("nan"))
+        m = np.maximum(self.law_sum[k] / n[k, None], FLOOR)
+        m /= m.sum(1, keepdims=True)
+        p = self.P[np.flatnonzero(k)]
+        w = n[k] / n[k].sum()
+        return dict(crowd_tv=float(w @ (0.5 * np.abs(m - p).sum(1))), crowd_fkl=float(w @ kl(p, m)))
+
     def summary(self):
         s, st = self.stats, self.st
         hours = s["agent_s"] / 3600.0
@@ -1273,8 +1441,10 @@ class Run:
                     stretches=stretches, overflow_frac=overflowed / max(stretches, 1),
                     overflow_unforced_frac=unforced / max(stretches, 1), forced_stretch_frac=with_forced / max(stretches, 1),
                     overflow_if_unforced=unforced / max(stretches - with_forced, 1),
-                    **self._person_tail(),
+                    **self._person_tail(), **self._crowd(),
                     forced_per_agent_h=s["forced"] / max(hours, 1e-9),
+                    revised_per_agent_h=s["revised"] / max(hours, 1e-9), switched_per_agent_h=s["switched"] / max(hours, 1e-9),
+                    rev_delay_s_per_agent_h=s["rev_delay"] / max(hours, 1e-9), kl_revised_per_agent_h=s["kl_revised"] / max(hours, 1e-9),
                     **({} if not isinstance(self.sur, Tempered) else
                        dict(serve_T=self.sur.T, serve_sel=float(np.mean(self.sur.sel)) if self.sur.sel is not None else 1.0)),
                     **st.outcomes())

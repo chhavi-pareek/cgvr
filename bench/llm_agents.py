@@ -139,6 +139,12 @@ def main():
                     help="post hoc (round 8): also PARITY (strict) sharpening only where its kernel says it pays (with --serve sharp)")
     ap.add_argument("--prefetch", nargs="+", type=float, default=None, metavar="SECONDS",
                     help="post hoc (round 8): rehearsal and fill first ask the contexts people will be in at these horizons")
+    ap.add_argument("--revise", type=float, default=None, metavar="SECONDS",
+                    help="post hoc (round 10): every policy's surrogate decisions are revised, exactly, by the model's answer "
+                         "at their context if it lands within this many seconds while the person is still carrying them out")
+    ap.add_argument("--rev-aware", choices=("charge", "ledger"), default=None,
+                    help="post hoc (round 10, with --revise): PARITY prices calls by the charges they would remove, revisions "
+                         "included; also runs cascade pricing them by its own score (cascade/rev-aware)")
     ap.add_argument("--policies", nargs="+", default=None, help="only these conditions (names as printed)")
     ap.add_argument("--base", default=None, help="the condition every other is compared with, seed by seed (default: the first)")
     ap.add_argument("--surrogate", choices=("distilled", "marginal"), default="distilled")
@@ -205,6 +211,11 @@ def main():
         conds.append((f"parity/oracle strict{tag}", dict(full, spill=True, debit=True, strict=True, oracle=True, explore=0.0)))
     if a.oracle:
         conds.append(("cascade/oracle", dict(oracle=True)))
+    if a.revise and a.rev_aware:
+        for i, (name, kw) in enumerate(conds):
+            if name.startswith("parity/risk strict"):
+                conds[i] = (name, dict(kw, rev_aware=True if a.rev_aware == "charge" else "ledger"))
+        conds.append(("cascade/rev-aware", dict(rev_aware=True)))
     if a.cascade_hold and a.max_wait:
         conds.append((f"cascade/wait {a.max_wait[0]:g}", dict(max_wait=a.max_wait[0])))
     if a.policies:
@@ -230,6 +241,8 @@ def main():
         conds[i] = (name, dict(kw, scenario=scn, surrogate=a.surrogate, cache=a.cache, fill=a.fill, tau=a.tau, **extra))
         if a.serve != "fwd" or a.prefetch:
             conds[i][1].update(serve=a.serve, prefetch=a.prefetch)
+        if a.revise:
+            conds[i][1].update(revise=a.revise)
     outk = OUTCOMES[a.scenario]
     rows_out, series = [], {}
     if a.menu:
