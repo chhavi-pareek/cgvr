@@ -395,6 +395,15 @@ class DriftBound:
         return np.array([int(x) in self.exact for x in np.atleast_1d(c)])
 
 
+def revise_draw(rng, q, p, a):
+    """The acceptance step of speculative sampling: keep action a ~ q with probability min(1, p(a)/q(a)), else draw from
+    (p - q)+. The result is distributed as p, and differs from a with probability TV(q, p)."""
+    if rng.random() * q[a] <= p[a]:
+        return a
+    r = np.maximum(p - q, 0.0)
+    return int(rng.choice(len(p), p=r / r.sum()))
+
+
 def sharpen(q, T):
     """q ** (1 / T), renormalised and floored like every served answer."""
     z = np.log(np.atleast_2d(q)) / T
@@ -993,9 +1002,8 @@ class Run:
             if t - t0 > self.revise or self.st.gen[i] != gen or self.ndec[i] != nd or not self.st.revisable(i, a, t):
                 continue
             self.stats["revised"] += 1
-            if self.rev_rng.random() * q[a] > p[a]:
-                r = np.maximum(p - q, 0.0)
-                b = int(self.rev_rng.choice(N_ACT, p=r / r.sum()))
+            b = revise_draw(self.rev_rng, q, p, a)
+            if b != a:
                 self.st.unapply(i, snap[0], snap[1], a, t0)
                 self.st.apply(np.array([i]), np.array([b]), t)
                 self.stats["switched"] += 1

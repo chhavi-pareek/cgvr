@@ -512,3 +512,40 @@ def test_weighted_margin_reduces_to_the_split_conformal_quantile_and_follows_its
             d.res.append(rr); d.res_c.append(ctx); d.res_i.append(d.res_n); d.res_n += 1
     assert loc._wquantile([near], [0.1])[0] < loc._quantile([0.1])[0]      # nearby residuals dominate
     assert old._wquantile([near], [0.2])[0] < old._quantile([0.2])[0]      # recent residuals dominate
+
+
+def test_revision_draw_is_the_models_distribution_and_changes_at_the_tv_rate():
+    from llm.schedule import revise_draw
+    rng = np.random.default_rng(0)
+    for _ in range(3):
+        q = rng.dirichlet(np.ones(N_ACT)); p = rng.dirichlet(np.ones(N_ACT) * 0.5)
+        a = rng.choice(N_ACT, size=60000, p=q)
+        b = np.array([revise_draw(rng, q, p, int(x)) for x in a])
+        assert np.abs(np.bincount(b, minlength=N_ACT) / b.size - p).max() < 0.01
+        assert abs((b != a).mean() - 0.5 * np.abs(q - p).sum()) < 0.01
+
+
+def test_revision_removes_drift_it_revises_and_is_off_by_default():
+    kw = dict(cache=True, fill=True, bound="risk", alpha=0.2, explore=0.5, prune=True, rehearse=0.2, max_wait=30, strict=True,
+              spill=True, debit=True)
+    off = Run(300, "parity", P, LAT, seed=3, **kw).run(300).summary()
+    assert off["revised_per_agent_h"] == 0 and off["kl_revised_per_agent_h"] == 0
+    for pol, extra in (("parity", {}), ("cascade", {}), ("parity", dict(rev_aware=True)), ("cascade", dict(rev_aware=True))):
+        r = Run(300, pol, P, LAT, seed=3, revise=60, **(kw if pol == "parity" else dict(cache=True, fill=True)), **extra).run(300)
+        s = r.summary()
+        assert s["revised_per_agent_h"] > 0 and r.stats["kl"] >= -1e-9
+        assert s["switched_per_agent_h"] <= s["revised_per_agent_h"]
+
+
+def test_unapply_restores_what_the_action_set_and_keeps_what_the_world_changed_since():
+    from llm import museum_mem
+    st = museum_mem.World(50, np.random.default_rng(0))
+    i = 3
+    pre = st.snap(i)
+    st.apply(np.array([i]), np.array([museum_mem.A_BROWSE]), 10)
+    post = st.snap(i)
+    st.persona[i] = (st.persona[i] + 1) % 6          # the world changes a field the action did not set
+    st.unapply(i, pre, post, museum_mem.A_BROWSE, 10)
+    for k in ("zone", "busy_until", "activity", "comp", "mem"):
+        assert getattr(st, k)[i] == pre[k]
+    assert st.persona[i] != pre["persona"]
