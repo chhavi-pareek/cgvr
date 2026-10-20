@@ -571,6 +571,22 @@
     - changes and delay per agent-hour;
     - F+R vs round-10 S+F+R (what sharpening adds with revision).
   - Outputs: `bench/logs/ieee/r11/val_{F,FR}_*`; rules `bench/logs/aci/scripts/r11_rules.py`.
+  - **Round 11 validation results (2026-10-20 18:40; 48/48 jobs, 24/24 settings; `make_tables.py` rev_summary(11)):**
+    - Rules: `r11_rules.py` was never written. The rules were coded as stated above in `IEEE_Access_paper/make_tables.py` rev_summary(11), during the run and before the round 11 summary was first run; unchanged since.
+    - **P1 HOLDS:** each of the 5 policies has lower drift under F+R than F in 24/24, higher in none; median falls PARITY 26%, cascade/reh 22%, cascade 22%, RR 28%, VL 27% (range 7-60%).
+    - **P2 HOLDS (at the threshold):** PARITY F+R is below the best standard baseline in 18/24, significantly above in 4, median ratio 0.69. All 6 that are not below are airport settings: Qwen and Mistral above, Gemma not significant; the best standard baseline there is cascade. Over cap is lower in 6/6 standard-binding settings (museum Qwen, Gemma, Mistral), 16-33x.
+    - **P3 HOLDS:** the cap binds under F+R only in the Gemma museum. PARITY 0.108 / 0.157% vs cascade/reh 0.275 / 0.349% (Holm p 4e-4, 3e-7); C-rev 0.470 / 1.028%.
+    - **P4 HOLDS:** crowd TV is lower under F+R in 24/24 for every policy; median falls 23-29%.
+    - Without prediction:
+      - C-rev's drift is significantly below PARITY's in 20/24, PARITY's in none (median ratio 1.42).
+      - Airport: PARITY F+R is above C-rev in all 8 and above the best other F+R baseline in 6 (Qwen, Gemma, Mistral). Its over cap is 0.006-0.044%, the highest of the three but below 0.05%. With sharpening (round 10) PARITY was below standard there.
+      - Per agent-hour: revised 0.2-10.1, changed 0.06-2.35, delay 1-41 s.
+      - S+F+R (r10) vs F+R (r11), same seeds, per policy (PARITY, C+r, C, RR, VL):
+        - drift significantly lower with sharpening in 14/14/15/15/13 of 24, higher in 0/2/1/1/2; PARITY median -12%; C-rev unchanged;
+        - crowd TV lower in 14/16/15/14/13, higher in 0/2/2/1/4;
+        - museum evacuation W1 lower in 0 of 8 for every policy, higher in 2/1/1/0/1.
+      - Reference inside at the end (seeds 30-59): Qwen 72/132, Llama 16/32, Gemma 28/48, Mistral 410/820. Gemma: every policy leaves 0-2 inside.
+    - Paper: TODOs filled from these numbers (abstract 247 words). main 11 pp, supplement 20 pp, 0 errors, 0 undefined refs. Numbers audit: 2 unmatched (both E_max 9.21). Overlap with the ICIIPC drafts 1.2-1.4%.
 - **Application: Mysore Palace during Dasara (2026-10-05).** The course project is framed on a real
   site: SDG 11.4 and 11.7, a real-time twin of the palace grounds on Jamboo Savari day. The patent
   stays on the system and method. Sourced data, framing and build plan are in
